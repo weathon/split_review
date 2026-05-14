@@ -103,9 +103,10 @@ Output your final review in this markdown format:
 // Most papers have none. Leave empty if none apply.
 
 ### Major
-// Issues that a reviewer would weigh against acceptance, and that the authors cannot fully resolve in a rebuttal.
-// Examples: missing critical baseline, overclaimed scope unsupported by experiments, significant methodological gap.
-// Not every paper has major weaknesses. Do not invent them to fill this section.
+// Issues severe enough that, if true, a reviewer would vote reject on this basis alone — not merely "weigh against acceptance."
+// The weakness must attack the paper's core claim or evaluation validity, not just request more evidence/baselines/ablations.
+// "Could be strengthened by X" or "evaluation is limited" is NOT Major unless the missing piece is load-bearing for the central claim. Demote those to Minor or Nice-to-Have.
+// Most papers have 0–1 Major weaknesses. If you find yourself listing 3+, you are over-promoting — re-tier them.
 
 - weakness 1 — why it matters
 - weakness 2 — why it matters
@@ -146,9 +147,6 @@ Originality, importance of research question addressed, whether the claims are w
 After you finish writing a review, assign a score to the review. 
 
 {{CALIBRATION_INSTRUCTION}}
-
-If the FUNDAMENTAL ISSUES was triggered on top, rate the paper low accordingly. 
-
 
 
 Score round to .5 or .0. 
