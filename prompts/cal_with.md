@@ -26,7 +26,6 @@ Scoring rules:
 - The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
 - Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 
-IMPORTANT: Do NOT be afraid to be harsh/nice if the retrieved anchors support it.
 
 When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
 
