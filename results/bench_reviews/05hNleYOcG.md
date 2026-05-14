@@ -1,95 +1,97 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have a thorough understanding of the paper, the reviewer claims, and the calibration anchors. Let me write the consolidated review.
 
 ---
 
 ## Summary
 
-PLAGUE proposes a plug-and-play, three-phase framework (Planner, Primer, Finisher) for multi-turn LLM jailbreaks that incorporates lifelong learning via a strategy memory bank. The framework decomposes the attack pipeline into modular components, allowing existing attacks (GOAT, Crescendo, ActorBreaker) to be swapped in as sub-modules. Evaluated on HarmBench across five frontier models (o3, o1, Deepseek-R1, Claude Opus 4.1, Llama 3.3 70B), PLAGUE reports state-of-the-art attack success rates, including 81.4% SRE on o3, supported by systematic component-wise ablations.
+PLAGUE is a modular, plug-and-play framework for multi-turn LLM jailbreak attacks that decomposes the attack lifecycle into Planning, Primer, and Finisher phases, augmented with a lifelong-learning memory bank that retrieves successful past strategies. The paper reports strong empirical results across five frontier models (o3, o1, Deepseek-R1, Claude Opus 4.1, Llama 3.3-70B), with systematic ablations isolating the contribution of each component and an efficiency analysis showing low inference overhead.
 
 ## Strengths
 
-- **Modular three-phase decomposition with demonstrated benefits**: The Planner–Primer–Finisher separation is a clean design abstraction. Table 3 shows that adding backtracking, reflection, planning, and strategy retrieval progressively raises SRE on o3 from 0.587 (GOAT alone) to 0.814, with each component contributing measurably. Table 4 further demonstrates modularity by showing how swapping the Finisher from GOAT to Crescendo raises Claude Opus 4.1 performance to 67.3% SRE.
+- **The modular framework is genuinely useful and well-validated.** Table 4 shows that swapping the Finisher from GOAT to Crescendo for Claude Opus 4.1 lifts SRE from 46.5% to 67.3%, and integrating ActorBreaker's planner improves diversity by 15% with negligible ASR degradation. This plug-and-play property is demonstrated, not just claimed.
 
-- **Lifelong strategy learning is novel for multi-turn attacks**: PLAGUE is the first multi-turn attack with a memory bank that stores successful strategies indexed by goal embeddings and retrieves them via cosine similarity (Section 3.3.1, confirmed by Table 1's component comparison). The RSS ablation in Table 3 shows this retrieval adds meaningful gains (+4.1 SRE on o3, +3.4 on Claude Opus 4.1).
+- **The step-by-step ablation (Table 3) is informative and well-structured.** Incrementally adding backtracking, reflection, planning, and strategy retrieval to GOAT shows clear, monotonic improvements (o3 SRE: 0.587 → 0.612 → 0.761 → 0.773 → 0.814), giving the community a clear picture of where the gains come from.
 
-- **Model-specific insights from systematic ablation**: Table 3 reveals that different components matter for different models — reflection drives gains on o3 while backtracking matters most for Claude Opus 4.1. This is a useful contribution for tailored red-teaming.
+- **The efficiency analysis (Table 5) is a practical contribution.** PLAGUE uses roughly the same number of target model calls as Crescendo (~3) and only one planner-phase attacker call while delivering substantially higher ASR. This matters for cost-aware red-teaming.
 
-- **Efficiency on par with lean baselines**: Table 5 demonstrates that PLAGUE's total LLM calls are within ~1 call of GOAT and comparable to Crescendo, while delivering substantially higher ASR, confirming that gains do not come from increased query budget.
+- **The paper evaluates against a comprehensive set of recent baselines** (ActorBreaker, GOAT, Crescendo, AutoDAN-Turbo, X-Teaming, FITD) on the hardest currently available safety-aligned models, including o3 and Claude Opus 4.1, making it one of the more thorough evaluations in this space.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Unvalidated baseline modifications for GOAT**: The paper modifies GOAT by removing attacker history and adding rubric-scorer-based early stopping, claiming "through extensive ablation, we observe negligible impact" of these changes (Section 4, Baselines). These ablations are not reported anywhere in the paper, and without them the reader cannot assess whether the modified GOAT baseline is faithful to the original method's strength. Since GOAT is the strongest baseline on o3 (Table 2), the headline "32.14% improvement" depends critically on this being a fair comparison. This needs to be addressed with reported ablations or a clear justification.
+- **The lifelong-learning memory is built from the test set during evaluation, confounding its claimed benefit.** The memory bank R^(+) is initialized with only two strategies (Section 3.3) and then accumulates strategies from successful attacks *on the same HarmBench test set* during evaluation (Section 3.5). Later test goals thus benefit from information extracted from earlier test goals—an effect that is distinguishable from generalization. The paper includes no cold-start evaluation, no leave-one-goal-out protocol, and no separate development set for memory construction. 
 
-- **Cross-sample information leakage via the strategy memory bank**: The lifelong-learning memory R⁺ accumulates successful attack strategies across the full 200-goal HarmBench dataset during evaluation, and retrieval is based on cosine similarity between goal embeddings (Section 3.3.1). The paper never states that memory is reset per sample or per run. Consequently, an early jailbreak on one goal can inform later attacks on semantically similar goals, meaning the per-sample ASR is not computed under independent conditions. The RSS ablation in Table 3 (+4% SRE on o3, +3.4% on Claude Opus 4.1) indicates this effect is modest and not the sole driver of gains — PLAGUE without RSS still substantially outperforms baselines. Nevertheless, the paper should either (a) reset memory per goal and report those numbers, (b) report results using a strategy set collected from a held-out subset, or (c) explicitly discuss this as a feature rather than treating it as standard evaluation.
+  *Why this matters:* The RSS (Retrieving Successful Strategies) component is presented as a key contribution and is included in the headline Table 2 results. However, the ablation in Table 3 shows that PLAGUE without RSS (GOAT+BT+R+P) already achieves SRE=0.773 on o3, which still substantially beats all baselines (best baseline GOAT: 0.587). So the core claim of SOTA performance survives, but the specific contribution of the lifelong-learning component is not cleanly measured. The authors need to add a cold-start evaluation (memory frozen at initial two strategies) to disentangle the framework's intrinsic performance from test-time adaptation.
 
 ### Minor
 
-- **No budget-scaling comparison for baselines**: Figure 2 shows PLAGUE's ASR scaling from 2 to 8 turns (plateauing at 6), which partially motivates the 6-turn budget. The paper does not provide equivalent scaling curves for any baseline, so the reader cannot assess whether the 6-turn cap differentially penalizes methods that might benefit from more turns (e.g., Crescendo's gradual escalation). A single-point comparison at 6 turns, without showing robustness across budget choices, weakens the strength of the comparison.
+- **The ASR@K protocol is ambiguously described for baselines.** The paper states "We use K=2 for all our experiments" and the table headers read "ASR@2," but the text descriptions for GOAT and Crescendo (Section 4) do not explicitly confirm they were run with K=2 independent attempts and best-of-2 selection. The table headers suggest they were, but the ambiguity should be resolved. This is unlikely to change conclusions given the large performance margins (e.g., PLAGUE 0.814 vs. GOAT 0.587 on o3), but clarity is needed for reproducibility.
 
-- **Ambiguous "improvement factor" phrasing**: The introduction states "improve by a factor of 32.14% for OpenAI's o3" and "by a factor of 40.2% on Claude's Opus 4.1." This phrasing is ambiguous — these are relative improvements (0.587 → 0.814 SRE is ~38.6% relative gain, and 0.48 → 0.673 SRE is ~40.2% relative gain), not multiplicative factors. Clarifying this as relative percentage-point improvement would avoid misinterpretation.
+- **No variance estimates or confidence intervals are reported.** The paper states results are averaged over three runs, but only point estimates are provided. Given the inherent stochasticity of multi-turn attacks and the use of a 200-sample test set, reporting standard deviations would strengthen the trustworthiness of the claimed improvements. This is a standard expectation and feasible to add.
+
+- **The claim of "scaling linearly" (Figure 2 caption) is inaccurate.** The data show performance plateaus at 6 turns and slightly declines at 8 turns—this is saturating, not linear scaling. The text itself acknowledges a "natural plateauing," so the figure caption over-claims.
 
 ### Trivial
 
-- The rubric scorer R's prompts for Planner vs. Finisher phases are described as "slightly modified" (Section 3.2) but deferred to Appendix B.1. Since the appendix is stripped from the submission copy, the reader cannot verify these differences. This is not a substantive flaw but worth noting for completeness.
+- The assertion that removing GOAT's attack history has "negligible" impact (Section 4) is stated without supporting evidence or a control experiment. A brief note quantifying this would improve rigor.
 
 ## Nice-to-Haves
 
-- A quantitative diversity metric (e.g., self-BLEU or embedding dispersion) across generated attack plans would substantiate the paper's claims about "diverse" attacks, which are currently supported only by a brief note about ActorBreaker's planner diversity (Section 5).
-- Running PLAGUE with memory populated from a disjoint goal subset and evaluating on a held-out set would cleanly isolate the lifelong learning benefit from contamination effects.
-- Reporting standard deviations or confidence intervals across the three runs would add statistical rigor, especially for the smaller-margin improvements in Table 3.
+- A cold-start evaluation with the memory frozen at its initial two strategies (no test-time updates) would cleanly separate the framework's intrinsic capability from the memory adaptation effect. This is the single most important experiment to add.
+
+- Reporting ASR as a function of how many prior test goals the memory has seen (e.g., bucketing goals by position in the evaluation order) would help quantify the magnitude of test-time adaptation.
+
+- A control experiment replacing similarity-based retrieval with random retrieval from the memory would clarify whether similarity or mere exposure to additional strategies drives the RSS gain.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution.
 
-- **Harsh Critic Claim: "Cross-sample contamination makes the empirical results untrustworthy / invalidates the paper"**: While the memory contamination concern is real (addressed as a Major weakness above), the harsh critic framed it as fatal and untrustworthy. This is overstated. Table 3 shows that PLAGUE without RSS (GOAT+BT+R+P) achieves 0.773 SRE on o3, already substantially above the GOAT baseline (0.587). The contamination primarily affects the RSS component, which contributes only ~4 additional SRE points. The core architectural gains are not dependent on cross-sample memory.
+1. **Harsh Critic claimed ASR@K is applied unequally and that GOAT/Crescendo were run as one-shot while PLAGUE got K=2.** *Removed because:* The table headers explicitly state "ASR@2" for all methods including baselines, and the paper states "We use K=2 for all our experiments." The harsh critic appears to have misread the ambiguous baseline descriptions as evidence of unequal treatment when the table headers indicate otherwise. Kept as a Minor weakness about ambiguous description, not an actual evaluation flaw.
 
-- **Harsh Critic Claim: "Metric-selection protocol gives PLAGUE an asymmetric advantage"**: The rubric scorer R uses generic criteria (compliance, practicality, detail, relevance — Section 3.2) and is applied uniformly for ASR@K selection across methods. GOAT is explicitly modified to use the same R (Section 4, Baselines). While PLAGUE also uses R internally for reflection/backtracking (which baselines do not), this is part of the method's design, not an evaluation asymmetry. The final judge J is external and independent. This criticism does not hold.
+2. **Harsh Critic claimed "the same variance exists for baselines too" regarding K=2 justification.** *Removed because:* The paper's justification for K=2 ("to counteract the increased variance observed due to a multitude of possible paths in multi-turn conversations") is a reasonable design choice, not an unfair advantage. Whether baselines also have variance is irrelevant to the justification.
 
-- **Strength Finder: "State-of-the-art results on diverse, resistant models" (as an unqualified strength)**: Kept above but qualified. The numbers are strong but the baseline fidelity concerns temper this claim somewhat.
+3. **Harsh Critic claimed the plateau at 6 turns "may reflect memory saturation, not a fundamental property of the attack design."** *Removed because:* This is pure speculation with no evidence. The paper's own explanation (attacker forgetting earlier turns in long contexts, drifting from objective) is at least as plausible.
 
-- **Strength Finder: "Fine-grained rubric-based feedback" as a standalone strength**: Rubric-based scoring is common in LLM red-teaming; this is not a distinctive contribution. Removed as a standalone strength.
+4. **Strength Finder: "The PLAGUE framework achieves state-of-the-art attack success rates."** *Kept but qualified.* The headline numbers are strong but include the potentially contaminated RSS component. However, the non-RSS ablation still beats all baselines.
 
-- **Harsh Critic: "Introduction's conclusion that PLAGUE breaks through with ease is premature"**: This is a tone complaint about confident language ("with ease"), not a substantive weakness. Removed.
-
-- **Harsh Critic: "The abstract presents dramatic claims that the experimental section cannot sustain"**: Generic skepticism. The experimental section does report 81.4% SRE on o3 with systematic ablation support. The claims are ambitious but tied to evidence. Removed.
-
-- **Harsh Critic: "The Crescendo backtracking-count removal and ActorBreaker K=2 limitation are unjustified modifications"**: For Crescendo, the paper follows the official implementation and only removes backtracking counts (a bookkeeping mechanism, not algorithmic). For ActorBreaker, K=2 is a natural budget constraint matching PLAGUE's own K=2. These are reasonable experimental controls. Removed.
-
-- **Strength Finder: "Efficiency comparable to baselines" kept but generic phrasing trimmed.**
-
-- **Strength Finder: "Well-written / clear"**: Removed as generic.
+5. **Strength Finder: "The lifelong learning memory bank with goal-similarity retrieval improves success rates."** *Kept but qualified.* The improvement is real (0.773→0.814 on o3) but is confounded with test-time adaptation. The direction is correct; the magnitude may be inflated.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the ablation results in Table 3 contain an interesting and underexplored finding: the relative importance of different attack components varies substantially across target models. Reflection drives most of the gain on o3 (SRE jumps from 0.612 to 0.761), while backtracking drives it on Claude Opus 4.1 (0.222 → 0.396). This suggests that model-specific safety alignment strategies create qualitatively different vulnerability profiles — o3 may be more susceptible to iterative refinement, while Claude may be more susceptible to context management. This observation has implications beyond PLAGUE, suggesting that red-teaming evaluations should account for model-specific vulnerability taxonomies rather than treating all models as interchangeable targets.
+The most genuinely novel insight from this paper is the decomposition of multi-turn attack success into separable, model-dependent factors: for o3, reflection is the dominant contributor while for Claude Opus 4.1, backtracking matters most (Table 3). This suggests different safety-aligned models have different structural vulnerabilities, and a modular framework that can tailor components per model is practically valuable—different from prior work that treats all models uniformly. Additionally, the finding that planning-driven diversity (integrating ActorBreaker's planner) can be achieved with "negligible degradation in ASR" (Section 5.1) challenges the common assumption that diversity and success rate necessarily trade off.
 
 ## Suggestions
 
-- Report the missing GOAT ablation (with vs. without attacker history, with vs. without rubric-scorer early stopping) to validate baseline fidelity, or cite prior work that establishes these modifications are safe.
-- Add a brief discussion of the memory accumulation design choice: why it is reasonable for a lifelong-learning system, and under what conditions it should vs. should not be reset.
-- Add baseline scaling curves (ASR vs. turn budget for 1-2 representative baselines) to complement Figure 2 and justify the 6-turn choice beyond PLAGUE's own plateau.
-- Clarify the "improvement by a factor of X%" language throughout the paper to avoid ambiguity between relative and absolute gains.
+- The single most important revision is to add a cold-start evaluation: run PLAGUE with only the initial two strategies and no memory updates, and report these numbers alongside the full system. Given that the non-RSS ablation already does something close to this, this should be straightforward.
 
----
+- Clarify in Section 4 whether GOAT, Crescendo, and AutoDAN-Turbo were run with K=2 independent attempts and the same best-of-2 rubric selection as PLAGUE. One sentence per baseline would resolve the ambiguity.
 
-**Anchor comparison:**
+- Add standard deviations to Table 2 and Table 3 (even if computed across the 3 runs or via bootstrapping across the 200 goals).
 
-| Anchor | Path | Avg Human Score | Comparison to PLAGUE |
+- Fix the Figure 2 caption: replace "scales linearly" with "scales with conversation turns" or similar.
+
+## Score and Decision
+
+### Anchor Comparison
+
+| Anchor Paper | Path | Avg Score | Comparison to PLAGUE |
 |---|---|---|---|
-| MAPA | h0lOaeDwF2.md | 2.50 | Much weaker: limited novelty, small-scale evaluation, no frontier models, weaker writing |
-| CoaxChain | 6yCZEruFu9.md | 3.50 | Weaker: engineering contribution with limited novelty, baseline concerns similar but evaluation less comprehensive |
-| GRAF | f9BuANYtJf.md | 4.40 | Closer but weaker: interesting methodology but flawed by response fabrication attacking "illusional" models; PLAGUE's methodology is cleaner and its ablation is more systematic |
-| MultiBreak | uJgfj5EJ2W.md | 4.50 | Different genre (benchmark paper); comparable scores but PLAGUE is an attack method with stronger technical contribution |
-| SEMA | 6eSNG1VNkl.md | 5.00 | Most comparable: SEMA has a clean RL-training methodology, strong transfer results, but evaluates on fewer/smaller models; PLAGUE evaluates on more diverse frontier models (o3, o1, Claude Opus 4.1) with stronger absolute numbers but has baseline fidelity concerns. Roughly comparable quality. |
+| ACCEPT (few-shot jailbreak w/ genetic updating) | B7oQWswV7y.md | 6.50 (Reject) | ACCEPT has cleaner methodology but evaluates on older models and lacks efficiency analysis. PLAGUE has stronger empirical results on harder models but a messier evaluation due to the memory issue. PLAGUE is somewhat weaker. |
+| SEMA (multi-turn jailbreak w/ RL) | 6eSNG1VNkl.md | 5.00 (Accept Poster) | SEMA accepted with missing baselines and incomplete ablations. PLAGUE has better model coverage, stronger ablation, and efficiency analysis, but shares similar evaluation concerns. PLAGUE is slightly stronger. |
+| GRAF (multi-turn jailbreak) | f9BuANYtJf.md | 4.40 (Reject) | GRAF rejected for evaluation issues and novelty concerns. PLAGUE has substantially stronger results, ablation, and model coverage. PLAGUE is clearly stronger. |
+| CoaxChain (multi-turn jailbreak) | 6yCZEruFu9.md | 3.50 (Reject) | Rejected for limited evaluation and cost concerns. PLAGUE is far stronger. |
+| "LLMs Get Lost In Multi-Turn" | VKGTGGcwl6.md | 8.00 (Accept Oral) | Different topic, but sets the bar for methodological rigor. PLAGUE's evaluation cleanliness doesn't match this level. |
+| MultiBreak (benchmark) | uJgfj5EJ2W.md | 4.50 (Reject) | Benchmark paper with different contribution type. PLAGUE's attack contributions are stronger. |
+| AJF (adaptive jailbreak) | bQQkWXYjuy.md | 2.50 (Reject) | Weak results, limited evaluation. PLAGUE is far stronger. |
+| MAPA (multi-turn VLM attack) | h0lOaeDwF2.md | 2.50 (Reject) | Different modality, weak results. PLAGUE is far stronger. |
 
-PLAGUE sits near SEMA (5.00) in contribution and evaluation quality. It has a stronger model suite and better ablation insights, but carries the baseline-modification concern that SEMA avoids. The memory contamination issue is real but modest in impact. Overall, the paper makes a clear contribution with systematic evidence, placing it in the Accept (Poster) range.
+### Scoring Rationale
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+The core strengths—a genuinely modular and well-ablated framework with strong empirical results across five frontier models—are enough to place this paper above the medium-band anchors (SEMA at 5.0, GRAF at 4.40). The framework ablation without RSS (0.773 vs. best baseline 0.587 on o3) cleanly demonstrates SOTA performance independent of the memory concern. The efficiency analysis and plug-and-play validation (Table 4, Table 5) are practical contributions the community will use.
+
+However, the lifelong-learning memory contamination prevents this paper from reaching the high band (6.0+). The RSS component's claimed benefit is confounded with test-time adaptation, and the headline numbers include this confounded component. This is a fixable evaluation design issue—not a fatal flaw—because the non-RSS results already support the core claim. Compared to ACCEPT (6.50), PLAGUE's methodology is less clean; compared to SEMA (5.0), PLAGUE is more thorough and achieves stronger results. A score of 5.5 reflects a solid contribution with one significant but addressable evaluation concern.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

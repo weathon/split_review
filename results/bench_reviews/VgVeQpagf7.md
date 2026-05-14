@@ -1,69 +1,75 @@
-Now I have a solid understanding of the paper and the anchor comparisons. Let me write the final review.
+Now I have a thorough understanding of both the paper and the anchor reviews. Let me write the consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces SPS (Summarize-Privatize-Synthesize) and its enhanced variant SPS+, differentially private dataset distillation algorithms that generate synthetic versions of sensitive image datasets by matching privatized activation statistics from a public pretrained model. SPS+ incorporates multistage clipping and grouped pseudo-classes to dramatically improve performance under strict privacy budgets. The authors demonstrate that their generation-based approach matches or exceeds DP-SGD on CIFAR-10/100 (96.2% at ε=1 on CIFAR-10) while enabling flexible downstream tasks—ensembling, federated learning, and continual learning—without additional privacy cost.
+This paper proposes SPS (Summarize-Privatize-Synthesize) and its enhanced variant SPS+, differentially private dataset distillation algorithms that privatize intermediate activation statistics from a public pre-trained model. SPS+ incorporates multi-stage clipping and grouped pseudo-classes to improve performance in high-privacy regimes. The key result is that SPS+ is the first generation-based DP method to match or exceed DP-SGD accuracy on image classification (CIFAR-10: 96.2% vs 94.8%; CIFAR-100: 76.6% vs 70.3% at ε=1), while offering practical advantages including ensembling, federated learning, and continual learning without additional privacy cost.
 
 ## Strengths
 
-- **Genuine algorithmic contribution combining two fields.** The paper adapts D3S-style activation-statistic matching for the DP setting through several non-trivial modifications: removing the privately-trained model, using class-conditional full-Gaussian statistics with hard labels, random projections for dimensionality control, and noise redistribution between global and per-class statistics. These are individually well-motivated and collectively form a coherent pipeline that has no direct precedent.
+- **First DP synthetic-data method to match DP-SGD on image classification**: On CIFAR-10 at ε=1, even the base SPS method with ensembling (94.9%) outperforms DP-SGD (94.8%), and SPS+ single-model (95.1%) does as well. This is a genuine milestone — prior DP synthetic methods (e.g., Private Evolution at 89.1%) lagged far behind. The CIFAR-100 gap closure from 48.9% (SPS) to 71.0% (SPS+) is substantial.
 
-- **Strong empirical results with practical significance.** SPS+ achieves 96.2% on CIFAR-10 and 76.6% on CIFAR-100 at ε=1 (Table 1), making it the first dataset-generation method to surpass DP-SGD on image classification. The gap between SPS and SPS+ on CIFAR-100 at ε=1 (48.9% → 71.0%) demonstrates that the multistage clipping and grouped pseudo-classes techniques are not cosmetic—they provide dramatic gains precisely where the base method fails.
+- **Practical flexibility demonstrated concretely**: The paper shows that DP synthetic data enables model ensembling, oversized distillation (up to 4× original size), federated learning across partitions, and class-incremental continual learning — all without additional privacy budget. These are genuinely impossible under standard DP-SGD. The federated SPS+ experiment (five parties combining privatized datasets) and continual learning on CIFAR-100 are particularly well-executed.
 
-- **Decoupled privacy enables flexibility that DP-SGD cannot match.** Because the output is a DP synthetic dataset rather than a DP model, the post-processing property permits ensembling, training larger models, using arbitrary optimizers (GSAM), and data reuse across continual and federated learning—all without additional privacy accounting. This flexibility is concretely demonstrated across Sections 5.4–5.6 and is a genuine practical advantage over gradient-based DP training.
+- **Strong out-of-domain results**: On CAMELYON17 (histopathology with domain-mismatched public model), SPS+ achieves 92.6% at ε=8, outperforming DP-SGD (90.5%), DP-Diffusion (91.1%), and Private Evolution (79.6%). This demonstrates robustness to the common real-world challenge of public/private distribution mismatch.
 
-- **Robustness to domain shift.** On CAMELYON17 (histopathology) with a public model pretrained on downsampled ImageNet—a strong domain mismatch—SPS achieves 92.6% at ε=8, outperforming DP-SGD at ε=10 (90.5%) and Private Evolution (79.6%). This suggests the method is not brittle to the quality of the public pretrained model.
+- **Interpretable outputs**: The distilled images evolve from abstract textures to recognizable objects as ε increases (Fig. 4), and FID negatively correlates with downstream accuracy (Fig. 3). This transparency is a genuine advantage over black-box DP model training.
+
+- **Compression efficiency**: The method retains high accuracy with synthetic datasets at only 10% of original size (~1% drop on CIFAR-10), producing compact yet useful representations.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Grouped pseudo-classes (GPC) mechanism is asserted rather than demonstrated.** Section 4.2 claims GPC "only works due to dynamics of optimizing the loss function, specifically the Σ inversion in the KL-divergence, and the eigenvalue clipping of Σ" and states it "does not offer benefits for direct mean estimation." While the SPS→SPS+ gap on CIFAR-100 is large, this conflates the contributions of multistage clipping and GPC. An ablation with multistage clipping only (GPC disabled, using standard class-conditional matching) is absent, leaving the independent contribution of GPC unquantified. The loss-dynamics explanation is stated but not empirically validated or theoretically justified in the main text. This matters because GPC is presented as a key innovation, yet its mechanism remains a black box.
+- **Grouped pseudo-classes (GPC) — the technique enabling the CIFAR-100 headline result — is described too thinly in the main text to be fully evaluated.** Section 4.2 is a single paragraph. The paper states that P > C pseudo-classes are formed as random groups of N_{c/p} real classes, that the noise rate improves from O(C/N) to O(C/(N N_{c/p})), and that the benefit "only works due to dynamics of optimizing the loss function, specifically the Σ inversion in the KL-divergence, and the eigenvalue clipping of Σ." But critical mechanistic questions are left unanswered in the main text: after synthesizing images to match pseudo-class statistics, how are those images assigned original class labels? How is a downstream classifier trained? The paper defers to Appendix A.5, but the core idea needs at minimum a clear conceptual explanation in the main text. Since the CIFAR-100 SPS+ result (71.0% vs 48.9% for SPS) is the largest single improvement and central to the paper's claim of surpassing DP-SGD on multi-class tasks, this presentation gap weakens the paper's self-containedness. The appendix reference exists, so this is addressable in rebuttal, but the current main-text presentation is insufficient.
 
 ### Minor
 
-- **CAMELYON17 comparison uses mismatched privacy budgets.** SPS at ε=8 is compared to DP-SGD at ε=10 (Table 2). While the paper presents this as competitive rather than dominant, and SPS does outperform despite the stricter budget, the mismatch weakens the directness of the comparison. Running or citing DP-SGD at matching ε=8 would strengthen the claim.
+- **No ablation isolating GPC from multi-stage clipping (MC)**. Table 1 shows SPS (no MC, no GPC) vs SPS+ (MC + GPC), but the individual contributions are not separable. An ablation showing MC-only and GPC-only would clarify which component drives the CIFAR-100 improvement and would strengthen confidence in the GPC technique.
 
-- **Limited to small-resolution images.** All experiments are on CIFAR-resolution (32×32) or 64×64 inputs. The paper acknowledges this limitation but does not discuss the specific scalability challenges (e.g., the quadratic growth of covariance matrices with spatial resolution, or the computational cost at higher resolutions). Extending to ImageNet-scale data would substantially increase the paper's impact.
+- **The abstract's headline 96.2% is the WRN-34-10 ensemble result, while the DP-SGD baseline (94.8%) is a single WRN-28-10 model.** The single-model SPS+ WRN-28-10 result (95.1%) still beats DP-SGD, so the core claim holds, but the abstract could mislead readers into overestimating the single-model advantage. The ensemble advantage is a legitimate benefit of the approach, but the framing should make the comparison basis clear.
 
-- **Class-balanced setting only.** The method assumes uniform class priors for synthesis and does not handle class imbalance, which is common in real sensitive datasets (e.g., medical data). The paper acknowledges this in limitations but it does constrain immediate applicability.
+- **The noise-redistribution by √S (Section 3.2.4) is presented without derivation or ablation.** The idea is sensible (upscale per-class statistics before noising to redistribute noise toward the better-estimated global statistics), but readers must take the √S scaling on faith without empirical validation that alternative scalings would perform worse.
 
 ### Trivial
 
-- The phrase "jointly optimize ℒ_SPS over both stages" in Section 4.1 is ambiguous about whether the synthetic dataset is warm-started and refined or optimized under a unified objective across stages.
+- The random projection matrices M_l^G and M_l^C are described as "random" but their distribution (Gaussian? orthogonal?) and how their choice interacts with the noise level is not specified in the main text.
+- The number of synthesis steps and learning-rate schedule for image optimization are omitted from the main text (likely in appendix).
 
 ## Nice-to-Haves
 
-- A direct, like-for-like DP-SGD baseline where the same WRN pretrained on 32×32 ImageNet is fine-tuned with DP-SGD under identical data splits and hyperparameter tuning would make the comparison fully airtight, though the De et al. (2022) baseline already uses comparable public pretraining.
-- Visualizations of failure cases (e.g., synthetic images at very low ε where class distinction collapses) would provide a more complete picture of the privacy–utility trade-off.
+- A runtime/cost analysis (GPU hours per ε) quantified in the main text rather than deferred to the appendix would help practitioners assess the trade-off against DP-SGD. The paper acknowledges this limitation but provides no numbers in the main body.
+
+- Experiments with class-imbalanced data would test a limitation the authors themselves acknowledge. Since real sensitive datasets are often imbalanced, this would strengthen the practical case.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+*These points are flagged to be removed — treat them with caution.*
 
-- **"Uncontrolled comparison to DP-SGD (Structural)"** — Removed. The critic claims the DP-SGD baseline from De et al. (2022) may not use the same public pretrained model. This is factually incorrect. De et al. (2022) is the canonical paper on DP fine-tuning with public pretrained models, and the paper explicitly states its setup is "in line with prior work (De et al., 2022)." The comparison is controlled: both methods use a WRN pretrained on 32×32 ImageNet.
+**Removed: DP-SGD baseline may be outdated (Harsh Critic point 2).** The paper uses De et al. (2022), a well-known SOTA DP-SGD result, with the same pre-training setup, architecture, and privacy parameters. The paper also states that additional comparisons to gradient- and generation-based methods are provided in Section F (stripped by the parser). The critic provides no specific citation of a newer DP-SGD method that would close the gap, and De et al. (2022) remains a standard reference point in this literature.
 
-- **"Privacy analysis of multistage clipping with data-dependent centers (Methodological gap)"** — Removed. The critic demands a rigorous sensitivity bound for each stage when the clipping center depends on previous DP outputs. This is standard DP composition: the sensitivity of a Gaussian mechanism query with L2 clipping is bounded by the clipping norm ‖v‖_max regardless of the clipping center. Each stage is a fresh query to the private dataset with sensitivity bounded by the (possibly different) clipping norm. The M-fold composition under RDP is correctly stated in Theorem 4.1. No special sensitivity argument is needed—the center only affects which vectors get clipped, not the L2 sensitivity of the sum.
+**Removed: Privacy accounting for multi-stage clipping may be incomplete (Harsh Critic point 3).** The critic's concern about data-dependent recentering is fully addressed by DP's post-processing property: the synthetic dataset from stage M is post-processing of the stage-M DP output, and using it to recenter for stage M+1 is a standard application of composition + post-processing. The M-fold composition bound is correct. The concern about effective sensitivity "violating the naïve bound" misunderstands DP composition, which already accounts for worst-case sensitivity at each stage. The random projection distribution specification is a trivial detail, not a privacy concern.
 
-- **"Missing DP-SGD baseline for federated learning that also exploits public pretraining"** — Removed. The paper compares against FedLAP-DP and FedDM, which are established federated DP baselines. The critic's demand for a federated DP-SGD baseline with public pretraining misunderstands that federated DP-SGD is fundamentally an orthogonal paradigm (gradient exchange vs. data exchange), making direct comparison to gradient-based FL methods the appropriate choice. Moreover, the paper's federated experiments are designed to showcase the data-based privacy advantage (asynchronous aggregation), not to claim superiority over all possible FL baselines.
+**Removed: Class imbalance limitation not acknowledged.** The paper explicitly states in Section 6: "In this work we also focused on the simpler class-balanced setting, but future work could study SPS for classes with extreme class imbalance." The critic missed this.
 
-- **"DP-SGD comparison in CAMELYON17 with same public pretrained model"** — Partially removed. The DP-SGD baseline from Ghalebikesabi et al. (2023) at ε=10 already represents a reasonable comparison point. However, the ε mismatch concern is retained as a minor weakness.
+**Removed from strengths: "Effective high-privacy enhancements" as a standalone point.** Already covered by the first strength.
+
+**Removed from strengths: generic framing like "novel and well-motivated."** Too vague.
 
 ## Novel Insights
 
-The paper's most interesting insight is that dataset distillation via activation-statistic matching is uniquely amenable to DP because the privacy cost is concentrated in a single (or few) summarization step(s), unlike gradient-based methods where privacy cost accumulates per iteration. This decoupling between the privacy step and the downstream training creates a fundamentally different privacy–utility trade-off curve. The paper further demonstrates that in this regime, techniques like multistage clipping (borrowed from DP mean estimation) and grouped pseudo-classes (novel to this work) can push generation-based methods past gradient-based methods for the first time in the image domain—a result that opens a genuinely new direction for practical private ML.
+The paper's observation that activation-statistic matching (specifically D3S) is uniquely suited to DP because it requires only a single privatization step — in contrast to iterative methods that would consume privacy budget at every optimization step — is a genuinely useful insight for the field. It identifies *why* this family of dataset distillation methods is the right substrate for DP, rather than just applying DP as an afterthought. The paper also demonstrates empirically that synthetic data from SPS+ generalizes across architectures (WRN-22-8 distillation transfers to WRN-28-10 and WRN-34-10), which is not obvious for statistic-matching methods and has practical implications for private data release.
 
 ## Suggestions
 
-- Add an ablation isolating grouped pseudo-classes from multistage clipping (i.e., SPS+ with MC only, using standard class-conditional matching). This would resolve the major weakness and strengthen the paper's contribution.
-- Clarify the "jointly optimize" phrasing in Section 4.1 to specify whether optimization is warm-started or truly joint across stages.
-- Discuss the computational and statistical challenges of scaling to higher resolutions, even if experiments are left to future work.
+- Move the GPC algorithm description (or at minimum a clear conceptual diagram with the mapping from pseudo-classes to original classes and the downstream training procedure) from Appendix A.5 into the main text. This is essential for self-containedness given the technique's importance.
+
+- Add an ablation table separating MC-only and GPC-only contributions to CIFAR-100 performance, so readers can assess whether GPC is genuinely necessary or whether MC alone accounts for most of the gain.
+
+- Clarify in the abstract and introduction that the 96.2% figure is an ensemble result, while noting that single-model SPS+ (95.1%) still exceeds DP-SGD (94.8%).
+
+- Add a brief justification or ablation for the √S noise-redistribution scaling factor.
 
 ---
 
@@ -71,16 +77,18 @@ The paper's most interesting insight is that dataset distillation via activation
 
 **Anchor comparison:**
 
-| Path | Avg Score | Decision | Comparison |
-|------|-----------|----------|------------|
-| JEkzgeYwIk | 5.50 | Reject | Dataset distillation + visual privacy, but no formal DP guarantees and limited empirical scope. Current paper has formal DP, stronger results, broader applications. |
-| KTlV64bQBm | 4.50 | Reject | DP synthetic text in FL. Weaker baselines, less technical novelty. Current paper has much stronger empirical validation and algorithmic contributions. |
-| V3fEo612nE | 4.00 | Accept Poster | Purely empirical hyperparameter study for DP transfer learning. Current paper has substantial algorithmic novelty in addition to strong experiments. |
-| Fxz0aaGSNY | 4.80 | Reject | Multi-modal dataset distillation with efficiency focus. Good contribution but narrower scope. Current paper addresses a more significant problem with broader impact. |
-| neaxYXGYd5 | 4.50 | Accept Poster | DP + quantization. Solid engineering contribution but limited scope. Current paper makes a larger conceptual contribution. |
-| dfh0RrNbC8 | 3.50 | Reject | DP unlearning study. Substantially weaker in both contribution and empirical validation. |
+| Path | Paper | Avg Score | Comparison |
+|------|-------|-----------|------------|
+| `yBpzF8hp3J` | DP Domain Discovery | 6.50 (Accept Oral) | Stronger theory, narrower scope. Our paper has less theory but broader practical impact and a more important empirical result. Our paper is below this level. |
+| `JEkzgeYwIk` | Visual Privacy in DD | 5.50 (Reject) | Identifies a problem + proposes mitigation. Our paper has a more ambitious contribution (first to beat DP-SGD) with actual DP guarantees. Our paper is above this level. |
+| `VaGvbAgBmd` | TADA | 5.00 (Accept Poster) | Solid augmentation method with good experiments. Our paper's contribution (beating DP-SGD for the first time) is more significant. Our paper is above this level. |
+| `SiqK9UzqNT` | Sim-PE | 4.00 (Reject) | Extension of existing framework, limited novelty. Our paper is clearly above. |
+| `csD5GiGGFc` | Div-PE | 3.50 (Reject) | Fix for PE diversity, missing baselines. Our paper is clearly above. |
+| `tm3K2omGNx` | Gumbel DP | 1.50 (Withdrawn) | Major technical errors. Our paper is clearly above. |
+| `3jufZB6g9A` | DD Utility Boundary | 4.00 (Reject) | Theory-focused DD paper. Our paper has stronger empirical contribution. |
+| `713ywmTZHv` | PE-SGD | 4.00 (Accept Poster) | DP-SGD improvement. Our paper's contribution is more novel. |
 
-The paper under review is clearly stronger than all retrieved anchors. It combines genuine algorithmic novelty (bridging dataset distillation and DP with multiple non-trivial adaptations) with strong empirical results that establish a new state of the art for generation-based private learning. The remaining weaknesses (underexplained GPC mechanism, ε mismatch in one experiment, limited resolution) are addressable and do not undermine the core contribution. This is a solid accept.
+The paper's core contribution — first DP synthetic-data method to match DP-SGD on image classification — is a genuine milestone. The CIFAR-10 results without GPC, the CAMELYON17 domain-shift experiment, and the practical demonstrations (FL, CL, ensembling) are all strong and well-supported. The main weakness is the thin description of GPC in the main text, which is a presentation gap rather than a methodological flaw and is addressable. The paper's contribution exceeds the 5.00-5.50 range but does not reach the 6.50 level of theoretical depth. Score: **6.0**.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>
