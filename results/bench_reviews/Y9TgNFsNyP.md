@@ -1,85 +1,94 @@
+Now I have all the information needed to write the consolidated review. Let me carefully synthesize everything.
+
+---
+
 ## Summary
 
-This paper addresses the previously unexplored problem of machine unlearning for Forward-Forward (FF) trained neural networks. The authors identify that standard gradient-ascent unlearning causes model collapse on FF models due to their sensitivity to parameter tuning and layer-wise training. They propose FF-Erase, which stabilizes unlearning by minimizing KL divergence between the original model's layer-wise goodness vectors and those of a separately obtained "guidance model" trained only on remaining data. They also introduce G-MIA, a novel membership inference attack that leverages FF-specific goodness scores for black-box unlearning verification. Experiments on four datasets and four architectures show FF-Erase matches retraining in G-MIA scores (0.524 vs. 0.532) while being 1.9–3.1× faster, with a 1.6–3.3% test accuracy drop.
+This paper proposes FF-Erase, the first machine unlearning framework specifically designed for Forward-Forward (FF) neural networks, which use layer-wise goodness scores instead of backpropagation. The method employs a guidance model to steer the goodness distributions of forgetting data toward a target distribution via KL-divergence minimization, avoiding the model collapse that occurs when naive gradient ascent is applied to FF models. The paper also proposes G-MIA, a membership inference attack that leverages per-layer goodness vectors for verifying unlearning effectiveness. Experiments across four image datasets and three FF model architectures show that FF-Erase achieves comparable unlearning to retraining while being 1.9–3.1× faster.
 
 ## Strengths
 
-- **First formalization of FF unlearning challenges**: The paper clearly identifies two FF-specific obstacles — sensitivity to parameter tuning (which makes GA collapse) and layer-wise independent training (which complicates the effectiveness–utility trade-off). These are well-motivated in §1 and Appendix A, with empirical validation in §6.3 showing that GA, FYE, SURE, BT, and FATS all either collapse or fail to unlearn on FF models (Figures 5, 10).
-- **G-MIA is a genuinely novel and effective attack for FF models**: Using only layer-wise goodness scores (a standard FF inference output), G-MIA consistently outperforms the black-box final-layer MIA (FL) and even surpasses white-box attacks (GR, GAP, ST) on deeper models like VGG13 on CIFAR-100 (Figure 3). This provides a practical verification tool that does not require access to model parameters or gradients.
-- **Comprehensive experimental coverage**: Evaluation spans four datasets (MNIST, Fashion-MNIST, CIFAR-10, CIFAR-100), four architectures (TinyCNN, AlexNet, VGG13, VGG16), and two FF training variants (CwComp, Deeperforward). The ablation study in §6.4 (Table 1) systematically quantifies the trade-off between guidance-model quality and unlearning performance across different (α₁, α₂) configurations, including a randomly initialized guidance model as a lower bound.
-- **Layer-wise CKA analysis provides interpretable evidence**: Table 3 shows that FF-Erase reduces representational similarity between original and unlearned models across all layers on forgetting data, while baselines like Bad Teacher retain high similarity in shallow/middle layers and GA(λ=10) collapses entirely. This complements the G-MIA evaluation with a structural view of unlearning.
+1. **First to address machine unlearning for Forward-Forward models**: This is a genuine and underexplored gap. The paper correctly identifies why standard gradient-ascent unlearning methods fail for FF models — the layer-wise independent training and sensitivity to parameter tuning cause optimization instability and model collapse (Section 1, Figure 1). The problem formulation is novel and clearly motivated.
+
+2. **Goodness-guided unlearning framework with stable guidance model**: FF-Erase's design is well-motivated. Rather than directly decreasing goodness (which causes collapse), it uses a KL-divergence loss to shift goodness distributions toward a guidance model's distribution (Section 4.1, Equation 5). The ablation study (Table 1) empirically validates this design: a randomly initialized guidance model causes utility collapse (ACCt drops to 55.53%), while properly trained guidance models preserve utility (~80%).
+
+3. **G-MIA leverages FF-specific properties for effective verification**: G-MIA uses layer-wise goodness vectors — which are the natural output of FF models during inference — for membership inference. It consistently outperforms the standard black-box final-layer MIA (FL) across all settings and matches/exceeds white-box attacks on deeper models (Figure 3). The attack is also lightweight (~140–170 inputs vs. 38,657 for the ST baseline, Table 2).
+
+4. **Formal efficiency analysis with tractable speedup**: The paper provides an explicit efficiency model (Equation 9) decomposing unlearning time into guidance model acquisition and goodness decrease phases, with experimental validation showing 1.9–3.1× speedup over retraining while incurring only 1.6–3.3% accuracy degradation.
+
+5. **Comprehensive ablation and layer-wise analysis**: The ablation study (Table 1) systematically explores the efficiency-performance trade-off across multiple guidance model configurations. The CKA analysis (Table 3) provides insight into how different unlearning methods affect representations across layers, showing that FF-Erase produces a more consistent pattern of forgetting than baselines like Bad Teacher.
 
 ## Weaknesses
 
 ### Major
 
-- **Unlearning evaluation relies almost entirely on a self-introduced metric (G-MIA)**: While the paper validates G-MIA against several existing MIAs (§6.1, Figure 3), the ultimate evidence that FF-Erase achieves effective unlearning is that G-MIA accuracy drops close to that of a retrained model (0.524 vs. 0.532). There is no independent calibration — for instance, measuring whether G-MIA can distinguish a retrained-from-scratch oracle from a model trained on all data, or combining G-MIA with a complementary audit (e.g., loss-trajectory MIA adapted to FF outputs). This creates a circularity risk: FF-Erase could be degrading G-MIA's attack signal rather than genuinely erasing membership information, and the paper provides no evidence to rule this out. This is the most substantive concern about the paper's central empirical claim.
-- **CKA analysis reveals higher similarity than retraining at deep layers for FF-Erase variants**: The paper's own Table 3 shows that at layer 7, FF-Erase(D) and FF-Erase(R) have CKA similarities of 0.6168 and 0.6292 respectively, vs. 0.3619 for the retrained model (RE) — both marked with ↑ indicating "ineffective unlearning" by the paper's own criterion (>20% higher than RE). Similar patterns appear at layers 4–6 and 8–12. While the paper attributes this to residual feature retention (§C.2), it does not reconcile this anomaly with the claim of effective layer-wise unlearning, and the discussion (lines 1417–1421) treats these arrows as evidence that "FF-Erase(D) consistently outperforms FF-Erase(R)" without grappling with their divergence from the retrained baseline.
+None.
 
 ### Minor
 
-- **No sensitivity analysis for key hyperparameters K, ε₁, ε₂**: The paper states that the recovery forward interval K and the early-stopping thresholds ε₁, ε₂ are "determined by the dataset" (§4.1) but provides no guidance on how practitioners should set them. Given that the method is presented as practical, this omission limits transferability. A small sensitivity sweep on K would substantially improve the paper.
-- **Evaluation uses only a 20% forget ratio**: All experiments use β = 0.2 (§6). Realistic "right to be forgotten" requests typically involve much smaller forget sets (1–5%). The guidance model strategies (especially mini-retraining on 30% of remaining data) may behave very differently when the remaining data is nearly the full training set. The paper does not test this regime.
-- **No direct comparison to using the guidance model itself as the unlearned model**: The paper convincingly shows that a randomly initialized guidance model is useless (R.G.M in Table 1), but does not report what happens if one simply uses the mini-retrained or fast-distilled model directly as the unlearned model after the same training budget. This would clarify how much value the KL-divergence guidance step adds beyond the guidance model training itself. This is a missing baseline rather than a fatal flaw.
+1. **G-MIA's "black-box" characterization is overstated**: The paper calls G-MIA a "black-box" attack (abstract, Section 5) but the attacker requires per-layer goodness vectors. While the paper correctly notes that FF models naturally output such vectors during inference (Section 3.1), a practical deployment could restrict API access to only the final predictor output. Comparing G-MIA to the standard black-box baseline (FL — final-layer MIA from Shokri et al. 2017) under the same access assumption would be a fairer framing. The paper should explicitly acknowledge that G-MIA assumes more access than the strictest black-box setting and position it as a grey-box or "FF-native" attack. This does not invalidate G-MIA's contribution — it is a useful attack under the access model where goodness vectors are available — but the current framing overclaims its practicality.
+
+2. **Additional baseline comparisons are limited to the appendix on a single setting**: The paper's central claim — that existing unlearning methods are infeasible for FF models — is supported primarily by comparisons against naive gradient ascent (GA) and retraining (RE) in the main text. Additional baselines (BT, FYE, SURE, FATS) are evaluated only in Appendix C.3 on one setting (VGG13, CIFAR-10). While these results are consistent with the paper's claims, having them in the main text or across more settings would strengthen the case.
+
+3. **The analysis of why GA collapses is qualitative**: The paper attributes GA failure to "sensitivity to parameter tuning" and "layer-wise independent training" (Section 1), but does not provide a quantitative analysis (e.g., gradient norm dynamics, goodness distribution trajectories) of the collapse mechanism. This is acceptable for an empirical systems paper, but a deeper investigation would strengthen the motivation.
+
+4. **Evaluation limited to image classification**: The paper only tests on image benchmarks. FF has been applied to graphs and sequences (acknowledged in related work). While image classification is a reasonable starting point, the paper's claims about "FF models" broadly are not fully substantiated beyond vision tasks.
 
 ### Trivial
 
-- The abstract states that FF-Erase is 1.9–3.1× faster than retraining, but this depends on specific (α₁, α₂) choices; the main text (§4.3) appropriately contextualizes this with the 25–35% figure. The abstract could be more precise.
-- G-MIA is described as "strict black-box" (§5), but it requires per-layer goodness vectors which are internal FF-specific outputs, not merely the final prediction. The paper acknowledges this access model in §5 (line 445) but the "strict black-box" label is debatable. This is a terminology issue that does not affect technical correctness.
+- The description of how the fully-connected predictor on top of goodness vectors is trained (Section 3.1) is under-specified. Clarifying whether it uses backpropagation would help readers understand the hybrid nature of the inference pipeline.
 
 ## Nice-to-Haves
 
-- Comparing FF-Erase against an adapted LiRA-style or loss-trajectory-based MIA on the unlearned models would strengthen confidence that the G-MIA reduction reflects genuine unlearning rather than attack degradation.
-- Evaluating with smaller forget-set ratios (1–5%) would demonstrate applicability to realistic RTBF scenarios.
-- A visualization of goodness-vector distributions (e.g., t-SNE or histograms) for forget-set samples before/after unlearning, alongside the guidance model and retrained model, would provide intuitive evidence that the unlearned model's representations genuinely approach a forget-free state.
-- Sensitivity analysis for the recovery interval K and early-stopping thresholds ε₁, ε₂ would improve practical guidance.
+- Test FF-Erase with a guidance model trained on the forgetting data as a control — this would clarify whether ignorance of forgetting data is truly necessary.
+- Show results for multiple forgetting proportions β (e.g., 1%, 5%, 50%) beyond the fixed 20%.
+- Visualize goodness distributions for a few forgetting samples before/after unlearning to illustrate the "goodness shift" mechanism.
+- Compare against retraining on the same computational budget (same time/data fraction) to isolate the benefit of the goodness-shift mechanism beyond simple subsampling.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **CKA misinterpretation claim** (Harsh Critic): The reviewer claimed the paper misinterpreted CKA (saying higher CKA = better). This is incorrect. The paper correctly states that lower CKA = larger difference = more unlearning (lines 1181–1182). The comparison "FF-Erase(D) consistently outperforms FF-Erase(R)" refers to D vs R, where D has lower CKA scores in all layers — meaning more unlearning. The paper's interpretation is consistent with the metric.
 
-1. **"G-MIA is unverified / no independent validation" (from Harsh Critic #1, partially)**: The portion claiming G-MIA is entirely unvalidated is removed because the paper validates G-MIA against multiple existing MIAs (FL, GR, GAP, ST) in §6.1, Figure 3. The retained concern (moved to Major) is the narrower point about circularity in using G-MIA as the primary unlearning metric without calibration against an independent oracle.
+- **Efficiency comparison conflating guidance model with retraining** (Harsh Critic): The reviewer argued that the speedup comes from using fewer data/epochs and is therefore not novel, and that the guidance model's lower accuracy (60–71% vs 81%) invalidates the comparison. This misunderstands the method: the guidance model is not the final unlearned model. The unlearned model from FF-Erase maintains ~79–80% ACCt (Table 1), close to RE's 80.85%. The guidance model is an auxiliary guide, not a replacement for the final model.
 
-2. **"Guidance model strategy makes the speed advantage conceptually uninteresting / just partial retraining" (Harsh Critic #2)**: This criticism is weakened because (a) the guidance model is not the final product — FF-Erase uses it only to steer the original model's unlearning; (b) the paper shows via the R.G.M ablation (Table 1) that a non-functional guidance model leads to catastrophic collapse (55.53% test accuracy), proving the guidance model is a genuine enabler, not a substitute; (c) using the guidance model directly as the unlearned model would yield poor accuracy since it was trained on only 30% data for 50% epochs. The retained concern (moved to Minor) is the missing baseline of directly comparing against the guidance model.
+- **Claim that "first to formalize unlearning for FF models" is narrow** (Harsh Critic): The statement that FF models are "niche" and the problem is a "straightforward application" is an opinion, not an evidence-based criticism. Being first to address a problem is a legitimate contribution regardless of the problem's perceived size.
 
-3. **"Absence of standard unlearning evaluation baselines / LiRA" (Harsh Critic #3)**: The paper does include multiple MIA baselines (FL, GR, GAP, ST) and multiple unlearning baselines (GA with various λ, Bad Teacher, FYE, SURE, FATS — Figures 5, 10 in Appendix). The claim that it uses "only the authors' own MIA" is factually incorrect. LiRA is designed for BP models and relies on loss values; adapting it to FF models is non-trivial and not an obvious missing baseline. Removed as overstatement.
+- **Several other opinion-based or factually incorrect criticisms** from the Harsh Critic (e.g., "the novelty is specifically applying it to goodness scores" — this IS the paper's contribution; "this is obvious" about the R.G.M. ablation — ablation studies are meant to validate obvious-seeming claims; "missing experiment on guidance model trained on forgetting data" — this is a suggestion, not a flaw).
 
-4. **"GA known to be fragile even in BP networks" (Harsh Critic §-by-§)**: The paper's focus is on FF-specific collapse, not general GA fragility. The paper does discuss this in Appendix A. Removed as scope critique.
-
-5. **"Notation unnecessarily heavy" (Harsh Critic §-by-§)**: Pure formatting/style nitpick. Removed per hard rules.
-
-6. **"Fast-distillation may leak information about forget set into guidance model" (Harsh Critic §-by-§)**: The paper trains the fast-distilled guidance model on Dref ⊆ Dremain. The student never sees Dforget during training. The teacher (θo) has seen Dforget, but the distillation objective is evaluated only on Dref samples. This is a reasonable design that addresses the concern. Removed as misunderstanding.
-
-7. **"White-box attack comparison may be confounded" (Harsh Critic §-by-§)**: The paper compares G-MIA against white-box attacks on the same FF models. If white-box attacks perform worse, that is evidence *for* G-MIA's effectiveness, not a fairness issue. Removed as logically backwards.
-
-8. **Missing related works / appendix issues / formatting**: Removed per hard rules.
-
-9. **Strength Finder — "Comprehensive cross-architecture and cross-dataset evaluation" in Supporting strengths**: This was moved to the main Strengths as it is substantive.
+- **Pure formatting/style nitpicks** from the Strength Finder that were generic or lacked specificity.
 
 ## Novel Insights
 
-The observation that FF models' layer-wise goodness scores — originally designed merely as a training objective — serve as unusually informative signals for membership inference (G-MIA outperforming white-box attacks on deeper models) is genuinely novel and not obvious a priori. This suggests that FF's greedy layer-wise training may inadvertently create per-layer memorization signatures that are more accessible to black-box auditors than BP models' internal representations. This insight could generalize beyond unlearning verification to broader privacy analysis of biologically-inspired training algorithms, and may motivate future work on making goodness scores less informative.
+None beyond the paper's own contributions. The reviews do not surface any observation about the paper that the authors themselves have not already made or addressed.
 
 ## Suggestions
 
-- The most impactful improvement would be adding an independent calibration of G-MIA: train shadow models on random data splits, measure G-MIA's ability to distinguish members from non-members for a fully retrained oracle, and report whether the G-MIA gap between FF-Erase and RE is statistically distinguishable. This would directly address the circularity concern.
-- Include a baseline where the mini-retrained or fast-distilled guidance model is used directly as the unlearned model, to isolate the contribution of the KL-divergence guidance step.
-- Add a brief discussion reconciling the higher CKA scores of FF-Erase at deep layers (Table 3, ↑ marks) with the overall unlearning claims. Even a paragraph acknowledging this as a limitation or open question would improve transparency.
-- Report results for a smaller forget-set ratio (e.g., 5%) on at least one dataset to demonstrate real-world applicability.
+1. **Recalibrate G-MIA's threat model language**: Replace "black-box" with more precise terminology (e.g., "FF-native" or "goodness-based") and explicitly discuss what access assumptions are needed for G-MIA to be practical. Even better, compare G-MIA against baselines under matched access conditions.
 
----
+2. **Move the additional baseline comparisons (BT, FYE, SURE, FATS) into the main paper** or at minimum add a summary table covering all settings. This directly addresses the perception that the baseline evaluation is thin.
 
-**Comparison with calibration anchors:**
+3. **Add a quantitative analysis of GA collapse** — even a simple plot of goodness distributions or gradient norms during GA iterations would make the mechanism more concrete.
 
-- **ZfdnZhOP0k (Hubble, avg 7.50, Accept Oral)**: Hubble is an exceptionally polished, large-scale resource contribution with open-source LLMs, extensive memorization studies, and community benchmarks. FF-Erase is much narrower in scope and scale, with a single-domain method and less thorough validation. The gap is substantial.
-- **koKWoKaMrE (Tversky NN, avg 7.00, Accept Poster)**: A creatively novel neural network building block with strong psychological motivation. FF-Erase has comparable originality (first FF unlearning method, novel G-MIA) but less theoretical depth and weaker validation of its central claim.
-- **Vc9yt0YwPw (VT Unlearning Benchmark, avg 5.50, Reject)**: The closest analog — first systematic study of unlearning in a new architecture family. That paper was rejected despite comprehensive benchmarking because findings were limited and algorithmic diversity was narrow. FF-Erase has a novel method (not just a benchmark) but similar evaluation gaps and a narrower scope.
-- **xG0mQ4Xsfm (REM, avg 5.00, Accept Poster)**: A novel unlearning method with a clear taxonomy and strong results. FF-Erase has comparable novelty within its domain but weaker evaluation.
-- **N8AMUF0ZeE (SPARC, avg 4.00, Reject)**: A corrective unlearning method with significant evaluation concerns and conceptual gaps. FF-Erase is stronger — it has a clearer problem motivation, better ablation studies, and a novel verification tool.
-- **WNUDOLYlbh (L2UL, avg 3.00, Reject)**: A learning-based unlearning approach with conceptual circularity issues (needs retrained models to train). FF-Erase does not have this severity of problem.
-- **hvTFoDsgCe (Suppressive Unlearning, avg 2.50, Withdrawn)**: A definition paper with questionable novelty and vacuous bounds. FF-Erase is substantially stronger with real empirical contributions.
+4. **Add a control experiment** testing FF-Erase with a guidance model trained on Dforget (rather than Dremain) to substantiate the claim that the guidance model's ignorance of forgetting data is important.
 
-FF-Erase makes real contributions — first FF unlearning method, novel G-MIA, solid empirical motivation — but the evaluation depends heavily on a self-introduced metric without independent calibration, and the CKA results show anomalies that are not adequately discussed. The paper opens a new sub-area and provides a credible baseline, which is valuable. It is stronger than the rejected 3.0–4.0 papers but does not reach the 6.0+ level of papers with more thorough validation and broader impact. It sits in the 4.5–5.5 range. Given that it has a novel method AND a novel verification tool AND comprehensive experiments, but with a significant evaluation concern (G-MIA circularity), I place it at the border of Accept Poster / Reject.
+5. **Acknowledge the image-classification limitation** in the conclusion and mention extension to other modalities as future work.
+
+## Score and Decision
+
+### Calibration Anchors (from batch retrieval)
+
+| Path | Avg Score | Comparison |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/WNUDOLYlbh.md` | 3.00 | A learning-based unlearning approach with a fundamental circularity flaw. The current paper is substantially stronger — its method is coherent and not circular. |
+| `/home/wg25r/review_agent/human_reviews_2026/PS0YpCMzkb.md` | 2.00 | Purely theoretical evaluation framework with no practical method. The current paper has both a novel method and extensive experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/m3FOf6nKnU.md` | 4.50 | Forget vectors approach — similar level of novelty but with different limitations (performance degradation on retain/test sets). The current paper's unlearning quality is closer to retraining. |
+| `/home/wg25r/review_agent/human_reviews_2026/gsf4Sxjec9.md` | 3.50 | Conformal prediction-based unlearning with questionable definition. The current paper's problem definition is more standard and well-grounded. |
+| `/home/wg25r/review_agent/human_reviews_2026/DqvnwRe1V2.md` | 4.00 | Failed to cite key related work; the current paper's related work is more complete. |
+| `/home/wg25r/review_agent/human_reviews_2026/8N2f6nbeUL.md` | 3.50 | Noisy Scrubber had theory-practice mismatch; the current paper has better alignment between claims and experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/Vc9yt0YwPw.md` | 5.50 | Comprehensive benchmarking with weaker novelty. The current paper has higher novelty (first FF unlearning) but weaker baseline coverage. |
+| `/home/wg25r/review_agent/human_reviews_2026/gSPkuTTWgU.md` | 5.00 | Comprehensive graph unlearning benchmark accepted at ICLR. The current paper is on a more niche architecture but has comparable experimental rigor for a first-effort contribution. |
+
+The paper sits between the weaker papers (avg 3–4, clearly reject) and the stronger benchmarking papers (avg 5–5.5). It has genuine novelty (first to address unlearning for FF models), a soundly designed method, and reasonable experimental validation. Its main weaknesses are overclaimed threat-model language for G-MIA and limited baseline comparisons in the main text. These are addressable weaknesses, not fatal flaws. The paper represents a solid first contribution to a new problem area.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

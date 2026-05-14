@@ -1,33 +1,22 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me synthesize the final review.
-
-**Calibration comparison:**
-- **RegFlow** (6.67): Similar domain (NF-based BGs), new training objective. Solid but simpler theory, good experiments. CMT has richer theory and more systems tested.
-- **Diffusion+CV** (6.50): Novel combination of diffusion samplers + CVs. Integration-focused, limited ML novelty. CMT has stronger theoretical contribution.
-- **Accelerated PT** (4.00): Mixed reviews, incomplete comparisons. CMT clearly stronger.
-- **EWFM** (2.50): Limited novelty, scalability concerns. CMT much stronger.
-- **MintJulep** (3.00): Limited experiments, writing issues. CMT much stronger.
-
-CMT sits clearly in the 6.5–7.5 range — strong theory, comprehensive experiments, minor but real limitations.
+Now I have all the information needed. Let me write the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces Constrained Mass Transport (CMT), a variational framework that constructs intermediate distributions along an annealing path by solving a sequence of problems with trust-region (KL) and entropy-decay constraints. The framework yields analytical forms for intermediates (Propositions 2.1–2.3) and establishes a clean theoretical connection to geometric, tempered, and geometric-tempered annealing paths (Theorem 2.4). The method is instantiated with normalizing flows trained via importance-weighted forward KL and evaluated on molecular Boltzmann generator benchmarks up to the newly introduced ELIL tetrapeptide (d=219). CMT consistently outperforms FAB and TA-BG on sample quality and mode coverage metrics.
+This paper introduces Constrained Mass Transport (CMT), a variational framework for constructing annealing paths to sample from unnormalized Boltzmann distributions of molecular systems. CMT jointly constrains the KL divergence (trust-region) and entropy decay between consecutive intermediate distributions, yielding closed-form optimal densities (Propositions 2.1–2.3) that interpolate between a tractable base and the target. The method is instantiated with normalizing flows and evaluated on four peptide systems (up to d=219, the largest studied without MD samples). CMT achieves 2–3.5× higher effective sample size (ESS) than FAB and TA-BG while avoiding mode collapse, as confirmed by Ramachandran metrics and an ablation study.
 
 ## Strengths
 
-- **Principled theoretical framework tying constrained optimization to annealing paths**: Propositions 2.1–2.3 and Theorem 2.4 rigorously derive that trust-region, entropy, and combined constraints yield geometric, tempered, and geometric-tempered annealing paths respectively. This moves beyond heuristic schedule design and provides an interpretable, adaptive schedule.
+1. **Principled theoretical framework for constrained annealing paths.** Propositions 2.1–2.3 derive closed-form densities for trust-region, entropy, and hybrid constraints via Lagrangian duality, and Theorem 2.4 connects these to geometric, tempered, and geometric-tempered annealing paths. This formalizes heuristic schedule design and is the paper's core intellectual contribution.
 
-- **Strong empirical results across four molecular systems of increasing complexity**: Table 1 shows CMT consistently surpasses FAB and TA-BG on EUBO, ESS, and Ramachandran TV distance. Gains are modest on alanine dipeptide but widen substantially on alanine hexapeptide and ELIL tetrapeptide (e.g., ESS of 29.63% vs. 18.22% for TA-BG on alanine hexapeptide; 7.21% vs. 1.26% on ELIL).
+2. **Consistent and substantial ESS improvements.** On alanine hexapeptide, CMT attains 29.63% ESS vs. 14.55% (FAB) and 18.22% (TA-BG); on ELIL tetrapeptide, 26.06% vs. 7.21% (FAB) and 13.75% (TA-BG) — roughly 2–3.5× higher effective sample size, the primary metric for importance-sampling quality.
 
-- **Convincing ablation demonstrating both constraints are necessary**: Table 3 (Appendix B) and Figures 2–3 show that removing either constraint leads to mode collapse on alanine hexapeptide. The trust-region-only variant achieves competitive metrics but exhibits visible mode collapse in Ramachandran plots (marked with ⋆ in Figure 2d). Only the combined geometric-tempered variant avoids mode collapse while maintaining high ESS. The ablation covers three systems (alanine dipeptide, tetrapeptide, hexapeptide), not just one.
+3. **Ablation study cleanly demonstrates necessity of both constraints.** Figures 2–3 show that removing either constraint leads to mode collapse in Ramachandran plots, whereas the combined geometric-tempered path avoids collapse. This empirically validates the paper's central methodological claim.
 
-- **Adaptive Lagrangian multiplier tuning with negligible overhead**: The dual optimization (Equation 11) automatically determines the annealing pace using Monte Carlo estimates from already-drawn samples. This removes manual schedule tuning and accounts for only ~0.01% of total training time (Appendix D.4).
+4. **Introduction of a larger benchmark.** The ELIL tetrapeptide (d=219) is the largest molecular system studied to date under the setting of learning variational samplers purely from energy evaluations, advancing the difficulty level available to the community.
 
-- **Introduction of the ELIL tetrapeptide benchmark**: At d=219 with complex side-chain interactions, ELIL is the largest and most challenging system studied to date in the purely energy-based Boltzmann generator setting, providing a valuable stress test where performance gaps between methods are most pronounced.
-
-- **Trust-region provides an approximate, dimension-independent bound on inter-step ESS**: Appendix C.3 analytically derives ESS(q_i, q_{i+1}) ≳ 1/(1 + 2ε_tr), explaining why importance-weighted training remains stable across dimensions. This is supported empirically in Figure 6.
+5. **Negligible overhead for dual optimization.** The Lagrangian multiplier optimization accounts for ≈0.01% of total training time (≈53–77 ms per annealing step), making the adaptive schedule essentially free.
 
 ## Weaknesses
 
@@ -35,73 +24,81 @@ This paper introduces Constrained Mass Transport (CMT), a variational framework 
 None.
 
 ### Major
-None.
+
+1. **The claim of "consistently surpassing" is overstated for EUBO/NLL on larger systems.** On alanine hexapeptide, CMT's NLL (−504.51) is between TA-BG (−504.79, best) and FAB (−504.35, worst). Similarly, on the Ram TV metric for ELIL tetrapeptide, TA-BG (2.54×10⁻²) outperforms CMT (3.13×10⁻²). The paper's main strength is in ESS — the headline "2.5× higher effective sample size" is well-supported — but the claim of universal superiority across all metrics is not. The authors should qualify this. (Note: the EUBO definition in the paper is mathematically consistent — EUBO = −𝔼ₚ[log q]; lower is better — so this is not a metric confusion issue; the reviewer's criticism about the arrow direction is algebraically incorrect.)
+
+2. **Computational cost is high and unevenly compared.** CMT uses 400–800 annealing steps with 2,000 gradient steps each (800k–1.6M total gradient steps), while FAB uses only 8–16 intermediate distributions with 25k–50k total gradient steps. Although the paper matches target evaluations across methods, the much larger training budget for CMT makes it unclear whether the improvements come from the constrained framework or simply from more optimization. A controlled experiment using CMT's budget with a simpler geometric schedule would isolate the benefit of the adaptive constraints.
 
 ### Minor
 
-- **No statistical significance testing for pairwise comparisons**: Several reported metrics, particularly on smaller systems (e.g., CMT EUBO −175.00 ± 0.00 vs. TA-BG −174.99 ± 0.00 on alanine dipeptide), show differences that are small relative to standard errors. Bold-facing the best value without significance tests overstates confidence on systems where margins are narrow. This does not undermine the overall trend (gains on larger systems are clearly meaningful), but weakens the claim that CMT "consistently surpasses" baselines across all systems and metrics.
+1. **The entropy-constraint-only solution (Prop. 2.2) is independent of qᵢ, as the paper acknowledges.** The authors correctly note that this can cause instability and that the hybrid constraint resolves it. However, Figure 1 and the surrounding text frame the entropy constraint as preventing "mass teleportation" in a way that could be read as implying it acts sequentially on the previous density, which it does not on its own. The hybrid solution does provide this coupling, but the framing could be sharper.
 
-- **Trust-region-only CMT not compared against TA-BG/FAB in main results**: The ablation study (Table 3, Appendix B) compares CMT variants to each other across three systems but does not place the trust-region-only variant alongside TA-BG and FAB in the main evaluation. While the ablation does show that trust-region-only suffers from mode collapse on alanine hexapeptide (Figure 3), directly reporting trust-region-only vs. TA-BG would more cleanly isolate whether the adaptive schedule or the entropy constraint drives the gains. The existing ablation already demonstrates that both constraints are needed on the systems tested, so this is a completeness issue rather than a threat to the core claim.
+2. **Hyperparameter tuning varies across systems despite claims of robustness.** The entropy bound ε_ent takes different values (0.7, 0.8, 1.4, 1.8), the number of annealing steps varies (200, 200, 400, 800), and buffer sizes differ (500k vs. 1M). While the paper states tuning "only to the first decimal place," the range of configurations suggests more system-specific adjustment than implied.
+
+3. **The ESS bound (Eq. 21) is heuristic for the learned approximations.** The theoretical lower bound ESS ⪆ 1/(1+2ε_tr) applies to the analytical optimal densities qᵢ, not to the learned approximations q̂ᵢ. The paper acknowledges this ("approximate") but does not analyze how approximation error affects the bound.
 
 ### Trivial
-
-- The abstract claims "more than 2.5× higher effective sample size" without specifying which system or baseline pair this factor corresponds to. The factor is present in the data (e.g., CMT vs. FAB or reverse KL on ELIL tetrapeptide) but should be anchored to a concrete entry.
+- The "Tempered AP" arrow in Figure 1 is described as "fails to guarantee sufficient overlap," which is consistent with the text but could be misinterpreted as a negative property of the combined method rather than just the entropy-only variant.
 
 ## Nice-to-Haves
-
-- Quantifying mass teleportation directly (e.g., tracking fraction of mass shifting to near-zero-density regions of the previous intermediate) would provide more direct evidence for the paper's motivating narrative about entropy constraints mitigating mass teleportation. The current evidence is indirect (mode collapse / Ramachandran plots).
-
-- Reporting quantitative results for the non-adaptive schedule experiments described in Appendix B (constant multiplier and TA-BG with more steps) as a short table rather than qualitative descriptions would strengthen the adaptivity claim.
-
-- Ramachandran plots for the trust-region-only variant on systems beyond alanine hexapeptide would give a fuller visual picture of where and why the entropy constraint matters.
-
-- Systematic re-tuning of TA-BG's temperature schedule under the increased computational budget would further bolster the fairness of the comparison, though the authors did increase TA-BG's total target evaluations and gradient steps to match CMT, and TA-BG already uses geometric temperature sequences tuned per system (Appendix D.5, Tables 12–13).
+- An experiment comparing CMT to a trust-region-only variant with the same high number of annealing steps (to verify that the entropy constraint adds benefit beyond more compute).
+- A plot of ESS(q̂ᵢ, q̂ᵢ₊₁) across annealing steps to validate whether the trust-region bound transfers to learned approximations.
+- A sensitivity analysis for the number of annealing steps on a single system, showing the trade-off between steps and final performance.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviews are removed with justification:
 
-- **"Ablation only on a single system"**: The harsh critic claimed the ablation study on constraints is presented "only on a single system." This is incorrect — Table 3 in Appendix B reports the ablation across three systems (alanine dipeptide, tetrapeptide, hexapeptide). The Ramachandran visualizations (Figures 2–3) focus on alanine hexapeptide, but the quantitative ablation is broader. Removed as factually wrong.
+- **EUBO metric confusion (Harsh Critic's Critical Issue #2):** The reviewer claims that lower (more negative) EUBO is "worse" and that the arrow direction is inconsistent. This is factually wrong. The paper defines EUBO = −𝔼ₚ[log q]. More negative EUBO means 𝔼ₚ[log q] is higher (the model assigns higher log-density to ground-truth samples), which is *better* for forward KL. The ↓ arrow is correct. D_KL(p‖q) = EUBO − log Z − H(p), and the constants depend only on p, so minimizing EUBO minimizes the forward KL.
 
-- **"Non-adaptive schedule experiments — no numerical results are reported"**: The harsh critic claimed these experiments are "described qualitatively but no numerical results are reported." While it is true that the results are qualitative, the paper explicitly describes the outcomes ("performs significantly worse," "training becomes unstable and exhibits substantial mode collapse"). This is a reasonable but mild presentation limitation, not an evidential gap severe enough to list as a standalone weakness. Moved to Nice-to-Haves.
+- **Entropy constraint "contradicting" claimed benefits (Harsh Critic's Critical Issue #1, partial):** The paper explicitly acknowledges (lines 255–263) that the entropy-only solution is independent of qᵢ and can cause instability, and states that the hybrid constraint resolves this. The reviewer's claim that the paper "does not reconcile it" ignores this passage.
 
-- **Formatting/style concerns about ESS comparison between CMT and reverse KL**: The harsh critic noted that the paper qualifies ESS for reverse KL but not for CMT vs. FAB/TA-BG. The paper states that ESS values for reverse KL are excluded from the bold-faced comparison because reverse KL suffers from mode collapse, making ESS misleading. This concern about CMT vs. FAB/TA-BG ESS comparison is not actually raised in the paper — the paper explicitly notes "Reverse KL is prone to mode collapse, which makes ESS values not directly comparable" (Table 1 caption). All other methods are trained without mode collapse on the evaluated systems, so the distinction is appropriate. Removed as a strawman.
+- **Tempered annealing path "not a transport path" claim:** Theorem 2.4 and the paper's framing clearly distinguish the three paths (geometric, tempered, geometric-tempered). The main method uses the hybrid path (9), where qᵢ appears in the exponent. The critique about the entropy-only path being "not a transport path" is correct but already discussed as a limitation by the authors.
 
-- **Formatting nitpicks about Slater condition mention**: The harsh critic suggested the paper "could mention the necessary Slater condition more explicitly in the main text." This is a pure presentation nitpick about an appendix-deferred detail. Removed.
+- **"FAB uses far fewer gradient steps" as a fairness issue:** The paper standardizes on target evaluations, not gradient steps. CMT and TA-BG use comparable budgets. This is a deliberate choice to match the practical bottleneck (energy evaluations), and the paper discusses it.
 
-- **Missing ablation demand for ESS bound testing**: The harsh critic suggested the trust-region importance-weight variance bound "should be tested more thoroughly in the experiments." The paper does test this in Figure 6 (Appendix B) across different system sizes and trust-region bounds. Removed as already addressed.
+- **Generic weaknesses about missing analyses (the reviewer's "Missing Experiments" list):** These are suggestions, not weaknesses. They do not undermine any supported claim.
 
-- **"The paper does not analyse why ELIL is harder than alanine oligopeptides beyond higher dimensionality"**: The paper states ELIL "contains more complex side chain interactions compared to the alanine hexapeptide" (Section 5.1). This is an explicit explanation. Removed as already addressed.
+- **Strength Finder generic strengths** (e.g., "open-source implementation," "negligible computational overhead"): These are retained where specific, moved here when generic.
+
+- **"Section-by-Section Notes" about circular dependency in dual optimization:** The paper explains that the dual is optimized using the same buffer that trains the flow, and notes that the cost is negligible. The reviewer's concern about bias is not substantiated with evidence that it harms results.
+
+- **"Brent and L-BFGS-B" concern:** Using standard convex optimizers for a convex dual problem with Monte Carlo noise is standard practice. The paper provides empirical evidence (Table 8) that optimization is fast and stable.
 
 ## Novel Insights
 
-The paper establishes a clean formal equivalence between sequences of constrained variational optimization problems (trust-region, entropy, and their combination) and specific annealing path families (geometric, tempered, geometric-tempered). This connection — while building on known ideas from RL trust-region methods and entropy regularization — provides a unified variational interpretation of annealing that had not been articulated before. The insight that entropy-constrained optimization yields a tempered path (Proposition 2.2, Theorem 2.4), distinct from geometric annealing, and that combining both constraints yields a geometric-tempered path that inherits the strengths of both (overlap preservation from trust-region, mode-collapse prevention from entropy decay control), is genuinely novel and well-supported.
+The most interesting observation emerging from the reviews is the contrast between the theoretical and empirical status of the entropy constraint. Theoretically, the entropy-only solution is independent of qᵢ and thus provides no sequential transport structure by itself — it is merely a tempered target. However, the ablation study (Figure 2a) shows that the entropy-constrained training *does* empirically produce a linear entropy decay, suggesting the learning process (importance-weighted forward KL fitting with normalizing flows) effectively couples the steps even where the analytical solution does not. The trust-region constraint provides the missing analytical coupling, but the empirical entropy decay may also be partially enforced by the optimization dynamics rather than the analytical form. This gap between the analytical optimal densities and the learned approximations is underexplored and could be a fruitful direction for future work.
 
 ## Suggestions
 
-- Add a column for the trust-region-only CMT variant in Table 1 (or at minimum report its TA-BG/FAB comparison on the largest system) to fully isolate the entropy constraint's contribution.
-- Report confidence intervals or note where pairwise differences are within one standard error on Table 1, particularly for alanine dipeptide where margins are narrow, to avoid overclaiming.
-- Anchor the "2.5×" claim in the abstract to a specific system–baseline pair.
-- Consider a future version that directly tracks a mass-teleportation metric (overlap fraction between successive intermediates) to quantitatively validate the motivating narrative.
+1. **Clarify the EUBO definition explicitly in the main text** (not just the appendix) with the equation EUBO = −𝔼ₚ[log q], and state that lower is better because it corresponds to lower forward KL. This preempts confusion.
+
+2. **Tone down the "consistently surpasses" language.** A more precise claim would be "CMT achieves substantially higher ESS (2–3.5×) than prior methods while matching or improving on other metrics on most systems."
+
+3. **Add an experiment comparing CMT with a high-budget trust-region-only baseline** (geometric annealing with many steps) on one system to empirically isolate the benefit of the entropy constraint beyond just having more compute.
+
+4. **Report the empirical ESS between consecutive learned approximations** (not just analytical) to validate whether the trust-region bound transfers.
+
+5. **Reconcile the EUBO/NLL bolding in Tables 1–2** so that the best method per metric is clearly and consistently indicated, especially for systems where CMT is not the absolute best on forward metrics.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors (all results returned by calibration_search):**
 
-| Path | Avg Score | Comparison to CMT |
-|------|-----------|-------------------|
-| `ctdnzPxDI3.md` (RegFlow) | 6.67 | Similar domain. CMT has richer theory (constrained optimization → annealing paths), more systems tested (4 vs. 3), and introduces a new benchmark. CMT slightly stronger. |
-| `1bJN1EQByS.md` (Diffusion+CV) | 6.50 | Novel integration but weaker ML contribution. CMT has stronger theoretical depth. Comparable overall. |
-| `96fJALwotm.md` (Complexity Analysis) | 5.50 | Theory paper on AIS complexity. Different genre. CMT more empirical. |
-| `JAOOOgzVUl.md` (Training Trajectory) | 5.50 | Clever idea but narrower scope. CMT more complete. |
-| `CODnlyYUli.md` (Accelerated PT) | 4.00 | Mixed reviews, incomplete comparisons. CMT clearly stronger. |
-| `S1JJyWg1VG.md` (Data-to-Energy) | 5.00 | Theoretical bridge paper, different focus. |
-| `hHfUwjl3hF.md` (Neural Flow Shortcut) | 3.50 | Scalability/estimation concerns. CMT much stronger. |
-| `5Gtd4LOOZx.md` (EWFM) | 2.50 | Limited novelty, scalability concerns. CMT much stronger. |
-| `gqIv1sduP3.md` (MintJulep) | 3.00 | Limited experiments, writing issues. CMT much stronger. |
-| `tT7CXL3I9C.md` (Tilt Matching) | 3.00 | Different approach, theoretical concerns. CMT much stronger. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| /home/wg25r/review_agent/human_reviews_2026/ctdnzPxDI3.md (RegFlow) | 6.67 | Accepted. Similar Boltzmann generator topic. CMT has stronger theoretical novelty (constrained optimization framework) and experiments on larger systems, but RegFlow has a cleaner empirical story. Comparable quality. |
+| /home/wg25r/review_agent/human_reviews_2026/1bJN1EQByS.md (WT-ASBS) | 6.50 | Accepted. Both papers address mode collapse in molecular sampling. CMT has more novel theory; WT-ASBS has more practical focus. Comparable. |
+| /home/wg25r/review_agent/human_reviews_2026/hHfUwjl3hF.md (Neural Flow Samplers) | 3.50 | Withdrawn/reject. Much weaker empirical results and less clear contribution. CMT is substantially stronger. |
+| /home/wg25r/review_agent/human_reviews_2026/gqIv1sduP3.md (MintJulep) | 3.00 | Reject. Limited experiments (only alanine dipeptide), unclear writing. CMT is clearly stronger. |
+| /home/wg25r/review_agent/human_reviews_2026/5Gtd4LOOZx.md (EWFM) | 2.50 | Reject. Limited novelty (importance-weighted flow matching), weak baselines, moderate results on small systems. CMT has stronger theory and better results on larger systems. |
+| /home/wg25r/review_agent/human_reviews_2026/RCVwpJEhpc.md (Constrained Generative Optimization) | 4.00 | Reject. Different domain but similar "constrained optimization" framing. CMT has cleaner theoretical derivation and stronger empirical validation. |
+| /home/wg25r/review_agent/human_reviews_2026/1RXOAEAG7C.md (Torsional-GFN) | 4.00 | Reject. GFlowNet-based, smaller systems. CMT tackles harder problems with more general framework. |
+| /home/wg25r/review_agent/human_reviews_2026/Ahdsg2nkNH.md (Multilevel Control Functional) | 8.00 | Accept. Different topic but high-quality theory + experiments. CMT is not at this level — the theory is solid but the empirical evaluation has gaps. |
 
-CMT compares favorably to the high-scoring anchors (RegFlow at 6.67, Diffusion+CV at 6.50) — it has stronger theory than both and more comprehensive experiments. The minor limitations (no significance tests, trust-region-only not compared against baselines) are real but do not threaten the core claims. The paper's theoretical contribution is clean and novel, the empirical results are convincing on the larger systems where differences matter most, and the ablation effectively demonstrates both constraints are necessary. 
+CMT sits between the accepted papers (6.5–6.67) and the rejected ones (2.5–4.0). Its theoretical contribution is stronger than most Boltzmann generator papers, but the experimental evaluation has minor overclaiming and uneven comparison issues that prevent it from reaching the 6.5+ tier. It is clearly above the reject-level papers in both theoretical depth and experimental scope.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Score: 6.0**
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

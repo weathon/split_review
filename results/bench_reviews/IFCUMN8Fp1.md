@@ -1,91 +1,97 @@
-Now I have a thorough understanding of the paper and the anchor papers. Let me compose the final consolidated review.
-
----
+Now I have sufficient context. Let me write the final consolidated review.
 
 ## Summary
 
-This paper presents a method for learning explicit transition and observation matrices of discrete POMDPs from action-observation sequences collected under a uniform random exploration policy. The key idea is to first learn a Predictive State Representation (PSR) via spectral decomposition of a Hankel matrix, then apply a tensor-decomposition-based joint diagonalization procedure to recover the unknown similarity transform that obscures explicit likelihoods in standard PSRs. The method recovers transition and observation parameters up to a *full-rank observability partition* — states that share identical observation distributions across all full-rank actions are grouped together. Theorem 1 formally characterizes this recoverable structure. Experiments on Tiger, T-Maze, and Sense-Float-Reset show that the learned partition-level models support planning performance comparable to PSRs, and reward-specification experiments on hallway domains demonstrate the practical value of having explicit observation likelihoods.
+This paper bridges Predictive State Representations (PSRs) and tensor-decomposition methods to learn discrete POMDP parameters (transition and observation matrices) from action-observation sequences. The key theoretical contribution relaxes prior tensor methods' requirement that every action have state-distinct observation distributions, instead recovering parameters up to a "full-rank observability partition" — aggregates of states that share observation distributions across all full-rank actions. Experiments on Tiger, T-Maze, and Sense-Float-Reset show convergence of estimated parameters, and a reward-specification study on small custom hallway domains demonstrates a case where explicit likelihoods enable planning behavior not achievable with PSRs alone.
 
 ## Strengths
 
-- **Novel theoretical unification of PSR learning and tensor decomposition.** Theorem 1 provides a formal characterization of what is recoverable (transitions and observations up to a partition of states with identical observation distributions across full-rank actions), going beyond prior tensor methods that require per-action observation uniqueness (Azizzadenesheli et al., 2016; Guo et al., 2016). Lemma 1 and the joint diagonalization via random sums (Eq. 18) provide a clean mechanism for aggregating information across all full-rank actions simultaneously.
+- **Relaxes a genuine restriction of prior tensor-based POMDP learning.** Prior work (Azizzadenesheli et al., 2016; Guo et al., 2016) requires each action's observation distribution to be state-distinct. This paper weakens that to requiring distinct observation distributions only when *aggregated across all full-rank actions* (Theorem 1). This is a meaningful theoretical generalization, and the proof structure (Lemma 1 → Lemma 4 → Theorem 1) is logically coherent and technically sound.
 
-- **Empirically validated planning performance.** Across Tiger, T-Maze, and Sense-Float-Reset, PO-UCT planning with the learned partition-level models yields total rewards statistically indistinguishable from planning with PSRs or ground-truth models (Figure 3, row 4). This demonstrates that the partition-level abstraction is sufficient for effective planning.
+- **Establishes a novel connection between PSRs and explicit parameter recovery.** The paper proves that the similarity transform needed to convert a linear PSR into explicit state-transition and observation matrices can be estimated from the PSR itself via joint diagonalization of matrices derived from full-rank actions (Eq. 18, Lemma 1). This connection between two previously separate traditions (spectral PSR learning and tensor decomposition) is non-trivial and well-supported by the proofs in Appendix A.
 
-- **Demonstrated practical benefit of explicit likelihoods.** The reward-specification experiments (Figure 4) show that having access to explicit observation matrices enables reward assignment based on hidden state, which outperforms observation-only reward assignment in the noisy hallway domain — a capability PSRs cannot provide without relearning.
+- **Convergence to ground-truth parameters is empirically demonstrated.** Figure 3 shows that the estimated observation and partition-level transition errors (L₁ norm) decrease with more data and approach zero across three benchmark POMDPs, while EM consistently fails to recover correct likelihoods. State-count estimation also converges.
 
-- **Well-grounded modeling assumptions.** Section 4.1.1 and Proposition 2 connect the full-rank transition assumption to realistic robot manipulation models (e.g., actions with failure probabilities modeled as convex combinations of desired transitions and self-loops), and ergodicity is supported by passive sensing actions common in robotics.
+- **Honest about the fundamental limitation.** Theorem 1 precisely characterizes what can and cannot be recovered (the full-rank observability partition). The paper does not overclaim — it identifies the partition as the fundamental ambiguity and Theorem 1 is correctly stated.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Theoretical-practical gap in the similarity transform construction.** Theorem 1 and its proof (Appendix A.5) require a random block-diagonal rotation matrix \(R\) whose blocks align with the full-rank observability partition. The experimental implementation, however, applies a fully dense random rotation \(R'\) to the SVD factors before computing the PSR and then sets \(R = I\) (Appendix B.1, lines 1724-1728). The paper acknowledges this simplification but provides no analysis of whether the resulting transform \(\tilde{P} = P' \cdot \text{diag}(P'^{-1} m_\infty)\) still satisfies the guarantees of Theorem 1. The proof in A.5 relies on the block-diagonal structure of \(R\) to guarantee that entries of \(R^T Q^{-1} \mathbf{1}\) are nonzero almost surely, which ensures invertibility of the diagonal scaling matrix. Without this guarantee, the construction could fail in edge cases. That the method works empirically is encouraging but does not close the theoretical gap. This weakens the paper's claim that the experimental results are grounded in Theorem 1.
+- **The empirical case for the method's main advantage (reward specification via explicit likelihoods) is weak and limited in scale.** The reward-specification experiments (Figure 4) are conducted only on two custom 3-state hallway domains, and the two domains tell opposite stories:
+  - In the *directional* domain (where observation-based rewards suffice), the state-based strategy (the claimed advantage) "performs poorly due to slow convergence of transition matrices."
+  - In the *noisy* domain (where state-based rewards are genuinely needed), the approach requires 10⁷ interactions to begin approaching ground-truth performance, and the advantage over the observation-based baseline emerges only at the highest data regime.
+  
+  Moreover, both hallway domains are explicitly designed to be *fully recoverable* by the method (Appendix C.5.3: "It is important to note that these domains are fully-recoverable by our algorithm"). This means the experiments never test reward specification under the very condition the paper identifies as the core challenge — nontrivial full-rank observability partitions. The motivating examples (locking mechanisms, Sense-Float-Reset) belong precisely to this case. Testing reward specification on a domain like Sense-Float-Reset with a nontrivial partition would be necessary to substantiate the claim that partition-level parameters enable meaningful reward specification.
+
+- **The method's sample complexity is a practical concern that is not adequately addressed.** The noisy-hallway reward specification requires 10⁷ interactions to work well. The sensitivity analysis (Tables 2–4) reveals that for T-Maze with 14 states, *no* parameter setting reliably succeeds at state-count estimation. The paper does not hypothesize why — whether this is a fundamental signal-to-noise ratio limitation, an observability-length issue, or a rank-estimation problem. Given that the method scales exponentially in the observability length (Appendix B.2: O(|S|·(|A||O|)^{2(n_obs+1)})), this creates a serious practical ceiling: the method is effectively feasible only for POMDPs with very small state spaces and short-range dependencies.
+
+- **Figure 3's presentation conflates two different evaluation regimes.** The L₁ errors for observation and transition matrices are reported only for runs where the estimated number of states matches the ground truth (a selection bias that the caption acknowledges but does not correct). The planning performance (row 4) is reported for *all* runs, including those where state-count estimation failed. Disaggregating planning performance by whether state-count estimation succeeded would clarify whether the method's planning utility depends on first getting the state count right — if planning is robust to state-count errors, that is a positive result; if it degrades sharply, it underscores the importance of rank estimation.
 
 ### Minor
 
-- **Reward-specification experiments limited to fully recoverable domains.** The claim that explicit observation/transition likelihoods enable post-hoc reward specification is demonstrated only on the noisy hallway and directional hallway domains, where the method recovers the full POMDP (singleton partitions). It is not shown whether partition-level models (e.g., from Sense-Float-Reset, which has a nontrivial observability partition) can support meaningful reward specification. This is the hard case that differentiates the method from prior work, and the empirical case for the method's main practical advantage remains incomplete for that setting.
+- **Sensitivity analysis shows severe degradation on larger problems, with no explanation.** Tables 2–4 show that for T-Maze beyond ~6 states, very few parameter settings yield correct state-count estimates, and for 14 states the method entirely fails. Is this an observability-length issue (the Hankel size is too small)? A signal-to-noise issue? A fundamental limitation of spectral methods for larger state spaces? The paper should offer some hypothesis and diagnostic evidence (e.g., the singular value gap as a function of state count).
 
-- **Missing empirical comparison with prior tensor-decomposition methods.** The paper claims improved generality over Azizzadenesheli et al. (2016) and Guo et al. (2016) by aggregating observations from all full-rank actions rather than processing actions independently. This is a genuine theoretical advantage, but no empirical comparison is provided on domains where both approaches are applicable (e.g., Tiger). Such a comparison would strengthen the claim and help readers understand trade-offs.
+- **The reward-specification experiments would benefit from analyzing convergence rates.** The paper notes (Appendix C.4) that "accurate transitions are required to correctly assign reward to the desired goal state" and that the method's transition estimates converge more slowly than the PSR's predictions because the eigendecomposition adds an extra layer of estimation error. A plot of transition-matrix L₁ error vs. planning reward for the hallway domains would help link the two.
 
-- **Transition error curves conditionally truncated.** Row 3 of Figure 3 reports transition matrix error only when the estimated number of states matches the ground truth. The paper is transparent about this (the caption acknowledges it), and the number-of-states curves (Row 1) already show when estimation succeeds. However, this conditional reporting means the transition-error metric does not reflect failure cases where the state count is misestimated — a limitation readers should be aware of when interpreting convergence.
-
-- **Parameter sensitivity acknowledged but not fully resolved.** The algorithm requires three thresholds (SVD reciprocal condition number, minimum singular value for full-rank detection, observation similarity for partition detection). The sensitivity analysis in Appendix C.2 shows that these parameters influence results, and the paper notes that larger Hankel matrices ease parameter selection. However, the lack of an automated selection procedure is a practical barrier to reproducibility and deployment. This is mitigated by the paper's honest discussion and the fact that threshold-dependence is a known challenge for spectral methods generally.
+- **Selection bias in Figure 3's L₁ error reporting.** As the caption notes, transition error curves are truncated because they are only reported when the state count matches ground truth. This means the curves show performance on the most favorable subset of runs. The paper should report, at minimum, the fraction of runs that are excluded at each data size.
 
 ### Trivial
 
-None.
+- The abstract states "Our experiments suggest that these partition-level transition models learned by our method, with a sufficient amount of data, meets the performance of PSRs" — there is a subject-verb agreement error ("models... meets").
 
 ## Nice-to-Haves
 
-- Extending the reward-specification experiments to a domain with nontrivial full-rank observability partitions (e.g., Sense-Float-Reset) would compellingly demonstrate the method's value in the regime where prior tensor methods fail.
+- **Visualizing what partition-level parameters look like for a nontrivial case.** Figure 8 shows a learned Tiger model (full recovery). Showing a learned model for Sense-Float-Reset (where only partition-level recovery is possible) would help readers visualize what the algorithm actually outputs and how partition-level transitions are interpreted.
 
-- A formal justification (or theorem) showing that the dense-rotation shortcut used in experiments preserves the partition-level recovery guarantees of Theorem 1, or a modification of the experiments to use the theoretically correct block-diagonal construction, would close the most significant gap in the paper.
+- **Adaptive stopping for data collection.** The paper uses predetermined data sizes. Monitoring convergence of the Hankel matrix's singular values to stop data collection adaptively would be a practical improvement.
+
+- **Singular value spectrum plots.** Plotting the singular value spectrum of the empirical Hankel matrix as a function of data size would help build intuition for why rank estimation succeeds or fails.
+
+- **Handling mixed full-rank and singular actions.** The paper currently filters out singular actions entirely. A discussion of whether singular actions can still inform partition identification would strengthen the paper's treatment of realistic POMDPs.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged but are inaccurate, confused, or fall under the removal rules:
 
-- **Harsh Critic Point 3 (Missing comparison with prior tensor methods) was rated as "evidential" in the original critique with a demand that would seem to imply the paper's contribution is unsupported without it.** The paper's contribution is theoretical generality — the method works on a broader class of POMDPs than Azizzadenesheli et al. (2016) and Guo et al. (2016). An empirical comparison on domains where both are applicable (e.g., Tiger) would be valuable validation but is not necessary to establish the theoretical advance. The paper already compares against EM and PSRs, which are the most relevant practical baselines. Retained as a Minor weakness with reduced severity.
+- **"PSR with reward relabeling missing baseline"** — The critic suggests relabeling a PSR's predictive distributions with a new reward function. But this *is* effectively what the "PSR, obs" strategy in Figure 4 already does: a PSR can only assign rewards to observed (action, observation) pairs, not to latent states. The "obs" condition is already the natural PSR-based reward-specification baseline. The critic's suggestion does not correspond to a distinct or feasible alternative.
 
-- **The harsh critic's "Structural" classification of Point 2 (reward specification only on fully recoverable domains).** The paper's claim about leveraging likelihoods for reward specification is demonstrated, just not on the hardest case. This is not structural — it's a scope limitation. Retained as Minor.
+- **"EM not run on reward-specification task"** — Figure 4's legend includes "EM, state" for both domains. The critic is factually wrong.
 
-- **Strength Finder's claim that "Relaxation of per-action uniqueness" is a supporting strength with evidence from Section 4.2, Eq. 18, and Lemma 1.** This is valid and retained as a key strength merged into the first bullet under Strengths.
+- **"Paper does not discuss p=1/2"** — Proposition 2 (Appendix A.6) explicitly addresses the p=1/2 case and proves it leads to singularity. The paper does discuss this.
 
-- **Strength Finder generic claims.** Removed generic phrasing like "this paper addressed an important problem" — the remaining strengths are all backed by specific paper content.
+- **"Paper does not discuss that algorithm only needs at least one full-rank action"** — Algorithm 1 (lines 9–11) explicitly filters for full-rank actions via a minimum-singular-value threshold. The paper states "the algorithm requires at least one action to be full-rank" is implicit in the construction.
+
+- **"Exponential runtime not discussed in main text"** — This is a presentation choice, not an error. The complexity analysis is in Appendix B.2 as is standard for technical details. The paper notes the exponential dependence honestly.
 
 ## Novel Insights
 
-The paper's key insight — that a linear PSR model can be "unwound" via tensor-decomposition-style joint diagonalization to recover explicit observation and transition matrices up to a partition defined by observation-distribution equivalence — is genuinely novel and well-motivated. Prior work treated PSRs as black-box predictive models, and prior tensor methods assumed per-action observation uniqueness. The observation that aggregating across all full-rank actions via random weighted sums (Lemma 1) simultaneously relaxes the per-action assumption and produces a well-defined partition structure is elegant and opens a new direction for spectral POMDP learning.
+Beyond the paper's own contributions, the reviews do not yield a genuinely novel synthesis that the authors themselves have not already identified. The tension between the theoretical generalization (relaxing the per-action uniqueness assumption) and the empirical limitations (small-scale experiments, large data demands, failure on larger POMDPs) is the central theme that emerges from the reviews.
 
 ## Suggestions
 
-- **Close the theory-practice gap.** Either prove that the dense-rotation shortcut preserves the Theorem 1 guarantees (or state a modified theorem that covers the experimental setup), or modify the implementation to use the block-diagonal construction as specified in Algorithm 1. This is the single most important improvement.
+1. **Test reward specification on a domain with a nontrivial full-rank observability partition** (e.g., Sense-Float-Reset). This is the critical missing experiment: it would either demonstrate that partition-level parameters are practically useful for reward specification, or honestly reveal the method's limits.
 
-- **Add a reward-specification experiment on Sense-Float-Reset** to demonstrate that partition-level models (not just fully recovered POMDPs) can be used for meaningful reward assignment. For example, designate the partition containing the +1 reward state and compare planner behavior with observation-only reward assignment.
+2. **Disaggregate planning results by whether state-count estimation succeeded.** This would clarify whether the method's planning utility hinges on correct rank estimation.
 
-- **Include Azizzadenesheli et al. (2016) as a baseline on Tiger,** where both methods are applicable. This would empirically validate the claimed advantage of aggregating actions and help readers calibrate the method against the closest prior work.
+3. **Add diagnostic analysis of why the method fails on larger T-Maze instances.** Plot the singular value gap of the Hankel matrix as a function of state count to show whether the rank becomes harder to detect, or whether the observability length is the bottleneck.
 
-- **Report transition error for all seeds**, not only those where state count is correctly estimated, perhaps by reporting a combined metric or noting the failure rate separately for transparency.
+4. **Quantify the gap between finite-sample and asymptotic guarantees more systematically.** The paper's theoretical guarantees are asymptotic; a finite-sample analysis (even empirical) of how estimation error propagates through the eigendecomposition to the final parameters would be valuable.
 
 ## Score and Decision
 
-### Anchor Comparison
+### Calibration Anchors
 
-| Path | Avg Human Score | Comparison to Paper Under Review |
-|------|-----------------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/tHmiydOQhn.md` | 6.00 | Spectral Bellman Method: similar profile — good theory, experiments with missing baselines, some theoretical gaps. This paper is slightly weaker due to the explicit theory-practice gap. |
-| `/home/wg25r/review_agent/human_reviews_2026/1GkzDABbME.md` | 5.00 | Tensor-EM for LDS mixtures: provable guarantees + practical algorithm + real data. Similar quality; the current paper has a more novel theoretical bridge but less comprehensive experiments. |
-| `/home/wg25r/review_agent/human_reviews_2026/kxzYGDL4fY.md` | 4.00 | POMDP state entropy: good idea, limited environments, accepted poster. This paper is stronger — it has a more substantial theoretical contribution and broader experimental validation. |
-| `/home/wg25r/review_agent/human_reviews_2026/zbRh0eSl7Q.md` | 4.50 | OVI for POMGs: theory-heavy, no experiments, rejected. The current paper is stronger with both theory and experiments. |
-| `/home/wg25r/review_agent/human_reviews_2026/BxJsXD1zQ0.md` | 1.50 | Spectral probe reliability: claims unsupported by experiments, rejected. The current paper is dramatically stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/Z3nbvxUat0.md` | 3.00 | Generative cognitive maps: rejected. This paper is clearly stronger. |
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| `/home/wg25r/review_agent/human_reviews_2026/1GkzDABbME.md` (LDS + Tensor-EM) | 5.00 | Similar methodological approach (tensor + spectral for latent variable models) with stronger real-data validation; this paper has weaker empirical validation but comparable theory quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/tHmiydOQhn.md` (Spectral Bellman Method) | 6.00 | Stronger empirical results and cleaner experimental design; this paper's experiments are narrower but its theoretical contribution is distinct and honest about limitations. |
+| `/home/wg25r/review_agent/human_reviews_2026/kxzYGDL4fY.md` (POMDP State Entropy) | 4.00 | Comparable in scope — both tackle POMDP representation problems with limited-scale experiments. That paper was accepted as poster despite benchmark concerns. |
+| `/home/wg25r/review_agent/human_reviews_2026/zbRh0eSl7Q.md` (POMG value iteration) | 4.50 | Pure theory paper with minimal empirics; rejected. This paper has stronger empirical support but a narrower theoretical contribution. |
+| `/home/wg25r/review_agent/human_reviews_2026/8jYuRCHYxv.md` (Missingness-MDPs) | 3.00 | Weaker in both theory and experiments; this paper is significantly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/baqHtQDaIK.md` (Spectral Decomposed VI) | 2.67 | Much weaker and more confused contribution; this paper is clearly better. |
 
-**Calibration rationale:** The paper makes a genuine theoretical contribution (Theorem 1, unification of PSRs and tensor methods), has transparent and reasonably thorough experiments, and addresses an important problem. The main weaknesses — a theory-practice gap in the rotation construction and limited scope of reward-specification experiments — are real but addressable. The paper is comparable to anchor papers in the 5.0-6.0 range. The explicit theoretical-practical gap (acknowledged but not resolved) pulls it slightly below the 6.0 anchor toward the 5.0 anchor. I score it **5.0**, corresponding to a borderline accept (poster).
+The paper makes a genuine theoretical contribution (connecting PSRs and tensor methods with a relaxed assumption), states its limitations honestly, and provides reasonable empirical support for parameter convergence. However, the central practical claim (reward specification via explicit likelihoods) is only weakly supported: the experiments are on tiny custom domains, require massive data, and do not test the nontrivial-partition case that the method's own theory identifies as the key challenge. The method also fails without explanation on larger POMDPs and scales exponentially in the observability length. Relative to the anchors, the contribution sits between the 5.00-level (solid methodology paper with adequate empirics) and the 4.50-level (modest contribution with weak validation).
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

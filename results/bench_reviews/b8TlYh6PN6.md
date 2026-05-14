@@ -1,78 +1,81 @@
+Now I'll write the consolidated review.
+
 ## Summary
 
-This paper provides the first graphical characterization of distributional equivalence for linear non-Gaussian latent-variable models with arbitrary latent structure and cycles — crucially, without any structural assumptions on how latents are indicated or how they interact with observed variables. The authors introduce *edge ranks* as a new theoretical tool, prove their duality with the classical path ranks (Theorem 1), and use them to derive both a local graphical criterion (Theorem 2) and a transformational characterization (Theorem 3) for equivalence. A proof-of-concept algorithm, glvLiNG, recovers models from data up to this equivalence class. This is the first structural-assumption-free method for latent-variable causal discovery in any parametric setting.
+This paper provides the first complete characterization of distributional equivalence for linear non-Gaussian (LiNG) causal models with arbitrary latent variables and cycles. The authors introduce **edge rank constraints** as a new tool, prove a duality theorem linking edge ranks to the well-known path ranks (Theorem 1), derive a practical graphical criterion for equivalence (Theorem 2), and give a transformational characterization analogous to Meek's conjecture (Theorem 3). They then develop the glvLiNG algorithm that recovers the equivalence class from data without imposing structural assumptions about measurement models, hierarchy, or acyclicity. The theoretical machinery—edge rank duality, reduction to singleton checks (Lemma 9), and matroid-based reconstruction—is technically substantial and genuinely novel.
 
 ## Strengths
 
-- **First general distributional equivalence characterization for LiNG models without structural assumptions.** Theorem 2 reduces an exponential number of subset checks to a local, efficiently checkable condition involving "children bases." Theorem 3 shows equivalence classes are connected via admissible cycle reversals (Lemma 6) and edge additions/deletions (Lemma 7), with at most one cycle reversal. These are genuinely novel and foundational results.
+- **First distributional equivalence characterization for latent-variable LiNG models with cycles.** This fills a clear gap: no prior work characterized distributional equivalence when both latent variables and cycles are present. The result reduces a complex algebraic equivalence condition (mixing-matrix equality up to scaling/permutation) to a purely graphical condition involving children bases for singleton checks (Theorem 2), which is both elegant and practical.
 
-- **Edge ranks and their duality with path ranks (Theorem 1).** The introduction of edge ranks — a local, edge-level constraint defined via maximum bipartite matching — fills a missing piece in the rank-based causal discovery toolbox. The duality theorem reveals that path ranks and edge ranks offer complementary perspectives on bottlenecks in digraphs. This tool is likely to find uses beyond the paper's specific setting (as the authors sketch for Gaussian and discrete settings in Appendix C.5).
+- **Edge rank constraints as a new tool.** The introduction of edge ranks and their duality with path ranks (Theorem 1) is a genuinely novel contribution to the rank-based toolbox for causal discovery. This duality reveals that every path-rank statement, including d-separation and t-separation, has an equivalent edge-rank formulation via matching ranks of support matrices. This perspective enables the local decomposition (Lemma 9) that makes the graphical criterion tractable and could have impact beyond this paper.
 
-- **Transformational characterization enabling class traversal.** Theorem 3 provides an analogue of Meek's conjecture for this setting, yielding a natural BFS/DFS procedure for enumerating all equivalent digraphs. The interactive demo at https://equiv.cc makes this tangible and is a valuable contribution in itself.
+- **Transformational characterization and class traversal.** Theorem 3 provides a complete transformational characterization (admissible cycle reversals and edge additions/deletions), analogous to Meek's conjecture for this setting. This yields a practical BFS/DFS traversal of the entire equivalence class, and the authors provide an interactive demo at equiv.cc.
 
-- **Reasonable multi-angle evaluation for a theory paper.** The paper quantifies equivalence class sizes exhaustively for small digraphs (Table 3), benchmarks structurally misspecified baselines under oracle conditions (Table 5), runs finite-sample simulations (Figure 7), and applies glvLiNG to real stock-market data recovering interpretable patterns (Appendix D.5). The authors are transparent that glvLiNG is a proof-of-concept and that OICA is a practical bottleneck.
+- **Well-structured theoretical development.** The paper progresses logically from the problem setup (irreducibility), through the algebraic-to-graphical reduction, to the edge rank tool, and finally to the graphical criterion and transformational characterization. The proofs in the appendix are detailed and appear sound.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None. The theoretical contributions are rigorous and well-supported. The algorithmic limitations are explicitly scoped as proof-of-concept.
+- **Missing oracle experiment for glvLiNG.** The paper evaluates baselines under oracle inputs (Table 5) but does **not** test glvLiNG itself with oracle rank information. This means we cannot assess whether the algorithm's reconstruction Phase 1 and Phase 2 work correctly under ideal conditions. Without this experiment, it is unclear whether errors in finite-sample results (Figure 7) stem from OICA estimation failures or from the algorithm's own reconstruction logic. The paper acknowledges OICA as a limitation and calls glvLiNG a "proof of concept," but the lack of oracle validation leaves the algorithmic contribution unsubstantiated. This is the single most significant gap.
+
+- **Overclaim in framing about being "structural-assumption-free."** The abstract and introduction position the method as "the first structural-assumption-free discovery method." While the paper clarifies that it operates in the linear non-Gaussian parametric family (which is stated), the unqualified phrasing suggests a generality that could mislead readers. FCI and related nonparametric methods are also "structural-assumption-free" regarding graph topology (though they do not recover latent structure). The authors should qualify the claim explicitly: "the first method free from structural assumptions *within the linear non-Gaussian parametric family*." The body of the paper is more careful, but the abstract's phrasing invites misinterpretation.
 
 ### Minor
 
-- **No sensitivity analysis for the rank-thresholding parameters (α=25, ε=0.02) used in glvLiNG.** In Appendix D.4 (lines 3767-3773), the paper mentions a sigmoid-based confidence score with fixed α and ε, and briefly states robustness was verified under synthetic noisy ranks (N(0.75, 0.2) vs N(0.25, 0.2)). However, no systematic sweep over α/ε values is presented, nor is there analysis of how misclassification of ranks propagates to graph errors. Given glvLiNG is presented as a proof-of-concept, this is minor, but it would strengthen the empirical case for the algorithm's practical viability.
+- **Real-world equivalence class size.** The stock-market case study yields 19,008 equivalent graphs on 16 vertices. While the paper identifies invariant edges (20 solid edges among 29-34 total edges), the sheer size of the class raises questions about practical utility. The method correctly outputs an equivalence class, but the paper could do more to discuss how practitioners should interpret such large classes and whether the invariant edges alone provide sufficient actionable information.
 
-- **No evaluation of equivalence-class coverage.** The simulation experiments only report SHD to the closest equivalent graph (Appendix D.4, line 3781). Since Theorem 3 enables traversal of the entire estimated equivalence class, one could measure recall of true equivalent graphs on small instances where exhaustive enumeration is feasible. The absence of this experiment leaves open whether the algorithm systematically over- or under-estimates the class. The authors acknowledge the algorithm is proof-of-concept, so this is a missed opportunity rather than a fatal gap.
+- **OICA practical limitations are acknowledged but not stress-tested.** The paper acknowledges OICA's unreliability in §6, and Appendix D.4 describes a robustness check with simulated noisy ranks. However, no systematic sensitivity analysis is provided that would show how glvLiNG degrades as OICA estimation quality varies. The finite-sample experiments use up to 200,000 samples, which is unrealistic for many applications. A controlled noise-injection study on oracle ranks would help separate algorithm robustness from OICA brittleness.
+
+- **Sparse-graph performance.** In the finite-sample experiments (Figure 7, d=1 settings), glvLiNG underperforms the baselines. The paper offers a plausible explanation (baselines exploit sparsity-inducing structural assumptions), but the implication is that glvLiNG's strength is limited to dense settings where model misspecification hurts the baselines. This is a relatively narrow regime of advantage.
 
 ### Trivial
 
-- **The 19,008-graph equivalence class in the stock-market analysis is presented without critical discussion of its practical informativeness.** Reporting that the class contains 20 solid and 14 dashed edges (Figure 8) is useful, but could be enriched by discussing what fraction of edges are invariant and what structural questions remain unresolved.
+- Table 4 formatting has minor alignment issues (some entries span multiple rows in a way that is hard to read).
 
 ## Nice-to-Haves
 
-- A comparison with Salehkaleybar et al. (2020), which also uses OICA but assumes acyclicity, would help contextualize the practical benefit of being assumption-free versus trading some structural flexibility for potentially more robust estimation.
-- A discussion of how OICA estimation errors (mis-estimation of latent count, inaccurate column scaling) affect the recovered equivalence class would ground practical expectations.
+- An oracle experiment testing glvLiNG's SHD under perfect rank information would substantially strengthen the algorithmic contribution. Without it, the algorithm remains an unvalidated proof of concept.
+- A sensitivity analysis where controlled noise is injected into oracle ranks before passing them to glvLiNG would help quantify robustness to OICA estimation errors.
+- The paper could discuss whether any of the 19,008 graphs in the real-world class share a substantial common core beyond the 20 solid edges, and whether the class size is inflated by edges among latents that are not of primary interest.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution.
+- *Criticism that linearity, non-Gaussianity, and faithfulness are "strong parametric assumptions" that contradict the "assumption-free" claim.* — The paper explicitly operates in the linear non-Gaussian parametric family and uses "structural-assumption-free" to mean free from graph-structure assumptions (measurement models, hierarchy, acyclicity). This distinction is clearly drawn in the introduction. The criticism conflates parametric assumptions with structural assumptions, which the paper carefully separates. The reviewer's point about FCI being "assumption-free regarding graph structure" is addressed by the paper's own discussion of FCI's limitations (lines 42-46). I have retained a *minor* version of this criticism focusing on framing clarity rather than content error.
 
-- **"Reduction requires knowledge of the true graph; the paper does not discuss whether the same reduction can be soundly applied to an estimated graph."** Removed because the reduction (Proposition 2) is a theoretical canonicalization to rule out trivial equivalence cases, not an algorithmic step applied to data. The paper is explicit that this lets us "restrict attention to irreducible models for the remainder" (line 268).
+- *Criticism that the paper overlooks prior equivalence results (Lacerda et al., 2008; Ghassami et al., 2020).* — The paper explicitly cites these works and notes they cover fully observed settings without latent variables (lines 95-97). The claim is about equivalence *with latent variables*. The reviewer misread.
 
-- **"Runtime comparison against MILP is of limited value — MILP is an obviously inefficient baseline."** Removed. The paper uses MILP as a brute-force satisfiability baseline precisely to demonstrate the speedup from its constraint-based approach. This is standard practice, and the paper does not oversell the comparison. The real story is in the absolute runtime: glvLiNG solves n=10 in under 5 seconds.
-
-- **"Missing baseline: Salehkaleybar et al. 2020."** Moved to Nice-to-Haves. The chosen baselines (LaHiCaSl, PO-LiNGAM) are structurally misspecified by design — they serve the paper's purpose of showing what goes wrong when structural assumptions are violated. Adding an OICA-based acyclic method would be informative but is not essential to the paper's core claim.
-
-- **Formatting/typo/style criticisms from the harsh critic.** Removed — these are parser artifacts, not author errors.
+- *Request for "at least one low-scoring anchor comparison."* — All anchors listed below are used. The paper's score is positioned relative to the full set.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The paper's introduction of edge ranks as a dual perspective to path ranks, and the demonstration that this duality enables a clean decomposition from global rank constraints to local singleton checks, is genuinely novel and may influence how the broader community approaches rank-based causal discovery.
+The most striking observation emerging from this review process is the structural parallel between the paper's theoretical contribution and the classical CPDAG/Meek conjecture framework for Markov equivalence. The paper demonstrates that distributional equivalence in LiNG models with latents and cycles admits the same three-tier structure (graphical criterion, transformational characterization, class presentation) as Markov equivalence in fully observed acyclic graphs. This framing is itself a contribution: it situates latent-variable cyclic models within a well-understood equivalence landscape and shows that they are not inherently more complex in structure, despite the intimidating combinatorics of latent variables and cycles. The key insight enabling this simplification is the edge-rank duality, which translates global path constraints into local bipartite matching constraints that decompose per singleton observed variable.
 
 ## Suggestions
 
-- Add a sensitivity analysis varying α and ε by at least an order of magnitude, showing SHD as a function of threshold choice, to support the claim of robustness.
-- On small graphs (n ≤ 6) where exhaustive enumeration of true equivalence classes is feasible, report recall of true equivalent graphs within the estimated class to validate that Theorem 3 traversal operates correctly on estimated inputs.
-- Discuss the stock-market results more critically — quantify what fraction of edges are invariant (solid) vs. uncertain (dashed), and what domain-level claims can or cannot be made given the ~19k ambiguity.
+1. **Add an oracle experiment for glvLiNG:** Test glvLiNG on perfect rank information derived from ground-truth graphs (i.e., skip OICA and directly feed oracle ranks). Report SHD between the recovered equivalence class and the ground-truth class. This would validate that Phase 1 and Phase 2 of the algorithm are sound.
+2. **Add a noise-injection experiment:** Pass oracle mixing matrices with controlled levels of additive noise into glvLiNG to quantify how OICA estimation error propagates to SHD.
+3. **Qualify the "structural-assumption-free" claim** in the abstract and introduction to explicitly state "within linear non-Gaussian models."
+4. **Discuss practical interpretation of large equivalence classes** beyond listing invariant edges—perhaps showing the distribution of edge frequencies across the class.
 
----
+## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/BNHplerBYE.md` | 5.33 (Accept Poster) | Same domain (latent-variable causal discovery). That paper proposes a score-based greedy search algorithm; this paper is more theoretically original with a first-of-its-kind equivalence characterization. The theory here is stronger; experiments are comparable. |
-| `/home/wg25r/review_agent/human_reviews_2026/ssYeoL4ksl.md` | 5.50 (Reject) | Also handles cycles + latent variables in linear non-Gaussian models, but limited to bivariate case. This paper is substantially more comprehensive (arbitrary latent structure, full graph characterization). |
-| `/home/wg25r/review_agent/human_reviews_2026/Uc1EAICxTD.md` | 4.50 (Accept Poster) | Independence test for LiNG data. Narrower contribution with comparable experimental depth. This paper's theoretical contribution is broader and more foundational. |
-| `/home/wg25r/review_agent/human_reviews_2026/V7pT2ZRoTB.md` | 4.50 (Accept Poster) | Pure theory paper for causal discovery on random graphs. Narrow scope, experimental evaluation limited to simulations on graph models. This paper has broader scope and includes real-data evaluation. |
-| `/home/wg25r/review_agent/human_reviews_2026/qLbTww6vv2.md` | 4.00 (Reject) | Latent additive noise models. Less rigorous theory, weaker experiments. This paper is clearly stronger on both axes. |
-| `/home/wg25r/review_agent/human_reviews_2026/mA78uXqcnl.md` | 7.00 (Accept Oral) | Hawkes processes with latent confounders. Strong theory + strong experiments. This paper has comparable theoretical depth but weaker experimental validation (explicitly proof-of-concept). |
+| Anchor Paper | Avg Score | Comparison |
+|---|---|---|
+| `BNHplerBYE.md` — Score-based Greedy Search for Partially Observed Causal Models | 5.33 (Accept Poster) | Similar topic (latent-variable causal discovery). Stronger experiments with consistent empirical validation. This paper has stronger theory but weaker experiments. |
+| `ssYeoL4ksl.md` — Identification of Causal Relationships in Linear Cyclic Models with Latent Variables | 5.50 (Reject) | Similar topic (cycles + latents in LiNG). Limited to bivariate analysis; this paper is far more general and complete. Despite similar scores, this paper's theoretical contribution is substantially stronger. |
+| `TAOpnCPnjg.md` — Conditional ICA for Estimating Causal Structure with Latent Variables | 4.50 (Accept Poster) | Similar topic. Both have theory + algorithm contributions. This paper's experimental validation was also criticized as weak; this paper compares favorably in theoretical depth. |
+| `qLbTww6vv2.md` — Towards Identifiable Latent Additive Noise Models | 4.00 (Reject) | Theory paper with weaker identifiability results. This paper's theory is more complete and the equivalence characterization is stronger. |
+| `V7pT2ZRoTB.md` — Theoretical Guarantees for Causal Discovery on Large Random Graphs | 4.50 (Accept Poster) | Pure theory paper. This paper has broader scope (theory + algorithm + experiments), placing it slightly higher. |
+| `mA78uXqcnl.md` — Causal Structure Learning in Hawkes Processes | 7.00 (Accept Oral) | Strong across all dimensions (theory, experiments, writing). This paper's experiments are substantially weaker by comparison. |
 
-**Calibration reasoning:** This paper's theoretical contribution is foundational — the first equivalence characterization in its setting — and is more original than the 4.50-5.50 anchors. It falls below the 7.00 oral anchor (mA78uXqcnl) primarily because the algorithm and experiments are explicitly proof-of-concept while that paper delivers a more complete practical package. The score lands at 6.5: strong theoretical paper with acknowledged experimental limitations, clearly above borderline-accept territory but not at the oral level.
+**Reasoning:** The paper's theoretical contribution (equivalence characterization + edge ranks) is genuinely strong and places it above the average 4-5 range. However, the missing oracle experiment for glvLiNG is a significant gap that prevents the algorithmic contribution from being fully validated. Among the anchors, this paper is stronger than the 4.50 CICA paper and comparable to the 5.33 LGES paper in overall quality, though with a different profile (stronger theory, weaker experiments).
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

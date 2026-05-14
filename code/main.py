@@ -141,7 +141,7 @@ with open(prompt_path("timeline.md"), "r") as f:
 
 
 PAPER_ACCESS_INJECTION = "The full paper text is included in the user message. Use it to verify reviewer claims directly."
-PAPER_ACCESS_FILE = "The paper path is provided in the user message. Use read_file to read the paper and verify reviewer claims directly."
+PAPER_ACCESS_FILE = "The paper path is provided in the user message. Use read_file to read the paper (it reads the whole file by default — do not pass start_line/end_line unless you specifically need a slice) and verify reviewer claims directly."
 
 with open(prompt_path("cal_with.md"), "r") as _f:
     CAL_INSTRUCTION_WITH = _f.read()
@@ -364,7 +364,7 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         merger_prompt = (
             f"Here is the paper being reviewed (extracted from PDF — formatting "
             f"artifacts are parser issues, not paper problems).\n\n"
-            f"Paper path: {paper_path_abs} — use read_file (in chunks) or grep_file to read it.\n\n"
+            f"Paper path: {paper_path_abs} — use read_file (which reads the whole file by default; do not pass start_line/end_line unless you specifically need a slice) or grep_file to read it.\n\n"
             f"Human reviews directory (for calibration): {HUMAN_REVIEW_DIR}\n\n"
             f"Here are the inputs:\n\n{chr(10).join(labeled)}\n\n"
             f"Now produce the final consolidated review following your instructions. "

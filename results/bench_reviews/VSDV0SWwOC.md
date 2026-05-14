@@ -1,112 +1,93 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me write the final review.
+Now I have a solid calibration base. Let me compose my final review.
 
 ## Summary
 
-LS-Merge proposes a framework for merging language models in a learned latent weight space rather than in raw parameter space. The method trains a transformer-based VAE on LLM weights, encodes models into a shared latent manifold, optionally aligns heterogeneous latent distributions via closed-form optimal transport, performs merging operations in latent space, and decodes back to weights. The paper demonstrates consistent improvements over weight-space baselines on LoRA expert merging, competitive performance against representation-merging methods, and—most distinctively—enables cross-architecture (different model families) merging for the first time.
+LS-Merge proposes a paradigm shift for model merging: instead of operating directly on model weights, it encodes weights into a learned latent space using a transformer VAE, performs merging operations (interpolation, soup, OT alignment) in that space, and decodes back to weights. This enables self-merging (sampling multiple codes from a single model's posterior), homogeneous expert fusion, and—critically—heterogeneous cross-architecture merging (e.g., Gemma → LLaMA) via Optimal Transport alignment of latent distributions. Experiments across Gemma, LLaMA, and LoRA experts show consistent gains over weight-space baselines, with the cross-architecture results (Table 5) being a genuinely novel capability.
 
 ## Strengths
 
-- **Novel paradigm for model merging.** Shifting merging from weight space to a learned latent space is a creative and well-motivated idea. The pipeline (encode → align → merge → decode) is conceptually clean and generalizes beyond architectural homogeneity—a genuine advance over prior work that uniformly requires matching architectures.
+- **First demonstration of cross-architecture LLM merging via latent-space alignment.** The OT-based latent distribution alignment (Section 3.3) is a principled solution to a problem that weight-space methods fundamentally cannot address. Table 5 shows that naive interpolation between Gemma and LLaMA latents degrades performance, while OT-aligned interpolation recovers and surpasses baselines (WinoGrande: 57.75 vs. 56.83, ARC-C: 43.34 vs. 42.78, HellaSwag: 50.10 vs. 49.07). This is a genuine research contribution.
 
-- **Principled motivation from weight statistics.** The analysis of LLM weight distributions (Table 1, Figure 2) showing heavy tails (kurtosis up to ~15) and low-rank structure provides a non-trivial empirical foundation for the VAE design choices. This analysis distinguishes the work from prior approaches that assume Gaussian weight distributions.
+- **Consistent and substantial empirical gains across four merging scenarios.** LS-Merge outperforms weight-space methods in self-merging (Table 2: up to ~4% improvement on Gemma-3-1B-it MMLU: 32.20→35.13), expert fusion (Table 3: LS-Merge soup achieves 56.0 MMLU vs. best baseline Greedy Soup at 50.8), representation merging (Table 4: competitive with AIM on Llama-2-13B), and cross-architecture merging (Table 5). The gains are not cherry-picked—they hold across eight diverse benchmarks.
 
-- **Strong LoRA expert merging results.** Table 3 shows LS-Merge substantially outperforming weight-space baselines (Uniform Soup, SLERP, Greedy Soup, DARE-TIES) across 8 benchmarks, e.g., MMLU 56.0 vs. best baseline 52.5, HellaSwag 60.1 vs. 54.6. The gains are consistent and large.
+- **Weight distribution analysis (Table 1, Figure 2) is thorough and motivates design choices.** The analysis establishing that LLM attention weights exhibit high kurtosis (up to ~15) and low-rank structure directly informs the two-stage VAE training curriculum (Section 3.2) and the choice of transformer encoder over simpler alternatives. This grounding in observed properties of the data modality is good science.
 
-- **Convincing ablation establishing non-linear manifold necessity.** Table 8's PCA vs. VAE comparison is well-executed: PCA collapses to near-random accuracy (MMLU ~25%) even at mild compression, while the VAE preserves functional performance, demonstrating that pretrained weights reside on a genuinely non-linear manifold requiring expressive encoding.
+- **Non-linear manifold learning is demonstrated to be a geometric necessity, not a stylistic choice.** Table 8 directly compares PCA against the VAE at compression ratios 1.6×, 2×, and 4×. PCA collapses to near-random MMLU accuracy (~25.5%) at all ratios while the VAE retains ~96% of base performance. This clean ablation validates that pretrained weights do not lie in a linear subspace.
 
-- **Enables cross-family merging where weight-space methods cannot operate at all.** Table 5 shows OT-aligned latent interpolation (LLaMA→Gemma) improves over the target base on all three benchmarks (e.g., WinoGrande 56.83→57.75). While gains are modest, the capability itself is previously unavailable, and the OT-only ablation shows that alignment is crucial.
+- **Solid ablation studies isolate the roles of different components.** Table 6 shows merging MLP and attention jointly yields the best results, while attention-only merging degrades performance, confirming these submodules encode complementary functional knowledge.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Asymmetric comparison with weight-space baselines.** The VAE used for LS-Merge is trained on model weights that include the very LoRA experts being merged (line 515-516: "Training data consist of pretrained weight snapshots for Gemma-3-1B-it and Gemma-3-4B-it, plus LoRA experts from Feng et al. (2024b)"), while weight-space baselines are zero-shot merge operators with no auxiliary training. This means LS-Merge has an information advantage: it has effectively meta-learned the weight manifold of the models it merges. The claim that latent-space merging "consistently outperforms all weight-space baselines" (line 587) is therefore not a clean evaluation of latent-space *merging* per se, but of a system that includes manifold meta-learning. The paper would benefit from a VAE trained on a *disjoint* set of checkpoints to isolate the benefit of the latent representation from the benefit of training on the to-be-merged models. This does not invalidate the contribution—the VAE's ability to learn a useful weight manifold is itself part of the contribution—but the headline claim overstates what the experiment demonstrates.
-
-- **Cross-architecture merging gains are modest and under-evaluated.** The cross-family experiment (Table 5, LLaMA→Gemma) reports improvements of 0.6–1.0 percentage points across only three benchmarks (WinoGrande, ARC-C, HellaSwag), with a single λ=0.1. The paper claims this "enables robust cross-scale and cross-family model merging for the first time" (line 888), but the evidence for "robust" is thin: the evaluation task set is small, no comparison against simple heterogeneous baselines (e.g., learned linear projection for dimensionality matching in weight space, adapter-based transfer) is provided, and the gains, while real, are near the noise floor for single-model evaluation. The contribution is genuine—it works where weight-space methods cannot—but the strength of the claim should be tempered to match the evidence.
+- **Suboptimal baseline comparisons in the expert merging experiment conflate two sources of gain.** LS-Merge trains a VAE on the LoRA experts before merging them, giving it access to a learned generative model of the weight distribution. The weight-space baselines (uniform soup, SLERP, greedy soup, Dare-Ties) receive no such training signal. While the comparison is not "unfair" (the VAE is part of the method), it makes it impossible to determine how much of the gain (e.g., 56.0 vs. 50.8 on MMLU, Table 3) comes from (a) the latent-space merging operation itself vs. (b) simply having a generative model. A control experiment that encodes each expert, decodes back, and then applies weight-space merging would isolate this effect. This is a significant oversight that weakens the core empirical claim.
 
 ### Minor
 
-- **Self-merging protocol is underspecified.** Section 4.1 describes encoding a model, sampling multiple latent codes from its posterior, merging them, and decoding. However, the number of codes sampled, the weighting scheme for merging them (equal weights? learned?), and whether posterior sampling vs. prior sampling is used in practice are not specified. The general approach is described (line 383-387), making this a reproducibility gap rather than a conceptual flaw, but it prevents independent validation of one of the paper's stated contributions.
+- **The VAE training data is insufficiently specified.** The paper states only "pretrained weight snapshots for Gemma-3-1B-it and Gemma-3-4B-it, plus LoRA experts from Feng et al. (2024b)" (Section 4). It is unclear how many distinct weight configurations per architecture are used (one snapshot? multiple along a training trajectory?). The VAE's generalization to unseen architectures (Table 7: trained on Gemma-3-4B-it, tested on Gemma-3-1B-it and LLaMA-3.2-1B-it) suggests it learns more than single-instance memorization, but the vague description is a reproducibility concern. The chunking strategy (lines 348-350) creates many training tokens from each model's layers, but whether the VAE sees multiple *functionally distinct* weight configurations per architecture remains unclear.
 
-- **Gaussian OT assumption is unverified.** The closed-form OT alignment (Section 3.3) assumes per-layer latent distributions are approximately Gaussian. The paper provides no empirical validation of this assumption (e.g., normality tests on encoded latents, Wasserstein distances before/after alignment). Given that the weight distributions themselves are heavy-tailed and non-Gaussian (Section 3.1), and the encoder is non-linear, it is non-obvious that encoded latents become Gaussian. This is a methodological gap but does not undermine the results, since the OT alignment demonstrably works in practice.
+- **The Gaussian approximation for OT alignment (Section 3.3) is at odds with the paper's own finding that weight distributions are heavy-tailed (Section 3.1, kurtosis up to ~15).** The paper models each layer's latent distribution as a Gaussian (mean + covariance) to derive a closed-form OT map. While this is a practical simplification and the paper acknowledges it as an "approximation" (line 480), it provides no analysis of how heavy tails in the latent space affect alignment quality or merging performance. Non-Gaussian OT alternatives (e.g., Sinkhorn without distributional assumptions) are not explored.
 
-- **Claim about transformer speed advantage is unsubstantiated.** Section 3.2 states the transformer VAE is "faster than convolutional alternatives at a comparable parameter count" without benchmarking or citation. This is a minor overstatement.
+- **The heterogeneous layer pairing heuristic (Algorithm 1) is unvalidated.** For merging models with different depths (e.g., Gemma-3-4B-it's 34 layers into Gemma-3-1B-it's 18 layers), the paper uses a simple proportional mapping based on layer counts. There is no validation that this pairing respects functional correspondence (e.g., does layer i of 18 map to the correct functional role in a 34-layer model?). While this heuristic is reasonable, the paper's cross-architecture claims would be stronger with some validation (e.g., checking multiple pairing schemes or using attention/role alignment).
 
-- **Limited evaluation scales.** All experiments use models ≤7B parameters, with most at 1-4B. The method's scalability to larger models (≥13B) is untested, and the compression fragility above r=1.6 (Table 7) raises questions about practical deployment at scale.
+- **Self-merging (Table 2) is presented as a key contribution, but its mechanism is not fully explained.** The paper samples "multiple latent codes from its posterior distribution" and merges them, but does not specify how many samples are drawn, how they are merged (simple average? interpolation?), or why this yields improvements over the single-sample VAE reconstruction. The near-zero standard deviations for LS-Merge on some benchmarks (e.g., 0.00 on MMLU for Gemma-3-4B-it) are unusual and require explanation.
 
 ### Trivial
-
-- Different evaluation frameworks are used across tables (Feng et al. code for Tables 2-3, lm-eval for Tables 4-5). The paper acknowledges this (lines 599, 663), but it complicates cross-table comparison.
+- The paper could benefit from t-SNE/UMAP visualizations of latent codes for multiple weight configurations, as currently only the heterogeneous case is visualized (Figure 9).
+- Table 8 shows VAE maintaining performance at r=4.0, which is impressive but deserves more discussion since it contrasts with the generalization results in Table 7 where R4× causes collapse.
 
 ## Nice-to-Haves
-
-- A cost-benefit analysis quantifying VAE training cost vs. merging performance gains would help practitioners assess whether the upfront investment is worthwhile for their use case.
-- Visualization of latent spaces before/after OT alignment (beyond t-SNE) would strengthen intuition about what the alignment accomplishes geometrically.
-- Instance-level case studies showing where merged models succeed or fail compared to baselines would add qualitative insight beyond aggregate scores.
+- **Control experiment for expert merging:** Encode each expert, decode back, then apply uniform soup on the decoded weights in weight space. This would isolate the benefit of latent-space operations from the benefit of having a generative model.
+- **Validation of the Gaussian OT approximation:** Reporting what fraction of latent codes fall in the tails and comparing against non-parametric OT (e.g., Sinkhorn divergence) would strengthen the OT alignment claims.
+- **Analysis of decoded weight distributions after merging:** Do merged weights preserve the heavy tails or get smoothed out?
+- **Training-time details for the VAE:** Clarify the number of unique weight snapshots, training steps, and data augmentation strategies used.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution:
 
-These points from the reviewer inputs were flagged and removed after verification against the paper:
+1. "The VAE is trained on an insufficient number of weight configurations, making the manifold claim unsupported" — This is too strong. Table 7 shows the VAE generalizes to unseen architectures (trained on Gemma-3-4B-it, tested on Gemma-3-1B-it and LLaMA-3.2-1B-it), directly contradicting the claim that it merely memorizes one instance. However, the vagueness about training data is retained as a minor weakness above.
 
-1. **"LS-Merge uses a VAE trained on the weights of the specific experts being merged... This gives LS-Merge an asymmetric advantage."** — PARTIALLY KEPT. The core concern about asymmetric comparison is valid and retained as a Major weakness, but the harsh critic's framing that this "invalidates the central empirical comparison" overstates the case. The VAE is trained for weight reconstruction, not merging optimization; the contribution is precisely that learning a weight manifold enables better merging. The comparison is asymmetric but informative—it shows what is possible when one invests in learning the weight manifold. Retained but recalibrated from "fatal" to "major."
+2. "The expert merging evaluation is fundamentally unfair" — Comparing a learned method against non-learned baselines is standard practice in ML. The critic's framing is too strong. However, the absence of an isolation control experiment is a real weakness (retained above as Major).
 
-2. **"Cross-architecture merging gains are weak... No statistical significance is reported... does not compare against simple baselines for heterogeneous merging."** — PARTIALLY KEPT. The modest gains and limited evaluation are valid minor concerns. The demand for statistical significance is appropriate for some fields but is non-standard in LLM benchmark evaluation where single-run scores are the norm—moved to nice-to-have. The demand for heterogeneous weight-space baselines is scope creep: the paper's contribution is enabling something previously impossible; comparing against hypothetical alternatives is unreasonable.
+3. "Section 3.1 within-matrix heavy tails are primarily relevant for compression of a single matrix" — The paper uses these statistics to inform encoder design (allocating capacity to attention layers), which applies universally, not per-instance.
 
-3. **"Self-merging protocol is underspecified... how many codes are sampled... omitted."** — KEPT as minor. The paper does describe the general approach (posterior sampling, linear interpolation) but lacks specific parameter counts. This is a real but addressable gap.
+4. "Standard deviations of 0.00 are suspicious" — With deterministic evaluation and averaging over many samples, near-zero variance is expected and not suspicious.
 
-4. **"The VAE design does not incorporate any explicit mechanism to preserve heavy-tailed extremes."** — REMOVED. The two-stage curriculum (deterministic AE → VAE) is explicitly motivated by and designed to address the heavy-tailed training instability (line 371-376). The harsh critic demands a "tail-specific" mechanism when the curriculum is precisely that.
+5. "Overcomplete bottleneck adds extra computation without clear benefit" — The paper explicitly addresses this (Section 6, lines 865-869): expansion helps unfold the weight manifold and eases optimization.
 
-5. **"The theoretical discussion about manifold dimensionality... remains decorative."** — REMOVED. The Eckart-Young/manifold embedding discussion (lines 169-181) provides theoretical motivation for why compression should be possible, which directly justifies the VAE approach. Calling it "decorative" is a strawman.
-
-6. **"The mismatch between the claimed non-linear manifold and the linear OT alignment raises a tension."** — REMOVED as a separate weakness but the unverified Gaussian assumption concern is retained. The OT alignment operates on latent distributions, not on the weight manifold directly; the encoder maps the non-linear weight manifold to a (hopefully) well-behaved latent space where linear OT is appropriate. The tension the harsh critic identifies dissolves once this distinction is recognized.
-
-7. **"Inconsistent evaluation protocols across tables."** — KEPT as trivial. The paper is transparent about this.
-
-8. **"The conclusion recapitulates overstated claims about enabling cross-family merging."** — KEPT as a major weakness (the claim is somewhat overstated relative to the evidence).
-
-9. **Strength Finder: "Enables heterogeneous model merging, a previously unsolved challenge."** — KEPT as a core strength with appropriate caveats about the evidence strength.
-
-10. **Strength Finder: "Consistent and significant performance gains across multiple merging scenarios."** — KEPT. Supported by Tables 2-4.
-
-11. **Strength Finder: "Empirically grounded analysis of LLM weight statistics justifies the VAE design."** — KEPT. Supported by Table 1 and surrounding analysis.
-
-12. **Harsh Critic: "The framing overstates the ability to relax the requirement for multiple source models."** — REMOVED. The paper is clear that self-merging requires training a generative model (Section 1, point (i): "A generative model can learn the latent manifold of a single LLM parameters"). This is not overclaimed; it's presented as a capability enabled by the framework.
+6. "PCA vs. VAE comparison conflates linear vs. non-linear compression" — The comparison is exactly what the paper claims: a test of whether LLM weights lie on a linear or non-linear manifold. PCA is the natural linear baseline.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews did not surface methodological insights that the paper itself does not already articulate.
+The most interesting observation across the reviews is the tension between the paper's two central claims. On one hand, the VAE must learn a meaningful latent manifold of LLM weights to make merging operations principled; on the other hand, the paper's main empirical successes (especially cross-architecture merging via OT) could be driven more by the distribution alignment step than by any manifold structure. The OT alignment essentially "registers" two latent spaces that were learned independently, and the gains might reflect mean/covariance matching rather than true manifold interpolation. The paper would be stronger if it included an experiment that ablates the manifold structure itself—e.g., replacing the VAE with a simpler encoder (like a random projection) + OT alignment to see how much of the cross-architecture gain comes from each component.
 
 ## Suggestions
-
-1. Train a VAE on a disjoint set of model checkpoints (e.g., train on Gemma-3-1B/4B, evaluate expert merging on Llama-based LoRA experts) to cleanly separate manifold learning benefits from in-distribution encoding quality. This would directly address the major weakness about asymmetric comparison.
-
-2. Expand cross-architecture evaluation to more benchmarks (at least 5-6 standard tasks) and report whether the merged model outperforms *either* source model, not just the target base. Consider simple heterogeneous baselines like zero-padded weight-space interpolation as sanity checks.
-
-3. Specify the self-merging protocol precisely: number of posterior samples, weighting scheme, and provide a control (e.g., VAE reconstruction from a single sample, or weight-noise injection baseline) to distinguish variance reduction from genuine manifold traversal.
-
-4. Validate the Gaussian assumption for OT alignment with normality diagnostics on encoded latents, and report transport quality metrics (e.g., 2-Wasserstein distance before/after alignment).
+1. **Specify the VAE training data clearly** — state the number and type of distinct weight snapshots per architecture (e.g., "1 released checkpoint per model, plus 10 LoRA experts"). This is essential for reproducibility.
+2. **Add a control experiment for expert merging** — encode each expert, decode to weight space, then apply uniform soup. This isolates the benefit of latent-space operations from the benefit of the generative model.
+3. **Report the number of latent samples used in self-merging** and explain the near-zero variance in Table 2.
+4. **Validate the Gaussian OT approximation** against non-parametric alternatives, or at minimum analyze the impact of heavy tails on alignment quality.
+5. **Validate the heterogeneous layer pairing** with alternative heuristics (e.g., reverse mapping, functional alignment).
 
 ## Score and Decision
 
-**Anchor comparisons:**
+### Calibration Anchors
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `ocEoHCrezd` (Latent Merging) | 2.50 | Reject | Also proposes latent-space merging but in hidden-representation space. Had fundamental evaluation problems (no proper benchmarks, missing baselines). LS-Merge is substantially stronger: proper benchmarks, multiple merging scenarios, novel cross-architecture capability. |
-| `Awf3ebMpKw` (Expert Merging) | 5.00 | Accept (Poster) | A solid model merging paper that learns coefficients for existing methods. LS-Merge is comparably strong: more novel core idea (latent weight encoding), similar experimental thoroughness, but has the asymmetric comparison issue that Expert Merging does not. |
-| `vpKXTmMtBQ` (Merging Scaling Laws) | 5.50 | Reject | Strong empirical contribution with 10K+ experiments. LS-Merge has a more creative core idea but weaker empirical scale. Roughly comparable overall contribution level. |
-| `HZ0YvjVzpj` (Mixup Model Merge) | 3.50 | Reject | A simple interpolation variant. LS-Merge is clearly more novel and substantial. |
-| `ULxerRB2DF` (OTA Merging) | 6.00 | Reject | Curvature-aware merging, stronger theoretical grounding. LS-Merge has a more novel paradigm but less theoretical rigor. |
-| `NYUxN6plEh` (Learn to Merge) | 4.50 | Reject | Meta-learning for merging coefficients. LS-Merge targets a more ambitious problem (heterogeneous merging) with a more creative solution. |
-| `S0MRfeGr5d` (StatsMerging) | 4.00 | Reject | Statistics-guided merging. LS-Merge goes further in enabling heterogeneous merging and has a more novel architectural contribution. |
+**High-scoring anchors (≥6.0):**
+- `/home/wg25r/review_agent/human_reviews_2026/ULxerRB2DF.md` — 6.00, Reject (Harnessing Optimization Dynamics for Merging). Strong curvature-aware merging method on Llama-3.1-8B only, criticized for limited architecture scope. LS-Merge evaluates across more architectures and a wider range of merging scenarios, making its empirical contribution stronger.
+- `/home/wg25r/review_agent/human_reviews_2026/fOwsr1VTi8.md` — 5.50, Accept Poster (DeepWeightFlow: flow matching for weight generation). Comparable weight-space learning paper; LS-Merge has broader applicability (merging scenarios) but weaker clarity on training data.
 
-LS-Merge is a creative and well-motivated contribution with genuine novelty. The core idea—encoding weights into a latent space for merging—opens interesting directions. The experiments demonstrate clear benefits on homogeneous merging and establish the feasibility of cross-architecture merging. The main weaknesses are the asymmetric comparison with weight-space baselines (a real but not fatal concern, since the VAE training is the method's contribution, not a confound) and the modest cross-architecture evidence. These are addressable concerns that do not undermine the paper's core contributions.
+**Medium-scoring anchors (4.0–5.9):**
+- `/home/wg25r/review_agent/human_reviews_2026/C21rz8mo65.md` — 4.80, Accept Poster (MergOPT: merge-aware optimizer). LS-Merge is more novel (latent-space merging paradigm vs. optimizer modification) and evaluates more broadly. Similar level of methodological concern (MergOPT's Laplace assumption vs. LS-Merge's Gaussian OT approximation).
+- `/home/wg25r/review_agent/human_reviews_2026/RU76KTF1Da.md` — 4.67, Accept Poster (optimizer implicit bias). Analysis-focused paper; less directly comparable.
+- `/home/wg25r/review_agent/human_reviews_2026/S0MRfeGr5d.md` — 4.00, Reject (StatsMerging). LS-Merge is significantly more novel and has stronger experiments.
 
-Compared to anchors: stronger than the 2.50-4.50 range papers, comparable to Expert Merging (5.00, accepted) but with a more novel paradigm and the cross-architecture contribution, somewhat weaker empirically than the Scaling Laws paper (5.50, rejected for different reasons). A score of **5.5** is appropriate.
+**Low-scoring anchors (≤3.9):**
+- `/home/wg25r/review_agent/human_reviews_2026/ocEoHCrezd.md` — 2.50, Withdrawn (Latent Merging: representation-space merging). Despite a superficially similar name, this paper merges activations, not weight-space latents. It was criticized for 2× inference cost and narrow evaluation. LS-Merge avoids these issues (no inference overhead) and is substantially stronger.
+
+**Comparative assessment:** LS-Merge is more novel than the accepted MergOPT (4.80) and comparable in contribution level to DeepWeightFlow (5.50). Its main weaknesses (vague training data specification, missing control experiment) are addressable in revision and do not threaten the core contribution. The cross-architecture merging capability alone is a genuine advance over existing weight-space methods. I place it firmly in the Accept (Poster) range.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

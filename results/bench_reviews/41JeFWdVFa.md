@@ -1,97 +1,79 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me synthesize the final review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ---
 
-## Final Consolidated Review
+## Summary
 
-### Summary
+This paper proposes LDP, a lightweight 642k-parameter denoising autoencoder plug-in for single-image super-resolution. LDP improves generalization to unseen degradations by enforcing LR cyclic consistency: it takes an HR/SR image, applies patch-dependent noise, denoises it conditioned on the LR high-frequency component, and downsamples to produce a predicted LR. The discrepancy between this predicted LR and the ground-truth LR is used as a training loss (fine-tuning mode) or as a posterior sampling guide (inference mode). Experiments across four SR architectures (FeMaSR, StableSR, SwinIR, MambaIR) and eight benchmarks show consistent improvements, with striking efficiency gains vs. the competing Lway plug-in (10× less memory and 10× faster training).
 
-LDP is a lightweight (642k-parameter) denoising autoencoder plug-in that models the SISR degradation process to improve SR model generalization. It takes HR images and LR high-frequency components as input to predict corresponding LR images, using patch-wise noise corruption. LDP operates in two modes: (1) as a fine-tuning loss enforcing LR cycle consistency, and (2) as a diffusion posterior sampling guide at inference time. Experiments fine-tune four diverse SR architectures (FeMaSR, StableSR, SwinIR, MambaIR) across five synthetic degradation types and three real-world benchmarks, with consistent gains attributed to LDP's cyclic regularization.
+## Strengths
 
-### Strengths
+- **Lightweight design with strong efficiency advantages.** LDP adds only 642k parameters and modest overhead (22,405 MiB GPU memory, 2.094 s/iteration) compared to the Lway plug-in (200,768 MiB, 22.55 s/iteration — nearly 10× more in both dimensions), while LDP *improves* performance and Lway *degrades* it (Table 14). This makes LDP practically usable.
 
-- **Broad, consistent fine-tuning improvements across diverse architectures**: Fine-tuning four architecturally different models (GAN, diffusion, Transformer, Mamba) with LDP improves PSNR, SSIM, and LPIPS across all five synthetic degradation types (Down, Noise, Blur, JPEG, Hybrid). StableSR gains +2.16 dB on Hybrid and +1.74 dB on JPEG; SwinIR gains +0.83 dB on Hybrid (Table 3). Real-world benchmarks (RealSR, DPED, RealSRSet) also show consistent improvements across most metrics (Table 4).
+- **Consistent improvements across diverse SR architectures.** Table 3 shows LDP improving PSNR on the challenging Hybrid set by +0.83 dB (SwinIR), +2.16 dB (StableSR), +0.32 dB (FeMaSR), and +0.36 dB (MambaIR). Improvements hold across five synthetic degradation types and three real-world benchmarks (Table 4), demonstrating that the cyclic regularization benefits multiple model families.
 
-- **Effective degradation modeling that avoids collapse to trivial downsampling**: Table 2 demonstrates that LDP-generated LR images have substantially lower similarity to simply-downsampled SR outputs than DRN or DualSR, confirming LDP learns degradation-specific transformations rather than defaulting to bicubic downsampling. The patch-wise noise design (ablated in Table 8) and LR high-frequency conditioning (Section 3.1) are key enablers.
+- **Explicit demonstration that LDP avoids trivial downsampling.** Table 2 shows DRN's predicted LR has near-identical similarity to a bicubic-downsampled version of the SR (34.02 PSNR), whereas LDP's similarity is much lower (28.41 PSNR), confirming that LDP actually applies degradation rather than defaulting to simple downsampling.
 
-- **Lightweight and practical design**: LDP uses only 642k parameters and adds moderate training overhead (22,405 MiB, 2.094 s/iteration vs. 15,575 MiB, 1.413 s/iteration for SwinIR alone; Table 14). This is dramatically cheaper than alternatives like Lway (200,768 MiB). LDP integrates without modifying the SR model architecture.
+- **Two complementary usage modes.** LDP functions both as a training-time loss (fine-tuning) and as an inference-time post-processing step (posterior sampling for diffusion models), broadening its applicability without requiring model-specific adaptation.
 
-- **Thorough ablation studies**: The paper ablates loss components (Table 6, showing the complementary value of symmetric + frequency losses), patch size (Table 8), frequency band selection (Table 9), scale factor (Table 10), severe degradation robustness (Tables 11–12), and inference-time overhead (Table 13). These provide useful insights into design choices.
+- **Robustness under extreme unseen degradations.** Table 11 shows that even with Gaussian blur kernel length 484, LDP improves SwinIR's PSNR from 21.24 to 22.09 dB, and Table 12 shows LDP's own LR prediction remains accurate (26.87 dB) under such severe blur.
 
-- **Dual-mode applicability**: LDP functions both as a training-time loss (fine-tuning, Section 4.3) and as an inference-time correction module (posterior sampling, Section 4.4), demonstrating flexibility that few comparable degradation models offer.
+## Weaknesses
 
-### Weaknesses
+### Fatal
+None.
 
-#### Major
+### Major
+1. **Missing control experiment for fine-tuning attribution.** The paper fine-tunes SR models on DF2K with BSRGAN degradations while adding the LDP loss. The baseline is the *original pretrained model* (trained on bicubic DIV2K). The ablation in Table 6 does not include a variant where the model is fine-tuned on BSRGAN data using only standard losses (L1+LPIPS, without frequency loss and without the LDP symmetric loss). Without this control, the observed gains cannot be fully attributed to LDP's cycle-consistency constraint — some portion may come from simply fine-tuning on more diverse degradation data. The ablation does show that LDPV1 (frequency loss only, no LDP symmetric loss) achieves 23.99 dB vs. baseline 23.52, and LDPV7 (full method) reaches 24.35 dB, suggesting the symmetric loss contributes ~+0.36 dB on top of the frequency loss. However, even LDPV1 includes the frequency loss (which is part of the proposed pipeline), so the effect of data diversity alone remains unmeasured. This gap weakens the paper's central causal claim about the LDP symmetric loss.
 
-- **Posterior sampling gains are marginal and entangled with model-specific fixes (Section 4.4)**: For LDM, ResShift, and UPSR, quantitative improvements in Table 5 are negligible—many metric deltas are in the 0.0001–0.001 range, well within noise. For StableSR, the paper acknowledges (Appendix E) that applying LDP directly *exacerbates* a repeat-spot artifact, and a separate noise-subtraction technique (Eq. 18, from Bansal et al.) is required to make LDP beneficial. The paper is transparent about this ("applying LDP directly to StableSR without this technique tends to exacerbate the repeat-spot artifact"), but it means the StableSR+LDP gains in Table 5 cannot be attributed to LDP alone. This substantially weakens the posterior sampling contribution.
+2. **Degradation model comparison uses ill-suited baselines (Table 1).** DRN is designed exclusively for bicubic downsampling, and DualSR is a zero-shot method. Their poor performance on noise/blur/JPEG/hybrid degradations is expected and does not establish that LDP is a strong multi-degradation model. The paper acknowledges this limitation (lines 477–480), but still uses these comparisons to support claims about LDP's effectiveness. A meaningful comparison would require baselines trained on the same multi-degradation data (e.g., the BSRGAN pipeline itself or a learned module from Real-ESRGAN). The absolute performance numbers for LDP in Table 1 (e.g., 27.94 dB PSNR on Hybrid) are informative by themselves, but the comparative framing overstates the evidence.
 
-- **Inconsistent fine-tuning hyperparameters undermine the plug-and-play claim**: The paper states in Section 5 that "LDP parameters can be universally configured as τ = 100 and λ₁ = λ₂ = λ₃ = 1 for any super-resolution model." However, Appendix D reveals τ = 1 and λ = 0.1 for FeMaSR and StableSR, while τ = 100 and λ = 1 for SwinIR and MambaIR. The τ ablation (Table 7) shows τ = 100 is optimal for SwinIR, but no similar analysis exists for GAN/diffusion models. The paper does not explain why GAN and diffusion models require a 100× smaller weight, which raises concerns about sensitivity and reproducibility.
+### Minor
+3. **Posterior sampling shows mixed quantitative gains at high cost.** Table 5 reports that several metrics *worsen* for some diffusion models after adding LDP (e.g., LDM on RealSR: all five metrics degrade; UPSR on RealSRSet: CLIPIQA and QAlign drop). The computational cost is substantial (178 s/image for full LDP, Table 13). The paper appeals to visual quality improvements, which have merit, but the practical benefit is not clearly demonstrated, and the claims for this mode are softened accordingly.
 
-#### Minor
+4. **Motivation for patch-dependent noise is empirically weak.** Table 8 shows that patch size=1 (uniform global noise) achieves 24.43 dB PSNR, while the best patch size (16) achieves 24.46 dB — a difference of only 0.03 dB. The paper motivates patch-wise noise as enabling "fine-grained degradation in local patches," but the evidence does not support this being a critical design choice. The concept is interesting but appears to deliver marginal practical benefit.
 
-- **Contribution of LDP's degradation loop vs. frequency loss is only isolated on SwinIR**: Table 6 shows that the frequency loss alone (LDPV1) raises PSNR from 23.52 to 23.99 (+0.47), while LDP's symmetric loss adds a further +0.36 to reach 24.35. LDP's unique contribution is meaningful (43% of the total gain), and the LPIPS is best with the full combination (0.3571). However, this decomposition is only shown for SwinIR. Extending the same ablation to FeMaSR, StableSR, and MambaIR would strengthen confidence that LDP's degradation loop—not just the frequency loss—drives improvements across architectures.
+5. **Posterior sampling evaluation lacks reference metrics on synthetic data.** The paper evaluates diffusion posterior sampling only with no-reference metrics on real-world datasets. Reporting PSNR/SSIM/LPIPS on synthetic data (where ground truth is available) would provide a more interpretable picture of whether LDP improves or harms fidelity in this mode.
 
-- **LR prediction baselines are acknowledged as limited, not properly contextualized**: The paper compares LDP against DRN (designed only for bicubic degradation, as the paper itself notes in Section 2.2) and DualSR (a zero-shot, image-specific method). While Tables 1–2 serve the valid purpose of showing LDP does not collapse to trivial downsampling, the paper frames these comparisons as demonstrating LDP "performs consistently well across all degradation types" (Section 4.2). Without evaluation against other learned degradation models (e.g., the degradation component of Lway, which is compared only for training cost in Table 14), the quantitative superiority claim is not fully substantiated.
+### Trivial
+6. The motivation connecting diffusion model properties to the DAE framework (Section 3.1) is conceptually suggestive but loosely reasoned — the paper does not formally derive why denoising noisy HR features is equivalent to performing degradation modeling. This does not undermine the empirical results but makes the paper harder to follow at a critical juncture.
 
-- **Unexplained PSNR discrepancy in patch-size ablation**: Table 8 reports LDPp16 achieving PSNR = 24.46, but the main fine-tuning results (Table 3, Hybrid) report SwinIR+LDP at 24.35. This 0.11 dB discrepancy between tables that both evaluate SwinIR+LDP on the Hybrid dataset under the same baseline (23.52) is not explained.
+## Nice-to-Haves
+- An ablation comparing fine-tuning with L1+LPIPS only (no frequency loss, no LDP loss) on BSRGAN data would cleanly isolate the effect of the proposed symmetric loss.
+- Comparison of LDP's LR prediction against the BSRGAN pipeline itself (which generates the ground-truth LR) would be a more meaningful degradation model baseline than DRN/DualSR.
+- Visualizing the degradation maps C′ produced by the DPM for different LR conditions would help build intuition for what the model learns.
 
-- **Limited evaluation of degradation types genuinely unseen during training**: The synthetic test datasets are generated by the same BSRGAN pipeline used for training data synthesis. While the individual degradation types (Down, Noise, Blur, JPEG) are isolated at test time, they all come from the same generative process LDP was trained on. The severe blur test (Tables 11–12) partially addresses this, but evaluating on degradations from entirely different pipelines (e.g., different downsampling operators, real-camera noise) would better test the claimed generalization.
+## Removed Points
+These points were flagged by reviewers but are removed or weakened after verification against the paper:
+- **"Fine-tuning with BSRGAN may fully explain gains"** — partially kept as Major weakness #1 but weakened because the ablation (Table 6 LDPV1 vs. LDPV7) does show incremental benefit of the symmetric loss.
+- **"Table 2 metric is not informative"** — removed. The paper uses this metric to specifically test whether LDP degenerates to downsampling. Lower similarity with downsampled SR is the correct signal for this claim. The interpretation is logically sound.
+- **"Reproducibility concerns / Lway re-implementation unreliable"** — removed per hard rules. The paper cites code and provides implementation details; concerns about the Lway re-implementation quality are speculative.
+- **"Motivation is misleading (diffusion property not used in training)"** — weakened to Trivial #6. The paper uses the diffusion alignment insight as conceptual motivation, not as a training procedure. It is hand-wavy but not technically wrong.
+- **"Pure formatting/style nitpicks and parser artifacts"** — removed per hard rules.
 
-### Nice-to-Haves
+## Novel Insights
+None beyond the paper's own contributions. The reviews surface a genuine methodological concern (causal attribution of fine-tuning gains) but do not identify any deeper pattern or cross-cutting connection that the paper itself misses.
 
-- A sensitivity study of τ across all four architectures (not just SwinIR) to resolve the τ=1 vs. τ=100 inconsistency and establish whether a single universal setting is genuinely possible.
-- Qualitative examples of predicted LR images compared with ground-truth LR to visually verify that LDP captures degradation-specific characteristics beyond just the cycle loss being low.
-- A comparison of LDP-based cycle consistency with a simpler degradation model (e.g., a fixed blur-downsample operator) to isolate how much the learned degradation model adds beyond a basic consistency constraint.
-
-### Removed Points
-
-*These points are flagged to be removed—treat them with caution.*
-
-1. **Harsh Critic: "DRN was explicitly designed for bicubic degradation only... comparison is fundamentally inappropriate"** — The paper itself acknowledges this in Section 2.2: "DRN handles only bicubic downsampling." The comparison in Tables 1–2 primarily serves to demonstrate that LDP does not collapse to trivial downsampling, which is a legitimate use of DRN as a foil. The paper explicitly interprets the DRN and DualSR results as showing they "largely produce LR outputs that resemble simple downsampled versions." This is retained only in weakened form above.
-
-2. **Harsh Critic: "The statement about denoising noisy HR features being equivalent to denoising noisy LR features is imprecise"** — The paper clearly attributes this property to DR2 (Wang et al., 2023b) and uses it as motivation, not as its own theoretical contribution. The language is faithful to the cited source.
-
-3. **Harsh Critic: "No empirical analysis of whether the network can still take shortcuts"** — The degradation prediction experiment and Table 2 directly address this by measuring similarity to downsampled SR, showing LDP does not take the trivial shortcut.
-
-4. **Harsh Critic: "Why prompts are preferable to a simpler embedding"** — This is a design choice. The paper's ablation studies validate the overall architecture works; probing every design alternative is beyond reasonable scope.
-
-5. **Harsh Critic: "Frequency loss origin should be more clearly cited"** — The paper cites Xie et al. (2023) for the frequency loss (Section 3.3, Eq. 14). The citation is present and clear.
-
-6. **Harsh Critic: "StableSR improvements are partly due to artifact-removal noise-subtraction technique... comparison is not fair"** — The paper is transparent about this: Appendix E explicitly states the technique was used only in posterior sampling, not in fine-tuning. The fine-tuning results (Table 3–4) are clean. The posterior sampling results (Table 5) are flagged above as a major weakness precisely because of this entanglement.
-
-7. **Harsh Critic: "Lway's implementation is not publicly available and was re-implemented by the authors"** — Per hard rules, questions about the existence or availability of cited work are removed. The authors followed Lway's GitHub guidelines for re-implementation, which is standard practice.
-
-8. **Strength Finder (dropped):** "The core idea of using a pre-trained, lightweight degradation model to enforce cycle consistency during SR fine-tuning is sensible and practical" — Generic praise without specific evidence. Already covered by substantive strengths above.
-
-### Novel Insights
-
-None beyond the paper's own contributions. The core insight—that a lightweight DAE-based degradation model with patch-wise noise and LR high-frequency conditioning can serve as an effective, architecture-agnostic cycle-consistency regularizer—is the paper's contribution. The ablation in Table 6 revealing the complementary nature of frequency-domain and degradation-cycle losses is a useful practical finding.
-
-### Suggestions
-
-- **Resolve the τ hyperparameter discrepancy**: Either find a universal setting that works across all architectures, or provide a principled explanation for why GAN/diffusion models need τ = 1 while CNN/Transformer/Mamba models need τ = 100. Without this, the plug-and-play claim is overstated.
-
-- **Strengthen the posterior sampling evaluation or reduce its prominence**: The posterior sampling results are the weakest part of the paper. Consider either (a) adding a user study to support the claimed visual quality improvements when quantitative metrics are flat, or (b) reducing the posterior sampling contribution to a preliminary exploration rather than a co-equal contribution.
-
-- **Add LR prediction baselines against Lway's degradation model**: Since Lway is already compared for training cost (Table 14), comparing degradation prediction quality would provide a more competitive baseline for Tables 1–2.
-
-- **Clarify the PSNR discrepancy between Tables 3 and 8**: The 24.35 vs. 24.46 difference should be explained (different random seeds? different training configurations?).
+## Suggestions
+1. **Add the missing control experiment:** Fine-tune SwinIR (and at least one other architecture) on DF2K+BSRGAN using only L1+LPIPS losses (no frequency loss, no LDP symmetric loss). This directly answers whether the gains come from data diversity or from LDP's constraint. If the control shows smaller gains, it strengthens the paper's causal claims considerably.
+2. **Replace or supplement Table 1 baselines:** Add the BSRGAN degradation pipeline or a learned degradation model trained on the same multi-degradation data as a stronger baseline for LR prediction. Alternatively, reframe Table 1 as an absolute-performance evaluation of LDP as a degradation model rather than a comparative one.
+3. **Add reference metrics for posterior sampling:** Report PSNR/SSIM/LPIPS on synthetic data for the diffusion experiments to quantify fidelity changes more clearly.
+4. **Clarify the derivation in Section 3.1:** Either tighten the connection from diffusion model properties to the DAE framework with a cleaner argument, or reframe it as an intuitive motivation rather than a formal derivation.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors** (all from the ICLR 2026 human review corpus):
 
-| Anchor Paper | Avg Score | Comparison to LDP |
-|---|---|---|
-| DGMS (9T1agMpZ8i) | 2.50 | LDP is substantially stronger — broad cross-architecture experiments, thorough ablations, clear practical value. DGMS had poor presentation, limited novelty, narrow evaluation. |
-| Plug-in IQC (pvq53fGnRq) | 5.00 | Both are plug-in frameworks for SR. LDP has broader evaluation (4 architectures vs. 1), more consistent fine-tuning gains, and is more practically deployable. LDP's posterior sampling results share similar marginal-gain issues with IQC. LDP is stronger overall. |
-| SAVL (IOmPy7P1y4) | 5.60 | Both address degradation modeling for SR generalization. SAVL has stronger theoretical framing; LDP has broader architectural coverage and a more practical, lightweight design. Comparable quality — LDP's hyperparameter inconsistency and weak posterior sampling are offset by SAVL's reliance on older baselines. |
-| GenDR (vznIYSnv9J) | 6.00 | GenDR is a full SOTA SR system with architectural novelty (16-channel VAE, distillation). LDP is a plug-in rather than a standalone SR model. GenDR's contribution is more novel. LDP is somewhat below GenDR in overall novelty but compensates with broader cross-architecture validation. |
-| BDG (hVFoiCDiMB) | 5.50 | Universal image restoration with degradation modeling. Comparable experimental scope. LDP has similar strengths (thorough ablations, practical design) and similar weaknesses (some overclaiming on general applicability). |
-| MC-TTDG (jBuMH3DOPQ) | 5.00 | Test-time domain generalization for SR. LDP is more comprehensive in evaluation and has a cleaner, more practical method. |
+| Path | Avg Score | Similarity | Comparison to this paper |
+|------|-----------|------------|-------------------------|
+| `vznIYSnv9J.md` (GenDR) | 6.00 | Accept Poster | Stronger paper with cleaner experiments; LDP is weaker but has a different (non-diffusion) contribution |
+| `66Ad0i78lW.md` (DM-SR) | 5.00 | Accept Poster | Similar level — both have genuine contributions but notable gaps in evaluation |
+| `jBuMH3DOPQ.md` (MC-TTDG) | 5.00 | Accept Poster | Comparable quality and contribution level |
+| `pvq53fGnRq.md` (IQC) | 5.00 | Reject | LDP has more comprehensive evaluation and clearer practical benefit; stronger than this rejected paper |
+| `wED9O48qmH.md` (KernelFusion) | 4.00 | Accept Poster | LDP is more broadly applicable and practical; this paper was accepted despite limitations |
+| `i05MM4h1WZ.md` (SRAttack) | 2.50 | Reject | Substantially weaker than LDP |
 
-**Calibration:** LDP sits above the 5.00-tier papers (Plug-in IQC, MC-TTDG) due to broader evaluation and more consistent core results. It is comparable to SAVL (5.60) and BDG (5.50) in overall quality. It is below GenDR (6.00) in novelty but compensates with cross-architecture breadth. The posterior sampling weakness and hyperparameter inconsistency prevent a higher score. **Score: 5.5**, corresponding to a borderline accept — the fine-tuning contribution is solid and well-supported, but the paper would benefit from resolving the identified issues before publication.
+Relative to these anchors, LDP sits at the 5.0 level — it has a genuine contribution (lightweight, efficient, cross-architecture plug-in), decent but not flawless experiments, and one significant gap (missing control for fine-tuning attribution) that prevents stronger claims. It is stronger than the papers that scored 4.0 or below and comparable to the 5.0-level accepted papers.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

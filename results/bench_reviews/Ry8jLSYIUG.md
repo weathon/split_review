@@ -1,94 +1,79 @@
+Now I have all the information I need. Let me write the consolidated review.
+
 ## Summary
 
-This paper investigates how far current image watermarking methods are from theoretical capacity limits. It develops a geometric lattice-based framework to establish upper bounds on watermarking capacity under PSNR and linear robustness constraints, revealing capacities orders of magnitude beyond what existing models achieve (e.g., over 600,000 bits for a 256×256 image at 40 dB PSNR without robustness). Through controlled minimal-setting experiments — training Video Seal on a single gray image with only a PSNR constraint — the authors show that modern architectures fail to approach these bounds even when real-world complexity is stripped away, while simple linear and handcrafted models get much closer. As practical validation, they train Chunky Seal, a scaled-up Video Seal, achieving 1024 bits (4× prior capacity) with comparable quality and robustness. The paper concludes that substantial headroom remains for architectural innovation in image watermarking.
+This paper develops a geometric framework for analyzing watermarking capacity under PSNR and linear robustness constraints, modeling images as lattice points and capacity as counting lattice intersections. The PSNR-only bounds suggest capacities of ~600,000 bits at 40dB for a 256×256 image, while current methods achieve ~256 bits. Controlled experiments show Video Seal fails to exploit even this simplified setting, while simple linear models and handcrafted constructions approach the PSNR-only bounds. The paper then scales Video Seal to create Chunky Seal (1024 bits, 4× capacity, comparable robustness) as a demonstration that higher capacities are practically achievable.
 
 ## Strengths
 
-- **Novel geometric capacity framework (Section 2):** The lattice-based approach to bounding watermarking capacity under PSNR and linear transformations is elegant and provides intuitive, computationally tractable estimates. The progression from absolute capacity (Bound 1) through PSNR-only bounds (Bounds 2–9) to robustness-constrained bounds (Bounds 10–13) is systematic and well-motivated. The framework yields concrete numbers showing 2+ bpp at 40 dB PSNR without robustness — orders of magnitude above the <0.001 bpp seen in practice (Figure 1).
+- **Novel geometric framework for capacity analysis.** Modeling images as lattice points in pixel space and reducing capacity to counting integer points in the intersection of a hypercube and hypersphere (or ellipsoid under linear transforms) is a fresh perspective that avoids intractable probability distributions required by information-theoretic approaches. The application of Mitchell's lattice counting (Algorithm 2) and the Constales volume formula (Theorem 1) is technically neat.
 
-- **Creative controlled experiments isolate failure modes (Section 3):** Training Video Seal on a single gray image with only a PSNR constraint (Section 3.1) is a clever diagnostic that strips away dataset complexity, perceptual losses, and augmentations. The finding that Video Seal cannot embed even 1024 bits in this simplified setting, while a linear embedder reaches 2048 bits (Table 1, Figure 5) and a handcrafted model reaches 456,509 bits, provides concrete evidence that architectural limitations — not problem complexity — drive the capacity gap. The tiling experiment (32×32px model performs similarly to 256×256px) further reveals the architecture fails to exploit available resolution.
+- **Well-designed controlled experiments isolate architectural limitations.** Section 3 systematically eliminates hypotheses A–D (that robustness, perceptual constraints, data complexity, or unachievable bounds explain the gap). The finding that Video Seal performs similarly at 32×32px and 256×256px (Figure 5, Table 1) is a genuine diagnostic discovery: the architecture fails to exploit available resolution. The tiling experiment (32,768 bits) and linear model comparison convincingly show the bounds are achievable in principle.
 
-- **Practical demonstration of higher capacity (Section 4):** Chunky Seal achieves 1024 bits with PSNR 45.32 dB and overall bit accuracy of 99.15% — comparable to Video Seal's 99.31% at 256 bits (Table 3). The 4× capacity increase with maintained quality and robustness, achieved without hyperparameter tuning on Chunky Seal, provides strong evidence that current architectures have not saturated watermarking capacity. Per-transformation breakdowns in Appendix J.1 confirm robustness across individual perturbation strengths.
+- **Chunky Seal provides a concrete existence proof.** Table 3 shows 4× capacity (1024 vs 256 bits) with comparable robustness across rotations, crops, JPEG, brightness/contrast, and blur. The extended results in Appendix J.1 (Tables 4–5) show robust comparisons against HiDDeN, MBRS, TrustMark, and WAM. Even if Chunky Seal is a scaling exercise, it demonstrates the gap is not due to fundamental impossibility.
 
-- **Addresses confounds systematically (Sections 2.4, 2.6):** The paper preempts natural objections — showing that arbitrary cover images (not just centered gray) reduce capacity by at most 1 bpp (Section 2.4), and that data distribution effects from neural compression estimates reduce capacity by only ~0.05 bpp (Section 2.6). These analyses strengthen the argument that the gap cannot be explained away by these factors.
-
-- **Actionable sanity checks (Section 5):** The proposed design criteria (linear capacity scaling with resolution, linear decrease with PSNR, predictable drops under augmentations) provide concrete guidance for future watermarking architectures.
+- **Honest about limitations.** The paper repeatedly acknowledges that Bounds 10–12 are heuristic, that Bound 13 is "extremely conservative," that numerical integration becomes unstable at higher resolutions, and that Chunky Seal's size is impractical. This transparency is commendable.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None.
+- **The central claim about "orders of magnitude" unused capacity under *robust* constraints rests on heuristic, unvalidated bounds.** Bounds 10–12 are explicitly called "heuristics" (line 3525), "near-exact only for axis-aligned transformations" (line 3526), and acknowledged to be neither upper nor lower bounds on capacity (lines 3386–3392). The 2D toy examples (Figures 8–9) show errors of 16–20% for rotations of a simple geometric shape; for the 768D transformations actually used (rotation, cropping, LinJPEG), the error could be far larger. The paper's headline prediction of ~100,000 bits at 40dB under aggressive cropping (line 3910, ~0.5 bpp for 256×256px) uses these heuristic bounds and is scaled from a 16×16px computation under an unverified resolution-invariance assumption. The abstract's "orders of magnitude larger" (line 52) is strictly accurate only for the PSNR-only case — under robustness the heuristic bounds predict roughly 100,000 bits (vs. 256 bits achieved), which is ~400× but depends on the unvalidated heuristic.
+
+- **The conservative bound (Bound 13) that *is* a valid lower bound gives much more modest numbers.** Table 2 shows Bound 13 yields only 904 bits for Crop&Rescale 75% at 42dB — about 3.5× Video Seal's 256 bits, not "orders of magnitude." The paper acknowledges this bound is "extremely conservative and unrealistic" (line 4126) and that the zonotope-to-box over-approximation "can be extremely loose" (line 6084). The paper then defaults to the heuristic bounds for its main claims, creating a tension: the only valid bound says ~3.5×, while the heuristic bounds say ~400×, with no way to know which is closer to the truth.
+
+- **Chunky Seal's demonstration is a trade-off, not a breakthrough for the paper's thesis.** The 4× capacity gain comes with a 90× larger embedder (1022.7M vs 11.0M params), a 23× larger extractor, worse LPIPS (0.0085 vs 0.0019), and slightly worse bit accuracy on several robustness tests (e.g., JPEG: 98.79% vs 99.74%, Rotate 10°: 97.26% vs 98.31%). The paper acknowledges this (lines 999–1001: "we do not suggest that naïvely scaling Chunky Seal is a practical path forward"), but this acknowledgment undercuts the paper's own "suggests that substantially higher capacities are within reach" narrative. If scaling to 90× model size yields only 4× capacity with degraded metrics, this is evidence that capacity gains require disproportionate resources — which could equally suggest we *are* near a practical ceiling under reasonable resource constraints.
 
 ### Minor
 
-- **LinJPEG bounds are based on an unvalidated linearization (Section 2.5, Appendix G.4):** LinJPEG replaces JPEG's non-linear quantization step with a mask that zeros high-frequency DCT coefficients beyond a diagonal cutoff. Real JPEG also quantizes the *remaining* coefficients, collapsing distinct watermarked images into the same quantized representation — an effect LinJPEG does not capture. The paper acknowledges these are heuristic bounds (lines 427–428) and provides conservative Bound 13 as a lower bound, but Bound 13 also uses LinJPEG for the JPEG case. The claim that compression robustness "cannot fully explain the low capacity" would be strengthened by calibrating LinJPEG against real JPEG capacity loss. This does not undermine the broader argument — the other robustness bounds (crop, rotation) do not rely on LinJPEG and still show large gaps — but adds uncertainty specifically for compression claims.
+- **The data distribution argument (Section 2.6) using VQ-VAE codebooks is technically questionable.** The paper argues that data distribution reduces capacity by at most ~0.05 bpp because VQ-VAE codebooks upper-bound the number of perceptually distinct images. However, watermark collisions depend on the decoder's metric, not perceptual similarity — two semantically different images could share the same watermark decoding, and two perceptually similar images could decode differently. This analysis rests on a mismatch between the quantity being bounded (perceptually distinct images) and the quantity of interest (capacity under blind decoding). The paper's citation of Costa (1983) for "decoder knowledge of the cover does not affect capacity" is about Gaussian channels and does not directly apply to the lattice/discrete setting.
 
-- **Narrative tension between "structural limitations" and Chunky Seal's success:** The paper argues Video Seal's failure on the simplified task demonstrates "severe structural limitations" (line 103), yet Chunky Seal — a scaled-up instance of the same Video Seal architecture — succeeds at 1024 bits under realistic constraints. The paper acknowledges this tension in the discussion (lines 1000–1005: "we do not suggest that naïvely scaling Chunky Seal is a practical path forward"), but the narrative could be more precise about whether the issue is the architecture's *design* or its *capacity* (parameter count). The tiling experiment does show the architecture fails to exploit resolution, which supports a structural interpretation independent of model size. The evidence overall is sufficient to support the paper's conclusions, but the framing could be sharper.
+- **The "without hyperparameter tuning" framing for Chunky Seal cuts both ways.** The paper notes Chunky Seal was trained without hyperparameter tuning while Video Seal was "extensively optimized" (line 919). If anything, this suggests that with tuning, Chunky Seal might further close the gap. But it also means the comparison is asymmetric in a way that may overstate the challenges of achieving higher capacity within existing architectures.
 
 ### Trivial
 
-- **Main-table aggregation hides worst-case behavior (Table 3):** Results are aggregated over wide parameter ranges (e.g., JPEG Q 50–80, Rotate ≤10°). While Appendix J.1 does provide per-strength breakdowns, a brief note in the main text about worst-case performance (e.g., Chunky Seal drops to 65–72% bit accuracy on JPEG Q 40–50 on COCO vs. Video Seal's 97–98%) would give a more complete picture. This is purely a presentation preference.
-
-- **The discussion of absolute bit errors vs. bit accuracy could be clearer:** With 1024 bits at 99.15% accuracy, Chunky Seal produces ~8.7 incorrect bits on average vs. ~1.8 for Video Seal at 256 bits. The paper's claim of "comparable robustness" based on bit accuracy rates is standard and reasonable, but a sentence acknowledging the higher absolute error count would preempt reader questions about practical message recovery without error correction.
+- None of note — the paper is well-written and the parser artifacts do not affect readability.
 
 ## Nice-to-Haves
 
-- Calibrating LinJPEG capacity bounds against real JPEG on a small toy example (e.g., counting distinguishable messages under real JPEG vs. LinJPEG for a small grid) would strengthen the compression-related capacity claims.
-- A brief ablation showing whether Video Seal's failure on 1024 bits in the simplified setting can be overcome by simply increasing its parameter count (without the full Chunky Seal scaling) would clarify the capacity-vs-structure question.
-- Reporting message-level error rate (fraction of 1024-bit messages fully recovered) with a simple error-correcting code for Chunky Seal would address practical usability concerns.
+- Validating the heuristic robustness bounds at higher resolutions (even 32×32 or 64×64) would substantially strengthen confidence in the resolution-invariance claim for the robust case.
+- Training Chunky Seal at 2048 or 4096 bits would show whether capacity scales or saturates with model size.
+- An ablation study of which architectural changes in Chunky Seal drive the capacity increase (embedding dimension vs. channel multipliers vs. extractor depth) would support the "architectural limitations" thesis.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+(Points from the harsh critic that are removed per the instructions.)
 
-- **"Figure 1 could mislead readers"** (from harsh critic's section-by-section notes): The figure caption says "what this paper suggests to be possible" — it is appropriately hedged. Not a real weakness; removed.
-
-- **"The tiling experiment sidesteps the question of why the 256×256 model itself fails"** (from harsh critic): The tiling experiment IS the analysis — it demonstrates the architecture fails to exploit resolution, which is the finding. The paper explicitly states "the architecture fails to utilize the available resolution" (line 847). The critic's framing misreads the paper's argument. Removed.
-
-- **Demand for "deeper analysis" of why Video Seal fails** (from harsh critic's "Deeper Analysis Needed"): While additional ablations would be nice, the paper already provides converging evidence from three separate experiments (Video Seal failure, linear model success, tiling). Further analysis is a nice-to-have, not a weakness. Moved to Nice-to-Haves.
-
-- **"Visual comparison of LinJPEG vs. real JPEG"**: Nice-to-have illustration but not a methodological requirement. Moved to Nice-to-Haves.
-
-- **Request to "apply the same scaling recipe to push beyond 1024 bits"** (from harsh critic): This is a suggestion for future work, not a missing experiment that weakens the current paper. The paper already demonstrates feasibility with 1024 bits. Removed.
+- **"The paper has no valid capacity bounds under realistic robustness constraints"** — Too harsh; Bound 13 *is* a valid lower bound, even if very conservative. The paper transparently discusses the status of each bound.
+- **"The framing misrepresents the state of the field"** — The claim that "progress has stagnated" (line 27) is a reasonable observation about capacity plateauing at ~100–256 bits. This is a judgment call, not a factual error.
+- **"Chunky Seal is a scaling exercise, not evidence"** — It *is* a scaling exercise, but scaling *is* evidence that higher capacities are practically achievable. The paper frames it appropriately as a proof-of-concept.
+- **"The gray image experiment is fundamentally misaligned with the paper's contribution"** — This experiment tests hypotheses A–D for *why* the gap exists, not the robustness bounds. This is a valid experimental design choice within the paper's stated scope.
+- **Various formatting/style nitpicks and missing appendix references** — These are parser artifacts or out of scope.
 
 ## Novel Insights
 
-The paper's most novel contribution is the geometric lattice formulation of watermarking capacity. By reframing the problem as counting integer lattice points in the intersection of a hypercube (valid pixel range) and a hypersphere (PSNR constraint), the paper derives capacity bounds that are both conceptually simple and practically computable. The extension to linear transformations via singular value analysis provides a unified way to reason about diverse robustness constraints (crop, rotation, JPEG) within the same geometric framework. The core methodological insight — that architectural limitations rather than fundamental constraints explain the capacity gap — is demonstrated through a particularly clever experimental design: systematically stripping away real-world complexity to isolate failure modes. This controlled-ablation methodology could serve as a template for diagnosing other machine learning systems where theoretical bounds are known but empirical performance lags.
+The most interesting finding is not the capacity bounds themselves, but the diagnostic discovery that Video Seal's effective capacity at 256×256px is essentially the same as at 32×32px (~20×20px equivalent). This strongly suggests that current neural architectures for watermarking have a structural bottleneck in how they map message bits to pixel-space degrees of freedom — they are operating on an effective dimensionality far lower than the image resolution. The tiling experiment (32,768 bits by tiling a 32×32px model) confirms that the pixel-level capacity is there, but end-to-end training on large images cannot discover the appropriate mapping. This is the paper's most actionable insight for future architecture design.
 
 ## Suggestions
 
-- Add a sentence or footnote to Table 3 noting the per-strength breakdown is available in Appendix J.1, and mention the worst-case performance gap for harder perturbations (e.g., JPEG Q 40–50 on COCO where Chunky Seal's bit accuracy is notably lower than Video Seal's).
-- Consider adding a brief discussion of whether error-correcting codes could mitigate the higher absolute bit-error count at 1024 bits, or whether simple repetition coding would suffice given the high per-bit accuracy.
-- For the LinJPEG bounds, a short calibration experiment on a small grid (e.g., 8×8) comparing distinguishable-message counts under real JPEG vs. LinJPEG would add credibility to the compression-capacity claims at minimal experimental cost.
+1. **Reframe the paper's central claim to match the evidence.** The abstract and introduction should distinguish between the PSNR-only setting (where "orders of magnitude" is supported) and the robust setting (where the evidence supports "substantially higher" but the precise magnitude is uncertain). A more nuanced framing would strengthen rather than weaken the paper.
+2. **Include Bound 13's numbers more prominently.** Rather than defaulting to heuristic bounds for all main claims, the paper should lead with the conservative bound where possible and clearly state when it's using the heuristic bounds.
+3. **Add a comparison to the handcrafted constructor under robustness.** The handcrafted model validates the PSNR-only bounds; a similar construction (even approximate) for the robust case would be valuable, even if limited.
+4. **Provide quantitative bounds on the heuristic error.** The 2D examples (Figures 8–9) show 16–20% error for rotations; bounding the heuristic error for the actual 768D transformations would significantly strengthen the paper.
 
----
+## Score and Decision
 
-**Evaluation across axes:**
+### Calibration Anchors
 
-- **Originality:** High. The geometric lattice framework for watermarking capacity is novel, and the controlled minimal-setting experimental methodology is creative.
-- **Importance of research question:** High. Whether watermarking has hit fundamental limits is a timely and important question for the provenance community.
-- **Claims well supported:** Well supported overall, with theory, controlled experiments, and practical validation forming a coherent chain of evidence. Minor concerns about LinJPEG calibration and narrative precision do not threaten the core claims.
-- **Soundness of experiments:** Strong. The controlled experiments are well-designed, and the Chunky Seal results include extensive per-perturbation breakdowns in the appendix.
-- **Clarity of writing:** Good. The paper is well-structured and arguments are easy to follow. Some aggregation in Table 3 could benefit from more explicit signposting to the appendix.
-- **Value to research community:** High. The capacity bounds provide a benchmark for future methods, and the sanity checks offer actionable design principles.
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| Fast, Secure, And High-Capacity Image Watermarking With Text Autoencoded Text Vectors | TVSPV6D0co | 4.67 (Reject) | Also about image watermarking capacity; simpler contribution (autoencoder+VideoSeal combo) vs. this paper's genuine theoretical framework. Current paper is stronger. |
+| The Coding Limits of Robust Watermarking for Generative Models | 9u8HFU6ioO | 3.50 (Withdrawn) | Had flawed proofs and scope issues (reviewers questioned ML relevance). Current paper is substantially stronger. |
+| The Self-Re-Watermarking Trap | st1hrLTP14 | 6.00 (Accepted Poster) | Solid empirical paper with novel threat model and defense; cleaner contributions. Current paper has stronger theory but weaker empirical validation of its core claim. Roughly comparable quality. |
+| Watermark-based Attribution of AI-Generated Content | syOYjXqKnS | 4.67 (Accepted Poster) | Mixed reviews (6,2,6); simple but practical idea. Current paper has more theoretical depth and is comparably well-executed. |
+| Hiding in the Phase: A Provably Robust Watermark for Diffusion Models | oTGJZtrprx | 5.00 (Reject) | Split reviews (8,2,4,6); had a genuine method but overclaimed. Similar quality level to current paper — both have interesting ideas undercut by overclaiming relative to evidence. |
 
-**Anchor comparison:**
+Against these anchors, this paper is around 5.0. It has a genuinely novel theoretical framework (unlike TVSPV6D0co) and well-designed diagnostic experiments. However, like oTGJZtrprx, it overstates its central claim relative to the evidence — here, the "orders of magnitude" claim under robustness depends on unvalidated heuristic bounds. The paper is borderline: the theoretical framework and diagnostic experiments are contributions, but the headline claim is not as well-supported as the paper suggests.
 
-- `/home/wg25r/review_agent/human_reviews_2026/pAeEzS4LwS.md` (avg 2.67): Rejected LLM watermarking theory paper with fundamental misunderstandings about computational assumptions. Current paper is substantially stronger — its theoretical framework is well-grounded and validated empirically.
-- `/home/wg25r/review_agent/human_reviews_2026/9u8HFU6ioO.md` (avg 3.50): Withdrawn cryptographic watermarking limits paper. Current paper has broader scope and stronger empirical validation.
-- `/home/wg25r/review_agent/human_reviews_2026/CbxZ86mWrs.md` (avg 4.00): Rejected geometric-robustness watermarking paper. Current paper has a more novel theoretical contribution and clearer experimental narrative.
-- `/home/wg25r/review_agent/human_reviews_2026/TVSPV6D0co.md` (avg 4.67): Rejected high-capacity watermarking paper (LatentSeal) criticized for being a combination of existing works. Current paper has stronger novelty in both theory and controlled experimental design.
-- `/home/wg25r/review_agent/human_reviews_2026/st1hrLTP14.md` (avg 6.00): Accepted self-re-watermarking paper with novel threat model and solid experiments. Current paper is comparably strong with broader scope (theory + diagnostics + practical model).
-- `/home/wg25r/review_agent/human_reviews_2026/wyucYNGPiW.md` (avg 6.50): Accepted attack-resistant watermarking paper. Current paper has comparable rigor and broader foundational contribution.
-- `/home/wg25r/review_agent/human_reviews_2026/EhDgP69DJG.md` (avg 7.00): Accepted PMark paper with solid theoretical framework and experiments. Current paper is comparable — both provide theoretical frameworks with practical validation, though in different watermarking domains.
-- `/home/wg25r/review_agent/human_reviews_2026/Jz5SA2KoFt.md` (avg 7.00): Accepted forensic detector confidence paper. Current paper has comparable quality and a similarly well-structured argument.
-
-The paper under review sits above the ~5.0 and below anchors, is clearly stronger than the 4.67 paper, and is comparable to the 6.0–7.0 accepted papers. The theoretical contribution is more foundational than most watermarking papers, the experimental design is unusually thorough, and the practical validation closes the loop convincingly. Minor concerns about LinJPEG calibration and narrative precision are addressable.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,24 +1,20 @@
-Now I have read the paper thoroughly and calibrated against human-reviewed anchors. Let me now write the consolidated review.
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes two algorithms (MadDist, TDMadDist) for learning the Minimum Action Distance (MAD) between states from unlabeled state trajectories — without actions or rewards. The key innovations are (1) a scale-invariant, quasimetric-aware loss that combines a regression objective, a contrastive term, and an explicit constraint penalty, (2) a novel computationally efficient quasimetric (d_simple), and (3) a benchmark suite with known ground-truth MAD spanning discrete/continuous, deterministic/stochastic, and symmetric/asymmetric environments. The learned distances are evaluated via correlation metrics against ground truth and via downstream planning success rates on OGBench PointMaze tasks.
+This paper proposes two self-supervised algorithms (MadDist and TDMadDist) for learning the Minimum Action Distance (MAD) — the minimum number of actions required to transition between two states — from state-only trajectories, requiring neither rewards nor actions. The paper introduces a simple ReLU-based quasimetric, builds on a constrained optimization formulation of MAD, and evaluates on a diverse benchmark suite spanning discrete/continuous states, deterministic/stochastic dynamics, and symmetric/asymmetric transitions. MadDist achieves near-perfect success rates (0.99–1.00) on downstream planning tasks in OGBench PointMaze environments, decisively outperforming QRL and Hilbert baselines.
 
 ## Strengths
 
-- **Strong empirical MAD approximation**: MadDist achieves high Pearson/Spearman correlations and low CV across all environments (Figure 3). It strictly outperforms QRL and Hilbert baselines on both correlation metrics and downstream planning (Table 1), achieving near-perfect success rates (0.99–1.00) on most OGBench PointMaze tasks. This validates the claim that MAD can be learned from state trajectories alone.
+- **Strong downstream planning results.** MadDist achieves 0.99–1.00 success rates across all six OGBench PointMaze environments (Table 1), decisively outperforming QRL (0.81–0.97) and Hilbert (0.05–0.67). The planning evaluation uses a simple random-shooting MPC that isolates the quality of the learned metric, making this the paper's strongest evidence.
 
-- **Novel simple quasimetric is effective and well-justified**: d_simple (Equation 3) is a lightweight weighted combination of max and mean ReLU reductions. Appendix B proves it satisfies the triangle inequality, and ablation studies (Figures 5–6, Appendix E) show it outperforms both Wide Norm and IQE quasimetrics across all three evaluation metrics. This is a neat technical contribution with practical value.
+- **Novel simple quasimetric that works well.** The proposed _d_simple_ (Eq. 3) — a weighted max-mean of coordinate-wise ReLU differences — is computationally cheap and consistently outperforms both Wide Norm and IQE quasimetrics in the CliffWalking ablation (Appendix E.2, Figures 5–6). This is a clean design contribution.
 
-- **Diverse benchmark suite with known ground truth**: The evaluation suite (NoisyGridWorld, KeyDoorGridWorld, CliffWalking, PointMaze, OGBench PointMaze) systematically covers asymmetric dynamics, stochasticity, continuous states, and noisy observations. Having known MAD values enables rigorous quantitative comparison, which was previously absent in the literature.
+- **Effective in asymmetric environments.** The method achieves near-0.9 Pearson correlation in KeyDoorGridWorld and CliffWalking (Figure 3), while the symmetric Hilbert baseline collapses. This validates the value of modeling asymmetry.
 
-- **TDMadDist extends the framework to TD-style bootstrapping**: The TDMadDist variant (Section 6.2) incorporates a target network and Bellman-consistent bootstrapped targets. While it underperforms MadDist in some settings, it still substantially outperforms the symmetric Hilbert baseline on asymmetric tasks, demonstrating the framework's flexibility.
+- **Comprehensive benchmark suite.** The paper constructs six environments with known (or well-approximated) MAD values spanning stochastic/deterministic dynamics, discrete/continuous state spaces, noisy observations, and structural asymmetry (Appendix G). This is a practical resource for future work.
 
-- **Thorough ablation studies**: Appendix E systematically investigates latent dimension, quasimetric choice, dataset size, and network architecture (Figures 4–9). Results confirm graceful saturation and robustness to these design choices, adding confidence in the method.
-
-- **Practical downstream utility**: Table 1 shows that the learned distances serve as effective planning heuristics with a simple random-shooting MPC planner, achieving 0.99 success rate on GiantMaze. This demonstrates that the representations are useful beyond correlation metrics.
+- **Informative ablations.** Appendix E systematically varies latent dimension, quasimetric choice, and dataset size, showing graceful degradation and saturation behavior.
 
 ## Weaknesses
 
@@ -28,70 +24,72 @@ None.
 
 ### Major
 
-- **Loss function is a proxy, not an exact solver for the MAD constrained-maximization problem**: The paper defines MAD as the solution to a constrained maximization (Equation 1) but translates this into a regression loss (Equation 5) that drives learned distances toward the trajectory bound *j−i*. As the paper acknowledges (Appendix C: "serving as a proxy for the maximize objective"), this is an approximation — matching the upper bound is not equivalent to maximizing subject to the bound. When multiple trajectories provide different (non-tight) bounds for the same state pair, the MSE objective pushes the estimate toward an average of those bounds rather than the tightest one. The constraint loss (Lc) penalizes overshoot of the currently sampled bound but does not force exploitation of tighter bounds from other trajectories. While the TDMadDist variant partially addresses this by bootstrapping, the fundamental tension remains. This does not invalidate the empirical results, but it means the paper overstates the connection between the theoretical formulation and the practical algorithm. The authors should (a) explicitly discuss this gap, (b) analyze how often non-tight bounds appear in practice and how they affect learning, and (c) ideally provide an empirical demonstration that the learned distances recover the tightest bound rather than an average (e.g., a controlled experiment with known overlapping bounds).
+- **Algorithm vs. quasimetric confound in the QRL comparison.** The paper compares MadDist (using its simple quasimetric) against QRL (using IQE). The ablation (Appendix E.2) shows MadDist-Simple > MadDist-IQE for the same algorithm, but the paper never compares MadDist-IQE against QRL directly. This means the claimed advantage over QRL could be driven entirely by the quasimetric choice rather than the MadDist learning algorithm. To fully support the claim that MadDist as an algorithm is superior, a controlled comparison (e.g., MadDist-IQE vs. QRL-IQE) is needed. The planning results (Table 1) partially mitigate this concern since they compare full systems, but the correlation metrics (Figure 3) are affected.
+
+- **Hyperparameter ambiguity harms reproducibility.** Important hyperparameters are reported as ranges without environment-specific assignment (Table 2: _d_max_ ∈ {100, 500}, _w_r_ ∈ {1, 10}). The paper does not specify which value is used for which environment. This makes reproduction difficult and the results hard to interpret.
 
 ### Minor
 
-- **Ground-truth MAD in PointMaze/OGBench is a discretized grid approximation**: For continuous-control PointMaze environments, the paper computes ground-truth MAD via Floyd-Warshall on a discretized grid graph, which ignores velocity, momentum, force-based actuation, and wall collision dynamics. The paper acknowledges this ("approximate the ground truth MAD," line 599) but does not discuss how this approximation gap affects the reported Pearson/Spearman correlations. This matters for interpreting the correlation values in Figures 3, 11, and 12. However, this concern is partially mitigated by (1) the discrete environments (CliffWalking, KeyDoorGridWorld, NoisyGridWorld) where the MAD is exact, and (2) the planning experiments (Table 1) that evaluate downstream utility without relying on the approximate ground truth.
+- **"Ground truth" MAD in continuous environments is an approximation.** For PointMaze and OGBench, the paper computes MAD by discretizing the maze into a grid and running Floyd-Warshall (lines 599, 2917–2919). The paper does acknowledge this is an "approximation," but the resulting values are treated as ground truth for computing Pearson/Spearman correlations and CV ratios (Figures 3, 11, 12). For maze environments with continuous force-based dynamics, the grid-based shortest path through corridors is a reasonable proxy (wall geometry dominates the MAD), but the approximation error is not quantified. The correlation numbers should be interpreted with this caveat. The planning results (Table 1) are unaffected since they measure actual task success.
 
-- **No isolation of asymmetry benefit from loss design benefit**: The paper compares against Hilbert (symmetric) and QRL (quasimetric) but does not include an ablation where the authors' own MadDist is run with a symmetric distance (e.g., Euclidean) on the same data. This makes it difficult to attribute gains specifically to the quasimetric versus the new loss formulation (scale-invariant MSE + contrastive + constraint terms). Adding this ablation would strengthen the central claim that asymmetry is crucial.
+- **TDMadDist underperforms without analysis.** The TD-based variant underperforms both MadDist and QRL across all environments (Figures 3, 11, 12, Table 1). The paper acknowledges this (line 635) but provides no analysis of _why_ — e.g., whether bootstrapping introduces bias from function approximation in the target network, or whether the TD target is a tighter bound that is harder to learn. The inclusion of a consistently worse second algorithm weakens the paper's overall empirical narrative.
 
-- **Ablation studies limited to CliffWalking**: The ablation experiments on latent dimension, quasimetric choice, dataset size, and architecture are conducted only in CliffWalking (Appendix E). While CliffWalking is a reasonable testbed (strongly asymmetric, exact ground truth), generalizability of these ablation findings to other environments is not demonstrated.
+- **No confidence intervals or significance tests for correlations.** The correlation values (Figures 3, 11, 12) are reported with min/max ranges across seeds but without confidence intervals or statistical significance tests. This makes it difficult to assess whether differences between methods are reliable.
+
+- **NoisyGridWorld analysis is incomplete.** The paper evaluates on NoisyGridWorld (4D observations with 2 noise dimensions) and reports high correlations (Figure 11), but does not analyze whether the learned embedding actually ignores the noise dimensions or whether the model overfits. A simple diagnostic (e.g., evaluating on clean observations and comparing) would strengthen this result.
 
 ### Trivial
 
-- The planning experiment (Appendix H) uses a random-shooting MPC planner that queries the true simulator. Success rates may partly reflect the planner's local exploration capability rather than the global accuracy of the learned distance metric. This could be noted as a caveat.
+- The scale-invariant loss (Eq. 5) divides by (j−i); the critic's concern about short-pair domination is a theoretical possibility not borne out in the results and not a meaningful weakness.
+- Extension to continuous state spaces (Section 4) is described as "hand-wavy" by the critic, but the paper's algorithms do not rely on this extension — they learn from sampled trajectories.
 
 ## Nice-to-Haves
 
-- It would be interesting to see an analysis of failure modes: state pairs where the learned distance grossly overestimates the true MAD despite high overall correlation — to understand whether the method captures global structure or merely a coarse ranking.
-
-- A comparison of computational cost (training time, inference latency) between MadDist and the QRL/Hilbert baselines would help practitioners.
-
-- Evaluating on analytically-tractable environments and reporting absolute error metrics (MAE, RMSE) in addition to correlation metrics would provide a more complete picture of MAD recovery accuracy.
+- Compare MadDist and QRL using the same quasimetric to isolate the algorithm contribution.
+- Quantify the approximation error of the grid-based MAD in continuous mazes (e.g., by comparing against a finer discretization or an exact shortest-path computation on a continuous mesh).
+- Analyze whether the learned embedding in NoisyGridWorld actually zeros out noise dimensions.
+- Investigate why TDMadDist underperforms MadDist — e.g., whether bootstrapping introduces bias.
+- Add t-SNE/PCA visualizations of learned embeddings for continuous environments.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
-
-- **Harsh Critic Claim: "The loss function fundamentally changes the problem and invalidates the central claim."** → Kept as a Major weakness but downgraded from "fatal/structural error." The paper openly presents this as a proxy, the approach works empirically, and the claim of *approximation* (not exact recovery) is supported. The critique is real but does not invalidate the paper.
-
-- **Harsh Critic Claim: "The baseline comparison with Hilbert is unfair because Hilbert needs reward/goal-conditioned signals."** → Moved to Removed Points. The paper applies the same data regime to all methods and is transparent about the setup. Hilbert's failure on random-policy data is informative, not unfair — it demonstrates that the proposed method works in a data regime where the baseline does not. However, the absence of a symmetric-vs-asymmetric ablation of the authors' own method is kept as a Minor weakness.
-
-- **Harsh Critic Claim: "The ground-truth MAD used to evaluate the method in continuous environments is unreliable" followed by "the evidence that the method accurately learns the MAD in continuous domains is not trustworthy."** → Kept as a Minor weakness but substantially weakened. The paper acknowledges the approximation; discrete environments provide exact ground truth; planning results provide independent validation. The absolute claim that evidence is "not trustworthy" overstates the issue.
-
-- **Harsh Critic: "The ablation on latent dimension and quasimetric choice only uses CliffWalking; generalisation claims are limited."** → Kept as a Minor weakness (already incorporated above).
-
-- **Strength Finder: "Comprehensive benchmark with known ground-truth MAD"** → Kept but with the caveat about approximate ground truth in continuous environments already reflected in the Minor weakness.
+- **Criticism about "ground truth invalidates central quantitative claims"**: Overstated. The grid-based shortest path is a reasonable proxy for maze MAD (wall geometry dominates); the paper acknowledges the approximation. This is a minor caveat, not a fatal flaw. Moved to Minor.
+- **Criticism that the paper's results "could reflect overfitting to the grid approximation"**: Speculative and not supported by evidence. The planning results (Table 1) use the true simulator, not the grid approximation, and show strong performance.
+- **Criticism about "extension to continuous state spaces is hand-wavy"**: The paper's algorithms are sampling-based and do not depend on a rigorous continuous-space proof. This is not a weakness.
+- **Criticism about "scale-invariant loss could be dominated by short pairs"**: A theoretical possibility not backed by empirical evidence. The method works well in practice.
+- **Criticism about "SELU without justification"**: A trivial implementation nitpick.
+- **Claim from Strength Finder that the paper provides "theoretical grounding linking MAD to constrained optimization"**: This is correctly identified as a strength (it's a formal proof in Appendix A), so I keep it.
+- **Strength Finder's claim about "graceful degradation with dataset size"**: Supported by Appendix E, kept.
+- **Several generic strength statements from Strength Finder** ("comprehensive benchmark suite" is kept; some redundant phrasing consolidated).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The review synthesis does not reveal insights not already present in the paper.
+The reviewers surface an important tension: the paper's contribution bundle (algorithm + quasimetric) makes it difficult to attribute improvements to one component over the other. This is a recurring challenge in representation learning papers where the algorithm and the architecture are jointly optimized. The paper would be strengthened by a crossover experiment. Separately, the lack of explanation for TDMadDist's underperformance is a missed opportunity — understanding when TD bootstrapping helps or hurts for distance learning could be a finding in its own right.
 
 ## Suggestions
 
-- Explicitly discuss the gap between the constrained-maximization formulation (Equation 1) and the proxy regression loss (Equation 5). Add a paragraph acknowledging when and why the proxy can fail (e.g., when loose bounds dominate the data) and how the constraint loss and contrastive loss help mitigate this.
-
-- Add a controlled experiment (even in a simple grid world) demonstrating that the learned distance converges to the tightest bound when multiple trajectories with different bounds exist for the same state pair.
-
-- Add a MadDist-with-Euclidean-distance ablation on one or two environments to isolate the benefit of the quasimetric from the benefit of the loss formulation.
+1. **Run a controlled comparison** where MadDist and QRL use the same quasimetric (e.g., both using IQE) to disentangle algorithm from architecture contributions.
+2. **Specify hyperparameters per environment** for _d_max_ and _w_r_, or provide a tuning procedure.
+3. **Quantify the grid approximation error** for continuous mazes (e.g., compare grid-MAD to a finer-resolution computation or argue theoretically why the approximation is tight).
+4. **Add a diagnostic for NoisyGridWorld** showing that noise dimensions are properly ignored in the learned embedding.
+5. **Investigate TDMadDist's underperformance** — a simple experiment varying the target network update rate or analyzing whether the Bellman equation for MAD is well-approximated by the TD target would clarify the role of bootstrapping.
 
 ## Score and Decision
 
-### Calibration Anchor Comparison
+**Comparative analysis against anchors:**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/UElh7vzgKX.md` | 5.20 | Quasimetric GCRL paper, accepted. Has strong empirical results but unclear theoretical contribution and limited novelty (n-step extension of prior work). Our paper has clearer novelty (simple quasimetric, two algorithms, benchmark), more comprehensive evaluation, and stronger ablations. **Our paper is stronger.** |
-| `/home/wg25r/review_agent/human_reviews_2026/5WhsCB0Vty.md` | 6.00 | Eik-QRL paper, accepted. Strong theoretical contribution with PDE formulation, comprehensive experiments, but gains vanish on manipulation tasks and relies on strong isotropy assumptions. Our paper has similar empirical breadth and comparable novelty. The proxy-loss gap is comparable in severity to the isotropy assumption limitation. **Comparable quality.** |
-| `/home/wg25r/review_agent/human_reviews_2026/jdL6WB5jHZ.md` | 6.50 | Simple method (RLDP) that matches SOTA on zero-shot RL, accepted. Clean theory-to-practice connection, strong results. Our paper has more diverse evaluation but the proxy-loss gap creates a similar theory-practice tension. **Our paper is slightly weaker** because of the acknowledged approximation gap. |
-| `/home/wg25r/review_agent/human_reviews_2026/rw0vvcHZPe.md` | 5.50 | MAD-based metric space learning, accepted. Novel method but limited environments. Our paper has more comprehensive evaluation and stronger ablations. **Our paper is stronger.** |
-| `/home/wg25r/review_agent/human_reviews_2026/FkeURAdA0h.md` | 4.50 | Representation learning for GCBC, accepted. Theory-experiment mismatch, unclear motivation. Our paper has clearer motivation, stronger empirical validation. **Our paper is stronger.** |
-| `/home/wg25r/review_agent/human_reviews_2026/VFaYukYt6K.md` | 3.33 | Motion planning with autoencoders, rejected. Poor writing, weak empirical evaluation, unclear contribution. **Our paper is substantially stronger.** |
+| Anchor Paper | Avg Score | Comparison |
+|---|---|---|
+| Eik-QRL (5WhsCB0Vty) | 6.00 | Stronger theory (PDE formulation), similar experimental scope. This paper has weaker theory but stronger planning results in absolute terms (1.00 vs 0.99 on PointMaze). |
+| Multistep QD (UElh7vzgKX) | 5.20 | Stronger real-world evaluation (Bridge robot), comparable quasimetric learning contribution. This paper's benchmark diversity and planning isolation are strengths. |
+| Geometry of Uncertainty (rw0vvcHZPe) | 5.50 | Similar goal of learning distance metrics from trajectories. This paper has cleaner ground-truth evaluation but less novelty in the learning algorithm itself. |
+| Dual Goal Reps (aMKFTidLSM) | 5.50 | Stronger theoretical framing but similar experimental quality on OGBench. Both papers have a gap between theory and practice. |
+| Safety-Aware RL (lxKH0pnbhS) | 2.00 | Significantly weaker — results fail to support claims. This paper is clearly stronger. |
+| RLDP (jdL6WB5jHZ) | 6.50 | Stronger experimental rigor, cleaner contribution. This paper has more diverse environments but the confound issue is a real gap. |
+| Unifying URL (nNmd4pPSck) | 4.40 | More conceptual/theoretical but less empirical. This paper has stronger experimental validation. |
+| Emergent Exploration (mwgYORsqtv) | 6.00 | Cleaner analysis with a focused claim. This paper has broader scope but less mechanistic insight. |
 
-Positioning: The paper is clearly above the 5.0–5.5 range (stronger than the 5.20 quasimetric paper and the 5.50 MAD paper). It is comparable to the 6.0 Eik-QRL paper in terms of contribution quality and empirical breadth — both have a meaningful limitation that tempers their theoretical contribution, but strong empirical results. The paper is slightly below the 6.50 RLDP paper, which has an elegant simplicity and cleaner theory-practice alignment. 
+**Calibration:** The paper has genuine contributions (simple quasimetric, strong planning results, diverse benchmark suite) and is clearly above reject-quality papers like Safety-Aware RL (2.00) and comparable to mid-range papers like MQE (5.20) and Dual Goal Reps (5.50). However, the algorithm-vs-quasimetric confound and hyperparameter ambiguity prevent it from reaching the 6.0 tier of Eik-QRL or RLDP. The planning results are genuinely impressive but tempered by the confound issue.
 
-Score: **6.0**
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept (Poster)</orange>

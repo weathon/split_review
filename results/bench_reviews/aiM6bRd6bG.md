@@ -1,93 +1,85 @@
+Now I have all the information I need. Let me write the consolidated review.
+
 ## Summary
 
-This paper introduces *PPI candidate ranking* — a task that prioritizes unconfirmed protein–protein interactions for experimental validation by leveraging a target protein's known interaction partners. The authors propose a two-stage framework: (1) interpretability-guided retrieval that extracts activated residue regions from D‑SCRIPT/Topsy‑Turvy contact maps of known partners and uses region‑restricted cosine similarity to rank novel candidates, and (2) a multi‑source re‑ranking module incorporating interaction scores, structural plausibility (pDockQ), functional enrichment, and LLM‑based semantic similarity. Evaluation uses a prospective STRING v11→v12 design, demonstrating large improvements over raw interaction-probability baselines.
+This paper introduces the problem of PPI candidate ranking — given a target protein and its known interaction partners, rank novel candidates for experimental validation. The authors propose a two-stage framework: (1) interpretability-guided retrieval that extracts active residues from predicted contact maps of known-interaction pairs and uses these as templates to score candidates via sliding-window cosine similarity, and (2) a re-ranking module that integrates interaction scores, structural plausibility (pDockQ), functional annotations, and LLM-based semantic signals. Evaluated on a STRING v11→v12 temporal split (279,568 novel interactions), the method improves early ranking metrics substantially over raw interaction-probability baselines.
 
 ## Strengths
 
-- **Novel and practically motivated problem formulation.** The paper carves out PPI candidate ranking as a distinct task — prioritizing interactions for experimental validation — which directly addresses a real bottleneck in interactome mapping. This is well-scoped and clearly motivated (Sections 1, 4).
+- **Prospective temporal evaluation design**: Using consecutive STRING releases (v11 as training/anchor data, v12 as test) creates a realistic, contamination-free evaluation that directly targets whether methods can *anticipate* future experimental discoveries. This is a genuine methodological contribution — most PPI benchmarks are static retrospective snapshots.
 
-- **Well-designed prospective evaluation.** Using consecutive STRING releases (v11→v12) as a testbed is a sound design that moves beyond static retrospective evaluation. The consistent gains across Recall@k, MAP, nDCG, MRR in Table 1 provide credible evidence that the framework reshapes rankings in practically meaningful ways.
+- **Systematic multi-source re-ranking analysis**: Table 2 provides a comprehensive pairwise comparison of 11 re-ranking signals (IS, pDockQ, TF-IDF, four semantic overlap measures, three LLMs), quantifying rank-shift fractions. The finding that PubMedBERT maintains/improves 75.5% of rediscoveries and that lightweight TF-IDF-based signals achieve ~70% is practically useful for deployment decisions.
 
-- **Substantial improvement over interaction-probability baselines.** Table 1 shows the method lifts D‑SCRIPT Recall@10 from ~1.2% to 26.4% and Topsy‑Turvy Recall@10 from ~0.12% to 11.1%. MRR increases 4–6×. These are large, practically meaningful gains.
+- **Large-scale empirical scope**: The evaluation covers 279,568 novel v12 interactions, uses both D-SCRIPT and Topsy-Turvy backbones, and includes computational cost characterization (Figures 2–3). The honest reporting that SpeedPPI requires ~13 min/pair and is "prohibitive even at this scale" is valuable.
 
-- **Informative multi‑source re‑ranking analysis.** Table 2 shows that semantic signals (PubMedBERT, functional enrichment) can sharpen already-retrieved top‑10 lists, with PubMedBERT improving or maintaining rank for 75.5% of rediscovered interactions. This provides actionable guidance on which complementary signals add value.
+- **Clear problem formulation and honest limitations**: The paper defines PPI candidate ranking as a distinct task from binary classification, with clear formalization (Eq. 1–5). Section 6 transparently acknowledges the reliance on known partners and that the method does not generate "explanations" in the traditional sense.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Missing ablation on the region‑selection mechanism.** The paper compares the proposed method (contact‑map‑guided region selection from known partners) against baselines that rank solely by predicted interaction probability without using known‑partner information. The observed gains could arise from simply using *any* embedding similarity to known partners, not specifically from the contact‑map‑guided region selection. No ablation is provided using whole‑embedding cosine similarity to known partners (without region restriction) or random‑region selection. Without these comparisons, the claimed advantage of the active‑region extraction — a central methodological novelty — remains unsubstantiated. This weakens confidence in the specific mechanism the paper markets.
+- **Absence of a control baseline that uses known partners prevents isolating the core contribution.** The proposed method leverages known partners *KP(p)* as anchors for embedding similarity. The baselines (D-SCRIPT IS, Topsy-Turvy IS, xCAPT5) predict interaction probabilities for each *(p, candidate)* pair independently, without any access to *KP(p)*. This asymmetry means the headline improvements (e.g., Recall@10 rising from 1.24% to 26.41%) could partly — or largely — reflect the information advantage of using known partners rather than the specific interpretability-guided embedding technique. A simple control is needed: e.g., using the *full* (non-activated) residue embeddings of known partners for the same sliding-window cosine retrieval, or averaging/max-pooling interaction scores over known partners. Until such a control is provided, the paper's central claim that the *interpretability-guided* mechanism drives the improvement is not fully supported. This is the most significant weakness.
 
-- **Re‑ranking evaluation lacks absolute retrieval metrics.** The re‑ranking analysis (Section 5.3, Table 2) reports only pairwise rank‑shift fractions ("maintained or improved") among the top‑10 candidates per query. This metric does not measure whether true partners are actually recovered at higher positions after re‑ranking. It is possible that all methods shuffle a pool of already‑correct candidates, producing high "maintain‑or‑improve" fractions without genuine gains in discovery. Standard retrieval metrics (Recall@k, MAP@k) after re‑ranking would clarify whether any of the additional signals genuinely improve candidate prioritization.
+- **The "two orders of magnitude" claim is not supported by the reported numbers.** The paper states (Abstract, Conclusions) that the method improves ranking metrics "by two orders of magnitude" (i.e., 100×). However, the improvements visible in Table 1 are in the 20–30× range (e.g., D-SCRIPT IS Recall@10: 0.0124 → 0.2641 ≈ 21×; MRR: 0.0040 → 0.1277 ≈ 32×). While these are substantial, they are one order of magnitude, not two. This overstatement should be corrected.
 
 ### Minor
 
-- **Overstated "two orders of magnitude" claim.** The abstract and conclusions state improvements of "up to two orders of magnitude." The largest improvement in Table 1 is ~95× for Topsy‑Turvy Recall@10 (0.00117→0.1106), which is borderline. Most other improvements are in the 5–25× range (e.g., D‑SCRIPT Recall@10: 21×, MRR: 6.6×). The phrase overstates the typical case and should be softened to better reflect the data.
+- **Re-ranking module's value is not demonstrated on task-level metrics.** The re-ranking analysis (Table 2) reports pairwise rank-shift fractions within the top-10 set, but never shows whether applying any re-ranking signal improves the *global* metrics that define the task (e.g., Recall@10, Precision@10, MRR after re-ranking). Since re-ranking is described as a central component, this omission leaves the practical benefit of this stage unclear.
 
-- **Active‑region extraction procedure is under‑specified.** Section 4.1 states that "maximal contiguous segments of highly activated residues" are identified, but does not define a concrete threshold for "activated." The activation score is defined as max contact probability (continuous [0,1]), but the criterion separating "activated" from "not activated" residues — needed to determine segment boundaries — is not stated. This ambiguity affects reproducibility.
+- **No stratification by target coverage.** The paper acknowledges (Section 6) that the method "may not hold for underexplored proteins with very few or no known partners," but does not report performance stratified by the number of known partners (e.g., ≤3, 4–10, >10). This stratification would clarify the method's practical range of applicability.
 
-- **PiNUI results are relegated to the appendix.** Appendix A.3 shows the method on PiNUI achieves far lower absolute performance than on STRING (Recall@500 of 0.133 vs. 0.814), though the *relative* improvement over D‑SCRIPT's baseline is still large (Rediscovery Ratio 0.008→0.385). This limitation is not discussed in the main text or conclusions, which present the method as broadly effective. Moving this discussion (or at least a summary) to the main paper would give a more balanced picture of generalizability.
+- **Robustness of aggregation choices untested.** The method uses *max* over sliding windows (Eq. 3) and *max* over anchors (Eq. 4). This aggressive combination could inflate false positives. A robustness check with alternative aggregations (mean, median) is missing.
 
 ### Trivial
 
-- The phrase "two orders of magnitude" in the abstract and conclusions should be replaced with numerically precise language (e.g., "5–20× improvement across most metrics").
+- xCAPT5 is mentioned only briefly in Related Work and appears in Table 1, but no detail is given on how its scores were obtained (pretrained weights? retrained? which hyperparameters?). This should be clarified.
 
 ## Nice-to-Haves
 
-- **Validate active regions against known biological interfaces.** Overlap with PDB binding interfaces or independent interface predictors would strengthen the "interpretability‑guided" label and provide biological grounding for the region‑selection mechanism.
-
-- **Evaluate re‑ranking with standard retrieval metrics** (Recall@k, MAP@k, MRR on the re‑ranked lists) so the actual improvement in true‑partner recovery can be measured.
-
-- **Include a whole‑embedding cosine similarity baseline** (using the full embedding of each known partner without region restriction) and a random‑segment baseline to isolate the contribution of the contact‑map‑guided region selection.
-
-- **Extend evaluation beyond STRING.** Broader testing on datasets like IntAct or HPRD would strengthen generalizability claims beyond STRING‑derived interaction data.
+- A case study showing top-10 ranking side-by-side for a well-studied target (e.g., TP53) comparing baseline and method rankings would build intuition.
+- Analysis of whether the active residues *Ik* correspond to known binding interfaces or functional domains would strengthen biological plausibility.
 
 ## Removed Points
 
-*These points were raised by reviewers but are flagged as unreliable — treat with caution.*
+These points are flagged to be removed, treat them with caution:
 
-- **"Unfair baseline" framing (from Harsh Critic, Point 1).** The critic argued baselines are unfair because they don't use known-partner information. However, the baselines represent the natural deployment mode of those models (pairwise probability scoring). The paper's contribution is precisely *showing that using known partners improves over probability-only ranking*. The missing ablation (whole-embedding vs. region‑guided) is a separate, valid concern already captured under Major Weaknesses. The "unfair baseline" framing is removed as it mischaracterizes a reasonable comparison.
+- **Criticism about "interpretability-guided" framing mismatch (Harsh Critic #2):** The critic claims the method is "a brute-force template-matching heuristic, not an interpretability method" and that the title/abstract misrepresent the contribution. However, the paper explicitly states (Section 6, line 742): "Although we exploit interpretability as a structural property of the underlying models to improve ranking, we do not use it as a means of generating explanations." The contact maps *are* interpretable structures of D-SCRIPT/Topsy-Turvy, and using them to guide retrieval is a reasonable use of the term "interpretability-guided." The paper is transparent about the scope. This criticism is a strawman.
 
-- **"xCAPT5 comparison is not parallel" (from Harsh Critic).** xCAPT5 outputs interaction probability scores from sequence embeddings; using it as a probability baseline is entirely parallel to D‑SCRIPT and Topsy‑Turvy. Removed.
+- **PiNUI evaluation "undermines generalization claims" (Harsh Critic #4):** The paper reports these results transparently and does not claim strong absolute performance on PiNUI. The relative improvement (Rediscovery Ratio 0.3849 vs. 0.0080) is meaningful and honestly contextualized. The low absolute numbers are consistent with the known difficulty of held-out PPI benchmarks. This criticism overstates the problem.
 
-- **"Cross‑encoder learns annotation co‑occurrence rather than genuine generalization" (from Harsh Critic).** This is speculation. The cross‑encoder is trained on STRING v11 annotations and evaluated on novel v12 interactions — a strict temporal split. Removed as an unsupported claim.
-
-- **"Garbled pDockQ equation" (parser issue).** The equation formatting artifacts are parser‑side, not author errors. Removed per instructions.
-
-- **"STRING v12 may not represent high‑confidence physical interactions" (from Harsh Critic).** The paper explicitly filters for binding interactions with experimental support > 0 (Section 5.1), discarding indirect associations (co‑expression, homology, text mining). Removed as factually incorrect.
-
-- **Strength Finder: "Methodological clarity and reproducibility" as an unqualified strength.** The active‑region extraction threshold is under‑specified (see Minor Weaknesses). This strength is downgraded to neutral.
-
-- **Strength Finder: "Additional validation on PiNUI" presented as purely positive.** The PiNUI results show substantial relative improvement but weak absolute performance. The strength is retained but contextualized.
+- **Pure formatting/style nitpicks / parser artifacts:** Removed per hard rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The paper makes a clear methodological contribution in proposing PPI candidate ranking as a task and showing that known‑partner‑guided retrieval can substantially improve ranking quality. The re‑ranking analysis provides practical evidence that semantic signals (PubMedBERT, functional enrichment) are the most cost‑effective complement to embedding‑based retrieval — a finding that could guide future work in this space.
+None beyond the paper's own contributions. The reviews do not surface a perspective on the work that the paper itself does not already address or acknowledge. The main novel insight from synthesis is that the papers' strongest empirical claim (two orders of magnitude) is actually supported at about one order of magnitude, and the central methodological contribution (interpretability-guided active-region retrieval) needs isolation from the simpler advantage of using known partners.
 
 ## Suggestions
 
-- Add a whole‑embedding cosine similarity baseline and a random‑region ablation to Table 1. This is the single most important experiment to strengthen the paper.
-- Report Recall@k and MAP@k on the re‑ranked top‑10 lists for each signal in Table 2 so readers can judge whether re‑ranking improves absolute recovery.
-- Define the threshold or procedure for "maximal contiguous segments of highly activated residues" explicitly (e.g., residues with activation score above the mean plus one standard deviation, or above the 75th percentile).
-- Soften "two orders of magnitude" to a precise and supportable figure (e.g., "5–20×"). If retaining "up to two orders," clearly specify which metric and model pair achieves this.
-- Move a summary of the PiNUI results and their implications into the main text (Section 5 or 6) for a balanced discussion of generalizability.
+1. **Add a control baseline that uses known partners:** Implement a version where the full (non-activated) embeddings of known partners are used for cosine-similarity retrieval, without the active-region selection. If this already achieves similar gains, the contribution shifts to "use known partners" rather than "use active residues." If performance drops significantly, the interpretability-guided selection is validated.
+
+2. **Correct the "two orders of magnitude" claim** to reflect the actual 20–30× improvements visible in Table 1.
+
+3. **Show global re-ranking impact:** After applying PubMedBERT (the best signal) to re-rank the top-10, recompute Recall@10, Precision@10, and MRR to demonstrate that re-ranking actually improves the metrics that define the task.
+
+4. **Stratify results by target coverage** (number of known partners) to clarify where the method helps and where it defaults to generic PPI probabilities.
+
+5. **Add robustness checks** with mean/median aggregation for Eqs. 3–4 and provide justification (or a sensitivity analysis) for the max-based design.
 
 ## Score and Decision
 
-### Anchor comparison
+### Calibration Anchors
 
-- **Dp1RM3gPg8 (RaftPPI, avg 5.00, Accept Poster):** PPI retrieval with strong efficiency contribution; comparable in domain, slightly stronger in technical novelty and ablation rigor. Our paper has a better problem framing.
-- **kXpXKe3KnA (HIPPO, avg 3.50, Reject):** PPI prediction framework with presentation issues and limited novelty. Our paper is clearly stronger in both presentation and contribution clarity.
-- **NskQgtSdll (PepBenchmark, avg 6.00, Accept Poster):** Comprehensive benchmark paper; different category, stronger in dataset scope but our paper is more methodological.
-- **S3kSOFhs5m (QCAI, avg 5.50, Accept Poster):** Interpretability method for protein binding; similar domain, slightly stronger in evaluation rigor.
-- **2wshkCgNYk (avg 3.00, Reject):** Interpretability/performance trade-off on protein classification. Our paper is clearly stronger.
-- **zWwU6tyDGt (avg 2.50, Reject):** Evolution-aware PU learning. Our paper is clearly stronger.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/Dp1RM3gPg8.md` (RaftPPI) | 5.00 | Both in PPI retrieval. RaftPPI has a cleaner computational contribution and stronger efficiency claims but also faces incremental-novelty concerns. The current paper has a more novel problem formulation (temporal candidate ranking) but a less clean contribution attribution. Comparable quality, with the current paper slightly weaker due to the baseline asymmetry issue. |
+| `/home/wg25r/review_agent/human_reviews_2026/kXpXKe3KnA.md` (HIPPO) | 3.50 | Cross-species PPI prediction. HIPPO had serious presentation issues and limited methodological novelty. The current paper is significantly stronger in writing, experimental design, and problem framing. |
+| `/home/wg25r/review_agent/human_reviews_2026/QNcrdCKNa5.md` (TopoScorer) | 4.00 | PPI binding affinity prediction. TopoScorer underperformed on key metrics and had data leakage concerns. The current paper has stronger relative results and a cleaner evaluation, but a more ambiguous contribution attribution. |
+| `/home/wg25r/review_agent/human_reviews_2026/WvRmaSD2QV.md` (Model Editing) | 3.00 | Strong critique of existing methods but overclaimed results. The current paper has more constructive contributions and a more measured presentation, though both share the issue of overclaimed improvement magnitude. |
+| `/home/wg25r/review_agent/human_reviews_2026/RDerF20JYT.md` (La-Proteina) | 8.00 | High-quality protein generation with clear algorithmic novelty and strong benchmarks. The current paper does not reach this level of contribution clarity or empirical strength. |
+| `/home/wg25r/review_agent/human_reviews_2026/1CR1MTIgmq.md` (TPAMI critique) | 0.00 | Essentially not a research paper. Not comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/2wshkCgNYk.md` (Protein superfamily) | 3.00 | Modest contribution on interpretability trade-offs. The current paper has broader scope and stronger evaluation. |
 
-This paper makes a genuine contribution with a novel problem formulation and promising results, but the missing ablation on the core region‑selection mechanism and the re‑ranking evaluation's limited metrics weaken confidence in specific claims. It is somewhat weaker than RaftPPI (5.00) in evaluation rigor but stronger than HIPPO (3.50) in contribution clarity. Score: **5.0**.
+The paper tackles an important problem with a sound temporal evaluation design and comprehensive experiments. The main weakness — insufficient isolation of the interpretability-guided mechanism from the known-partner advantage — is significant but addressable. The "two orders of magnitude" claim is overstated. Relative to the anchors, the paper is stronger than HIPPO (3.5) and TopoScorer (4.0) in execution and scope, but weaker than RaftPPI (5.0) in contribution clarity. A score of 4.5 reflects a paper with genuine contributions that would benefit from revision to clarify the source of improvements.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

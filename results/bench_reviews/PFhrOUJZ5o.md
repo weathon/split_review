@@ -1,92 +1,95 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me write the final consolidated review.
-
----
+Now I have thoroughly verified all claims. Let me compose the final consolidated review.
 
 ## Summary
-This paper introduces LAION-Comp, a large-scale dataset of 540K+ image–scene graph pairs built by prompting GPT-4o to annotate LAION-Aesthetics images with structured scene graphs (objects, attributes, relations). The authors train scene graph encoders on top of diffusion (SDXL) and flow-matching (SD3.5, FLUX) backbones and evaluate compositional generation on a new benchmark (CompSGen Bench, 20.8K samples with >4 relations) as well as existing ones. Results show consistent improvements over text-only baselines and prior SG2IM methods.
+
+This paper introduces LAION-Comp, a large-scale dataset of 540K aesthetic images with structured scene graph annotations (objects, attributes, relations) generated via GPT-4o with partial human verification. The authors train SG-conditional diffusion/flow-matching baselines (SDXL-SG, SD3.5-SG, FLUX-SG) by augmenting existing backbones with a lightweight GNN-based scene graph encoder, and propose CompSGen Bench, a benchmark for evaluating complex scene generation. Experiments show consistent improvements over T2I baselines and prior SG2IM methods across multiple backbones and metrics, and the paper demonstrates a training-free SG-based image editing application.
 
 ## Strengths
 
-- **Real resource contribution at meaningful scale.** The dataset provides 540K+ open-vocabulary scene graph annotations over high-quality images, and human verification confirms high accuracy (98.8% objects, 97.5% attributes, 95.7% relations, per Appendix Table 6). This is a substantial engineering effort that fills a genuine gap — existing SG datasets (COCO, VG) are orders of magnitude smaller and narrower in vocabulary.
+- **Large-scale structured annotation dataset addressing a genuine data gap in the field.** LAION-Comp provides 540K images with scene graph annotations, substantially larger than existing SG datasets (COCO-Stuff, Visual Genome). The annotation pipeline is clearly described, and the paper provides transparency about annotation quality through human verification and failure analysis. This is a significant engineering contribution given the prohibitive cost of manual SG annotation at this scale.
 
-- **Consistent empirical gains across diverse backbones.** The same lightweight GNN-based SG encoder, when plugged into SDXL, SD3.5, and FLUX, yields consistent improvements over text-only baselines and prior SG2IM methods on the shared CompSGen Bench (Table 3). For instance, SDXL-SG reaches SG-IoU of 0.340 vs. 0.226 for SDXL text-only, while FLUX-SG achieves the best Relation-IoU (0.776). Training on multiple architectures (diffusion and flow-matching) demonstrates the approach is not backbone-specific.
+- **Consistent performance gains across multiple architectures.** The proposed SG encoder is integrated with SDXL, SD3.5-Medium, and FLUX.1-Dev, and all three variants outperform their T2I counterparts on CompSGen Bench (Table 3). FLUX-SG achieves 0.583 SG-IoU vs. 0.544 for FLUX.1-Dev, and 0.859 Relation-IoU vs. 0.842. The ablation study (Table 4) further demonstrates that even 10% of LAION-Comp data outperforms full Visual Genome training on multiple metrics, supporting the claim that annotation quality matters beyond scale.
 
-- **The ablation study cleanly separates data quality from scale.** Table 4 shows that SDXL-SG trained on only 10% of LAION-Comp already achieves higher Entity-IoU (0.874) than the full Visual Genome training (0.813), and performance scales monotonically with data proportion. This directly supports the paper's core argument that annotation quality, not merely size, drives the observed gains.
+- **Lightweight and practical SG integration.** The SG encoder adds only 14.7M parameters (0.23% of model size) and less than 3% inference overhead, making the approach practical for deployment.
 
-- **Evaluation goes beyond a single metric type.** The paper supplements the SG-based compositional metrics (SG-IoU, Entity-IoU, Relation-IoU) with FID, CLIP score, and a human user study (63% preference for SG-generated images over caption-generated ones). Results on T2I-CompBench (Appendix A.6) provide additional cross-benchmark validation. The proposed CompSGen Bench filtering for >4 relations targets the precisely the regime where text-only models struggle.
+- **CompSGen Bench fills a gap.** The benchmark focuses specifically on complex scenes (>4 relations) with structured metrics (SG-IoU, Entity-IoU, Relation-IoU), providing a systematic evaluation protocol for compositional generation that existing text-only benchmarks do not cover.
+
+- **Independent evidence beyond the primary metrics reinforces the findings.** The user study (63% preference for SG-generated images, Fig. 8), results on the independent T2I-CompBench (Table 7), and evaluation on COCO/VG cross-dataset splits (Table 2) collectively support the value of the dataset.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+1. **The central claim about structural-format superiority is not properly isolated.** The paper claims that scene graph conditioning outperforms text conditioning, but the T2I baselines use the *original LAION captions* (which are noisy, often contain proper nouns and unrelated metadata), not text descriptions that encode the *same information* as the scene graphs. The comparison therefore conflates annotation quality (better information) with annotation format (structured vs. unstructured). The 63% user preference similarly compares SG-generated images against images from original LAION captions, not against images from text descriptions containing the same content. Without a controlled experiment where the same scene content is represented as both a scene graph and a detailed text description, the paper cannot isolate whether the structural format itself drives the improvement or simply the higher-quality annotations do.
+
+2. **The evaluation metrics for the core generation task partially rely on the same model used to create the training annotations.** The SG-IoU, Entity-IoU, and Relation-IoU metrics (from Shen et al., 2024) use GPT-4/4o to extract scene graphs from generated images and compare them against ground-truth annotations that were themselves produced by GPT-4o. This creates a closed loop: GPT-4o annotates → model learns → GPT-4o judges. The reported superiority on these metrics could partially reflect models learning to generate images that match GPT-4o's annotation templates and biases, rather than producing genuinely more accurate multi-object scenes. This concern does not invalidate the paper's results (FID, CLIP score, T2I-CompBench results, and the user study provide independent evidence), but it weakens the headline numerical claims that use these metrics.
 
 ### Minor
 
-- **The main compositional metrics (SG-IoU, Entity-IoU, Relation-IoU) rely on a VLM (GPT-4) to extract scene graphs from generated images, while dataset annotations come from GPT-4o.** Although these are different models (GPT-4 for evaluation vs. GPT-4o for annotation), they belong to the same model family and may share annotation conventions or biases. The paper partially mitigates this by providing FID, CLIP score, and a user study as independent metrics, and this evaluation approach follows standard practice in the SG2IM literature (Shen et al., 2024). Nonetheless, readers should interpret the magnitude of SG-IoU gains with appropriate caution — some fraction of the measured improvement likely reflects the VLM evaluator's own annotation preferences rather than a purely visual improvement. A small-scale human evaluation of the generated images' compositional correctness would strengthen confidence.
+1. **The human verification "accuracy" metric (Table 6: 98.8/97.5/95.7%) is recall, not precision, and does not penalize hallucinations.** The formula (Eq. 3) is "Actual Occurrences / Occurrences in Annotations," which the paper acknowledges "is similar to recall." This means a sample with 10 real objects and 1 hallucinated nonexistent object scores 100% on objects: the hallucination is neither detected nor penalized. The paper separately reports ~1% hallucination rate (Sec. A.8.1) and ~2% mislabeling errors (Sec. A.8.3), but these are on different samples than the human verification set, and the actual precision of the 1,000 verified annotations remains unknown.
 
-- **The editing framework (training-free RF-inversion, Section A.1) is under-evaluated in the main paper and deferred entirely to the appendix.** The editing results (Table 5) are interesting and broaden the paper's contribution, but the evaluation uses only 200 test images with two replacement rounds each. The scope is limited, and the paper could be clearer about what fraction of the paper's contribution this represents versus the core generation pipeline.
+2. **The FID difference between Table 2 and Table 3 is not explained.** SDXL achieves FID 19.3 on the LAION-Comp test set (Table 2) but 25.2 on CompSGen Bench (Table 3). Since CompSGen Bench is a subset of the same test set consisting of complex scenes (>4 relations), one would expect similar or better FID on the subset. The discrepancy may be explainable (complex scenes are harder, affecting FID), but the paper does not address this.
+
+3. **The GNN architecture is under-specified.** The paper states the encoder has 5 layers with 512/1024 dimensions but does not specify the message-passing scheme, aggregation function, or whether edge features are used. While this is common for systems papers, the GNN is central to the contribution, and readers seeking to reproduce or build on this work need more detail.
 
 ### Trivial
 
-- The claim in Section 5.1 that "our baseline achieves the best performance among all candidates" when discussing Table 2 could be read as a cross-dataset claim, which would be misleading — though Appendix A.15 clarifies that all models were evaluated on a shared test set, the main text should explicitly state this to avoid confusion.
+- The threshold "over four relations" for CompSGen Bench complex scenes (Sec. 3.3) is stated without justification for why this specific cutoff was chosen.
+- The editing evaluation (30 images, 120 scenarios) is a small sample; the claims would benefit from a larger-scale study.
+- The 10% ablation (48K images) keeps training iterations constant, meaning the model sees fewer unique samples but each more times—this confounds two variables.
 
 ## Nice-to-Haves
-- A systematic breakdown of failure modes (missing relations, wrong attributes, object omission) with counts across 100+ generated images would add valuable qualitative rigor beyond the cherry-picked examples in Figure 5 and the few failure cases in the appendix.
-- An experiment disentangling the benefit of the structured graph format from the benefit of richer semantic content — for example, comparing SG conditioning against conditioning on a carefully constructed linearized caption containing the same information — would strengthen the claim that graph structure specifically (rather than richer descriptions in general) drives improvement.
-- Evaluation of generalization to held-out relation or attribute types would help assess whether the SG encoder truly generalizes or primarily memorizes GPT-4o's annotation patterns.
+
+- Evaluate SG-based models against T2I models trained on rich text descriptions that encode the same scene graph information (e.g., generated by prompting an LLM to convert the SG to a detailed caption). This would isolate format from content quality.
+- Include an independent evaluation oracle (e.g., a frozen object detector or human judgments) for the SG-IoU metrics to break the GPT-4o evaluation loop.
+- Report precision alongside recall in the human verification study to give a complete picture of annotation quality.
+- Report the final learned values of the scaling factor α for different backbones.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-### From the Harsh Critic
-
-1. **"Circular evaluation protocol relying on the same VLM that produced the annotations"** — REMOVED as stated. The paper uses GPT-4 (not GPT-4o) for the main SG-IoU/Entity-IoU/Relation-IoU evaluation (Appendix A.7, line 2350), while annotations were produced by GPT-4o. These are different models. The SG-IoU+ supplementary metrics do use GPT-4o, but those are only used for annotation quality analysis, not the core generation results. The paper also provides FID, CLIP score, and a user study as fully independent metrics. The claim that this circularity "invalidates the core quantitative claims" is an overstatement.
-
-2. **"Table 2 compares models evaluated on different datasets, rendering the comparison meaningless"** — REMOVED as factually incorrect. Appendix A.15 (lines 3914-3920) explicitly states: "the test set used to evaluate our compositional generation metrics ... is a mixture of different distributions. A total of 300 samples were procured by randomly selecting 100 images each from COCO, VG, and LAION-Comp. This balanced composition ensures the fairness of the evaluation." And: "table 2 presents the results of a baseline trained on COCO and VG but tested on the completely separate LAION-Comp test set." All models are evaluated on the same test data; the Dataset column indicates training data only.
-
-3. **"The compositionality metrics rely on GPT-4o extraction, whose reliability on generated images is not validated"** — REMOVED as a standalone fatal criticism. The paper uses GPT-4 (not GPT-4o) for these metrics, provides human verification of annotation quality (Appendix A.5), discusses VLM hallucination issues transparently (Appendix A.8.1, A.8.2), and supplements with FID, CLIP, and a user study. This concern has been reclassified to Minor above.
-
-4. **"The framing that prior work 'failed to address this underlying data-level issue' because of 'model improvement' is too sweeping"** — REMOVED. This is a rhetorical preference, not a substantive weakness. The paper makes a specific, defensible claim: existing compositional losses and layout methods modify the model but do not change the underlying training data to include explicit relation annotations.
-
-5. **"The distinction between spatial-conditions approaches and SG2IM methods could be sharper"** — REMOVED. This is a minor organization preference about the related work section, not a weakness that affects the paper's contributions or claims.
-
-6. **"Failure cases are relegated to the appendix, and no systematic counting of error types is provided"** — partially REMOVED as a standalone major criticism. This has been moved to Nice-to-Haves above since systematic failure analysis is a plus, not an expectation that invalidates the core contribution.
-
-7. **"The user study shows 63% preference ... It does not address whether the improvement is due to the quality of the annotation or the structured format itself"** — REMOVED. This is a valid analytical question but the user study's purpose is to validate human alignment, not to isolate the causal mechanism — and 63% preference is a positive signal regardless of the exact mechanism.
-
-### From the Strength Finder (dropped as generic/unsupported)
-- No specific strengths were dropped; the retained strengths are all grounded in concrete evidence from the paper.
+- **Criticism about missing appendix sections/figures**: The harsh critic references missing details that are appendix-only content. The parser strips appendix sections in some papers; these exist in the original submission and should not be counted as missing.
+- **"The paper does not justify why scene graph conditioning outperforms equivalent text conditioning" framed as a fatal structural flaw**: While this is a genuine gap (kept as Major weakness #1), the harsh critic's framing that it "cannot be fixed by adding ablations" is too strong. It is addressable with additional experiments.
+- **Claim that the benchmark threshold "over four relations" is "arbitrary and not justified"**: This is a minor design choice, not a substantive weakness. Many benchmarks use heuristics for scene complexity.
+- **Criticism about SDXL being pre-trained on larger datasets than LAION (Table 2 column header "LAION")**: This is standard practice—the "LAION" label refers to the fine-tuning dataset and test set, not the pre-training data. The paper is clear about this.
+- **Criticism about the editing framework being tested against baselines that don't have access to SGs**: The editing comparison includes SGEdit (SG-based) and RF Inversion/InstructP2P (text-based), which is a fair multi-method comparison.
+- **Request for confidence intervals and error bars on large-scale benchmarks**: Single-run evaluation is standard practice for large-scale image generation benchmarks in this field; this is a nice-to-have, not a weakness.
+- **Strength Finder strength about "Extensive empirical validation"**: Overly broad; kept relevant specific strengths instead.
 
 ## Novel Insights
-The paper's ablation at 10% data scale (Table 4) — where a fraction of LAION-Comp already outperforms full Visual Genome training — provides a genuinely instructive empirical finding: annotation quality can matter more than dataset scale for compositional generation. This insight, which the paper demonstrates but does not extensively theorize about, has implications beyond this dataset for how the field thinks about data curation for structured generation tasks.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-- Move the Appendix A.15 clarification about the shared test set (lines 3914-3920) into the main paper, explicitly stating in Section 5.1 that all Table 2 numbers are computed on the same evaluation set. This would preempt the reasonable confusion that arises from the Dataset column.
-- Consider adding a brief discussion of the GPT-4 vs. GPT-4o distinction in the main evaluation section, acknowledging the VLM-based evaluation limitation and noting the orthogonal metrics (FID, CLIP, user study) that provide independent validation.
 
----
+1. **Run the critical controlled experiment**: Train a T2I model (e.g., SDXL) on text descriptions that encode the same scene information as the scene graphs (e.g., by converting each SG triple into a sentence and concatenating). Compare against SDXL-SG on identical content to isolate whether the graph format itself provides benefits beyond better annotations.
+
+2. **Break the evaluation loop**: Replace or supplement the GPT-4o-based SG-IoU evaluation with an independent automated evaluator—either a frozen object detector/relation detector or a human evaluation subset for the IoU metrics. Show that the relative ordering of methods holds under this independent evaluation.
+
+3. **Report annotation precision**: Augment Table 6 with a precision metric (Occurrences in Annotations that are correct / Total Occurrences in Annotations) to give a complete picture of annotation quality, especially regarding hallucinations.
+
+4. **Clarify the FID discrepancy**: Explain why SDXL's FID differs between the full test set (19.3) and the complex subset (25.2), and whether this is consistent across models.
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
 
-| Anchor | Avg Score | Decision | Comparison to Paper Under Review |
-|--------|-----------|----------|----------------------------------|
-| Generate Any Scene (EwdWR6lfvW) | 5.00 | Accept (Poster) | Similar scene-graph-for-generation concept but uses synthetic/programmatic SGs rather than real-image annotations. This paper has broader empirical validation (multiple backbones, human verification, user study, ablation) and works with real images. Stronger. |
-| TextAtlas5M (8yJyEKHkB8) | 4.50 | Reject | Large dataset construction paper with evaluation. This paper goes further by training models and demonstrating downstream improvements. Stronger. |
-| RACA-CLIP (0GjORP5Duq) | 4.50 | Reject | Scene-graph method for CLIP with compositional benchmarks. Narrower scope, less empirical breadth. Stronger. |
-| DecompDreamer (9LlHnXuBU0) | 5.00 | Reject | 3D compositional generation via optimization curriculum. Different domain, similar score profile. Comparable but different modality. |
-| CompGen (nrZW60mzeW) | 4.00 | Withdrawn/Reject | Curriculum learning for compositional T2I. This paper has a more significant resource contribution (dataset) and comparable or stronger evaluation. Stronger. |
-| SPOT (JeqXsxUTkn) | 5.00 | Reject | Scene graph generation from images, not image generation from SGs. Different task direction. Not directly comparable. |
-| APT (IZWJhdK2o7) | 5.00 | Accept (Poster) | Scene graph generation (SGG), not image generation. Different task. |
-| SANEval (Er9rKIjTkD) | 4.00 | Reject | Compositional benchmark, no dataset or model contribution. This paper is broader. |
-| Auto-Comp (u0WgL0Ijcs) | 5.00 | Reject | VLM compositional probing pipeline. Different focus. |
-| IL3D (0oxkxG9cCo) | 2.00 | Reject | Dataset aggregation with minimal novelty. This paper is substantially stronger in all dimensions. |
+| Anchor Paper | Avg Score | Comparison |
+|---|---|---|
+| `iqAFhWistW` (T2I-CoReBench) | 6.00 | Stronger evaluation methodology, cleaner benchmark construction, but no dataset contribution comparable in scale |
+| `EwdWR6lfvW` (Generate Any Scene) | 5.00 | Similar topic (SG-driven generation), accepted as Poster. Comparable dataset-level contribution, but that paper had cleaner evaluation |
+| `04HwYGgp2w` (ImageDoctor) | 6.50 | Stronger empirical validation and clearer methodology; accepted as Poster |
+| `AlJK6bFbAo` (GPT-IMAGE-EDIT-1.5M) | 5.50 | Similar "GPT-annotated dataset" paradigm with related circularity concerns; mixed reviewer scores (6,2,6,8), ultimately rejected |
+| `5upNiIb6UQ` (Relation-Augmented Diffusion) | 4.50 | Similar topic (relation-aware generation), rejected due to incremental novelty and evaluation gaps |
+| `WvRmaSD2QV` (Model Editing is Over) | 3.00 | Exposes fundamental evaluation flaws in a subfield; rejected |
+| `Omo8RAEqSS` (TESA) | 2.00 | Weak paper with methodological flaws; withdrawn/treated as reject |
 
-The paper under review sits clearly above the 4.0-5.0 cluster of related works. It shares the VLM-based evaluation limitation with Generate Any Scene (5.0, Accept Poster) but surpasses it in empirical breadth (human verification at scale, user study, multiple generative backbones, ablation studies, editing application). The core contribution — a large-scale, real-image scene-graph dataset with validated quality — is a genuine resource, and the multiple-backbone training results provide credible evidence of its utility. The VLM evaluation concern, while real, is a field-wide limitation that the paper explicitly acknowledges and mitigates with orthogonal metrics.
+The paper under review has a genuine and valuable dataset contribution (comparable to or exceeding the scale contribution in "Generate Any Scene" at 5.00), but the evaluation has two structural gaps that undermine the central claim about structural format being superior. Compared to `iqAFhWistW` (6.00, accepted), this paper has weaker evaluation methodology. Compared to `5upNiIb6UQ` (4.50, rejected), it has a stronger dataset contribution but similar evaluation concerns. The evaluation issues are addressable but significant in their current form. I position this paper below accepted benchmarks (~6.0) and slightly below the comparable "Generate Any Scene" (5.00) due to the evaluation gaps that paper did not share.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

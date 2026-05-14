@@ -1,96 +1,97 @@
-Now I have enough context from both the paper and calibration anchors. Let me synthesize the final review.
-
----
+Now I have good calibration. Let me produce the consolidated review.
 
 ## Summary
 
-EditBench introduces a benchmark for evaluating LLM code editing capabilities grounded in real-world data. The authors built a VSCode extension used by ~500 developers to collect authentic user instructions, code contexts, highlighted code regions, and cursor positions. From 2,672 accepted edits, they curated 109 core problems (540 after translation) spanning 5 natural languages, 2 programming languages, and 4 edit categories. Evaluating 40 LLMs reveals the benchmark is challenging (best model achieves only 66.67% pass@1) and that contextual information (highlighted code) meaningfully affects performance, capturing realistic editing scenarios prior benchmarks miss.
+EditBench introduces a benchmark for evaluating LLM performance on instructed code editing, built from real-world data collected via a custom VS Code extension used by 458 developers. The benchmark comprises 540 problems spanning 5 natural languages and 2 programming languages, uniquely requiring models to integrate user instructions with highlighted code, cursor position, and surrounding file context. The authors evaluate 40 models and find that only one surpasses 60% pass@1, revealing substantial room for improvement and meaningful differences across model families and task categories.
 
 ## Strengths
 
-- **Genuinely novel data collection via VSCode extension.** The benchmark is built from in-the-wild user instructions and code contexts gathered through a custom extension with ~500 developers. This grounds evaluation in authentic developer behavior rather than artificial or contest-style problems (Section 3.1, Section 4).
+- **Genuinely in-the-wild data collection via a VS Code extension (Section 3.1):** The paper collects 2,672 responses from 458 real developers using the extension in their daily workflows, capturing user instructions, code contexts, and acceptance votes in a naturalistic setting. This is a clear methodological advance over annotator-written or competition-sourced benchmarks (e.g., CanItEdit, Aider Polyglot, EditEval), producing qualitatively different — messier, less specified, more diverse — instructions and code contexts (Table 5). The authors provide concrete examples (Table 2) showing that real instructions like "RuntimeError: Cannot close a running event loop..." or "do not use R style, use python style" differ sharply from the templated prompts in prior benchmarks.
 
-- **First benchmark to include highlighted code and cursor position as evaluation context.** EditBench explicitly captures the highlighted code region and cursor location, modeling the ambiguous, context-dependent nature of real instructed edits that prior benchmarks (CanItEdit, EditEval, Aider Polyglot) omit (Section 1, Table 1, Figure 1).
+- **First benchmark to incorporate full contextual signals for code editing (Table 3):** EditBench is the first code editing benchmark to require models to jointly interpret user instruction, highlighted code, cursor position, and full file context. The ablation study (Table 3) shows that adding highlighted code improves performance for 5 of 7 top models (up to +3.52pp for GLM-4.6), while cursor position produces mixed results (GLM-4.6 drops 8.15% when both are added). These findings are practically important for tool designers and demonstrate that context integration is a nontrivial, measurable skill that differs across models.
 
-- **Strong diversity across languages and edit categories.** The benchmark spans 5 natural languages and 2 programming languages (Python, JavaScript), with problems categorized into feature addition, feature modification, bug fixing, and optimization, enabling fine-grained capability analysis (Section 4, Table 2).
+- **Challenging benchmark that differentiates models effectively (Figure 4):** Only 1 of 40 models (claude-sonnet-4) exceeds 60% pass@1, with a wide spread across the 40 models tested. The large gap between easy and hard problems (average gap of 59.3%) shows the benchmark has good discriminative power and avoids the ceiling effects that plague some other benchmarks (e.g., DevBench's 80%+ pass@1).
 
-- **Comprehensive evaluation of 40 models reveals discriminative challenge.** Only 1 out of 40 models exceeds 60% pass@1, and a large gap (59.3% on average) separates easy from hard problem subsets. The benchmark meaningfully differentiates models without ceiling effects (Section 5.1, Figure 4).
+- **Diverse problem composition (Table 1, Figure 3):** EditBench spans 5 natural languages, 2 programming languages, 4 functional edit categories, and 74 unique Python library imports — substantially more variety than CanItEdit (25 imports), Aider Polyglot (15), or EditEval (16). The multi-language component (English, Russian, Chinese, Polish, Spanish) is rare in code editing benchmarks and reflects real global usage.
 
-- **Ablation study demonstrates that context matters.** Adding highlighted code improves performance for 5 of 7 top models, and including cursor position yields mixed results, providing concrete evidence that realistic context affects editing success in measurable and model-dependent ways (Section 5.1, Table 3).
+- **Broad model evaluation:** Testing 40 diverse models across multiple families (GPT, Claude, Gemini, Llama, Qwen, DeepSeek, Mistral, Gemma, GLM, Kimi, Grok) provides a comprehensive picture of current code editing capabilities and clearly documents the gap between closed and open models.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Test harness validation is largely qualitative.** The paper describes a five-annotator team and second-annotator review procedure (Section 3.3), but provides no quantitative evidence of test reliability: no inter-annotator agreement statistics, no human baseline showing that independent programmers can solve the problems given the same instructions, and no per-problem solvability analysis (e.g., how many problems are solved by zero models, which would flag broken test cases). For a benchmark built on inherently ambiguous in-the-wild user instructions, the absence of these validations weakens confidence that the pass/fail signal faithfully measures editing capability rather than noise from test-case mis-specification.
+- **Test harness quality is not quantitatively validated (Section 3.3).** The benchmark depends on 109 hand-written test harnesses created by five annotators, with secondary review. However, no inter-annotator agreement metrics (Cohen's kappa or similar) are reported to measure consistency. The paper further notes that annotators used GPT-4o and Sonnet 3.7 outputs as hints during test construction, which risks biasing test cases toward what these specific models can produce. While the authors describe a reasonable process (second review pass, removal of ambiguous problems), the absence of quantitative quality metrics makes it difficult to assess whether test cases faithfully encode user intent — the foundation on which all pass@1 scores rest. The paper would be substantially strengthened by reporting agreement statistics on a subset of problems coded by multiple annotators.
 
-- **No breakdown of results on the English-only core (109 problems) vs. translated problems.** The paper transparently reports that the core dataset is 109 problems, expanded to 540 via GPT-4o translation (Section 3.2). However, all main results (Figure 4, Table 3) report on the full 540-problem set. Without an English-only breakdown, readers cannot assess whether synthetic translations distort performance trends, and the effective sample size for the most reliable subset is only 109.
+- **Weak correlation with existing benchmarks is presented as a feature but not validated as one (Section 5.2).** The correlation with Aider Polyglot (r=0.24, p=0.06) is not statistically significant at the 0.05 level, and the correlation with the Chatbot Arena coding subset (r=0.11, p=0.01), while significant, is very weak. The paper offers plausible explanations (differences in interaction modality, code-centricity, real-world user intent), but does not provide evidence that EditBench scores *better* predict anything meaningful — such as correlating with the user acceptance votes already logged by their own extension. Without a positive validation signal, the weak correlation could alternatively reflect noise or benchmark-specific artifacts rather than the "unique difficulty" the paper claims.
+
+- **Translation pipeline quality is not adequately characterized (Section 3.2).** Problems were translated to five languages using GPT-4o, with native-speaker validation on "a subset" (primarily Chinese and Spanish). However, no translation quality metrics (e.g., BLEU, semantic preservation scores, or a systematic error analysis) are reported. Without such validation, cross-language performance differences could be artifacts of translation errors rather than genuine multilingual editing ability. The paper's claim that EditBench contains "real-world" multilingual data is weakened by this gap.
 
 ### Minor
 
-- **Full-file regeneration conflates editing accuracy with full-file correctness.** The evaluation requires models to regenerate the entire file, not just the edited region (Section 5). A model that edits correctly but makes an unrelated error elsewhere fails. This design choice is mentioned but its implications for interpreting pass@1 as an "editing capability" metric are not discussed. The paper would benefit from a diff-based analysis isolating edit-region correctness.
+- **Single-sample pass@1 without confidence intervals (Section 5).** The paper uses pass@1 with temperature 0 for a single generation per problem, which is standard practice in code generation benchmarks. However, given that small performance gaps between models (2–3%) could arise from the specific 109-problem sample, the absence of confidence intervals or any uncertainty quantification makes it difficult to assess the reliability of fine-grained rankings. Reporting pass@k (e.g., pass@5) for at least top models or bootstrap confidence intervals would improve robustness.
 
-- **No confidence intervals or contamination analysis.** Despite the modest sample size (109–540 problems) and the risk of models having seen exact code snippets from public repositories, the paper reports no confidence intervals on pass@1 scores and conducts no contamination audit. The 2–3% gaps in Table 3 are presented as meaningful without any measure of uncertainty.
+- **Selection bias from filtering "trivial" and "ambiguous" problems (Section 3.2, Appendix C).** The paper filters out ambiguous problems — precisely those that require the most contextual reasoning — which may make EditBench easier than truly open-ended real-world conditions. While the paper provides concrete examples and this is a common and reasonable design choice for a benchmark, the potential upward bias in performance estimates should be acknowledged more explicitly.
 
-- **The easy/hard split threshold (k=20) is arbitrary and untested for sensitivity.** The choice of k directly determines the split and the reported gaps. A sensitivity analysis varying k would strengthen the robustness of the finding.
+- **Limited analysis of what makes problems hard (Section 5.1, Table 8).** The paper notes that hard problems have shorter instructions but similar highlighted code length. However, deeper qualitative or quantitative analysis (e.g., what kinds of edits are hardest: dependency-heavy tasks? ambiguous instructions? multi-step changes?) is missing. This limits the actionable insights developers could draw from the benchmark.
 
-- **Correlation with existing benchmarks is very weak, and alternative interpretations are not considered.** The Pearson correlation with Aider Polyglot is r=0.24 (p=0.06, not significant at the conventional α=0.05) and with Chatbot Arena is r=0.11. The paper interprets these as evidence of EditBench's uniqueness, but they could equally reflect noise in the EditBench signal. Direct comparison with edit-specific benchmarks like CanItEdit or CodeEditorBench — which exist and are cited in the paper — would have grounded this claim better.
+- **The scope of the evaluation on context ablation is limited to 7 models (Table 3).** While understandable given cost, the finding that "adding cursor position helps some models and hurts others" would be more robust with a broader sample, especially given the large drop for GLM-4.6 (-8.15%). This instability warrants caution in the paper's conclusion that "+Highlight without cursor" is the optimal condition for all models.
 
 ### Trivial
-
-- The paper mentions native-speaker review of translations on a "subset" but reports no quantitative metrics (e.g., translation error rate, fluency judgments), leaving translation quality unquantified.
+None.
 
 ## Nice-to-Haves
 
-- **Edit-region-only evaluation:** Running a diff-based analysis to check whether models change the correct region and preserve unchanged code would disentangle editing ability from full-file regeneration fidelity.
-- **Sensitivity analysis for k:** Reporting easy/hard splits at multiple k values would demonstrate that conclusions are not threshold-dependent.
-- **Human baseline:** Having independent programmers attempt a subset of problems would provide a ceiling and validate that test harnesses are solvable.
-- **Per-problem solvability distribution:** Reporting how many problems are solved by 0, 1–5, 6–20, etc. models would help readers assess test harness quality and benchmark difficulty structure.
+- Correlating benchmark scores with the user acceptance votes already collected by the VS Code extension would provide direct validation that EditBench rankings reflect real developer preferences.
+- A qualitative categorization of model failure modes (formatting errors, logic errors, missing imports, etc.) would reveal whether the benchmark tests editing skill or prompt-following.
+- Comparing with a diff-based prompt format could assess whether the "regenerate entire file" approach disadvantages certain models.
 
 ## Removed Points
 
-*These points are flagged to be removed — treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-- **"Dataset size is small and inflated by translations."** The harsh critic framed the 109-core / 540-total structure as a weakness. However, 109 is comparable to peer benchmarks (CanItEdit: 105, EditEval: 194), and the paper transparently discloses the translation step. The valid concern — no English-only breakdown — is retained above as a Major weakness. The framing that the dataset is problematically small was weakened.
+- **"Missing comparison with SWE-Bench" (from Harsh Critic):** The paper explicitly discusses SWE-Bench in Related Work (Section 2, lines 149-155) and positions EditBench as complementary — SWE-Bench focuses on agentic multi-file issue resolution, while EditBench targets inline code edits. The paper never claims to replace SWE-Bench, so this criticism is scope creep.
 
-- **"The evaluation metric conflates editing accuracy with full-file regeneration — the paper does not discuss this design choice."** The paper does mention the full-file regeneration requirement in Section 5. The harsh critic's claim that the paper "does not discuss" the choice is partially incorrect. The valid concern — that the implications are not discussed — is retained above as a Minor weakness.
+- **"No statistical significance / confidence intervals for rankings" (Harsh Critic, point 2, partially):** The temperature 0 single-sample pass@1 is standard practice in code benchmarks (Chen et al., 2021; Kulal et al., 2019). While confidence intervals would be nice-to-have, demanding them as a weakness overstates the deviation from community norms. I've softened this to Minor.
 
-- **Demand for direct comparison with CanItEdit/CodeEditorBench.** The paper already compares to Aider Polyglot and Chatbot Arena (Section 5.2). The demand for additional benchmarks was moved to Nice-to-Haves since the paper's comparison strategy is reasonable and the point was framed as a missing experiment rather than a fundamental flaw. The concern about weak correlation interpretation was retained at Minor level.
+- **"Section 5.1 hard problems analysis is insufficient" (Harsh Critic, section-by-section notes):** The paper does provide quantitative analysis (Table 8) showing hard problems have shorter instructions. Requesting a full content analysis of hardness factors is a nice-to-have, not a core weakness.
 
-- **"Lack of statistical rigor" as a Major/fatal issue.** While the absence of confidence intervals is a genuine gap, this was weakened from Major to Minor because (a) many comparable benchmark papers in this space do not report CIs, and (b) it does not threaten the core contribution. The point is retained but at appropriate severity.
+- **"Models perform best with highlighted code but Table 3 doesn't clearly support this for all models" (Harsh Critic):** Table 3 shows 5/7 models improve with highlight, and the claim is about the average trend. The paper's conclusion is reasonable and caveated.
+
+- **Strength Finder's "Rigorous curation and validation pipeline":** Overstated given the lack of inter-annotator agreement. The curation process is reasonable but not quantitatively rigorous. I've kept the substance in the review but dropped the label "rigorous."
 
 ## Novel Insights
 
-The paper's most compelling insight is that including highlighted code in the prompt improves performance for most (but not all) models in a model-specific way — some models benefit substantially while others are unaffected or even harmed. This is a concrete, measurable finding that demonstrates why evaluating editing with realistic context matters. It goes beyond the paper's own contribution of building the benchmark and provides actionable guidance: models should be evaluated (and likely trained) with inputs that mirror the IDE experience, since context sensitivity varies by model family.
+The most interesting observation emerging from these reviews is the tension between the paper's two core validity arguments. On one hand, EditBench's weak correlation with existing benchmarks (r=0.24, r=0.11) is presented as evidence that it captures something new and important — "real-world" editing difficulty. On the other hand, this same weak correlation, in the absence of any positive validation (e.g., against user acceptance data or developer satisfaction), could equally be interpreted as evidence that EditBench measures something noisy or irrelevant. This is a common challenge for benchmarks built on novel data sources: demonstrating that a benchmark measures something *different* is easy; demonstrating that it measures something *better* requires a validation chain the paper does not fully provide. The VS Code extension already logs user acceptance votes — validating against this signal is the most natural and impactful path forward.
 
 ## Suggestions
 
-1. **Add inter-annotator agreement statistics and a per-problem solvability table.** Even a simple breakdown (problems solved by 0, 1–10, 11–20, 21+ models) would substantially increase confidence in the benchmark's signal. For a camera-ready version, consider a small-scale human baseline (e.g., 2 independent programmers attempting 30 problems each).
-2. **Report results on the 109-problem English-only core alongside the full 540**, ideally as a separate column in Figure 4 or an additional table. This would address the translation concern directly at low cost.
-3. **Add bootstrap confidence intervals** for the main pass@1 results and for the Table 3 ablation differences. This is straightforward to compute and would significantly strengthen the paper's empirical claims.
-4. **Tone down the interpretation of correlation results.** Acknowledge explicitly that the very weak correlations could reflect noise in EditBench, and discuss what future validation (e.g., human performance correlation) could resolve this ambiguity.
+1. **Report inter-annotator agreement** on test harness creation (on at least a 20–30 problem subset coded by multiple annotators) to quantify and establish confidence in test case quality.
 
----
+2. **Correlate EditBench scores with user acceptance votes** already collected by the VS Code extension. This would provide direct evidence that the benchmark captures real developer preferences rather than just correlating poorly with existing benchmarks.
+
+3. **Report translation quality metrics** (e.g., human-rated adequacy scores, BLEU, or a sample error analysis) for the multilingual portion to substantiate the claim that cross-language evaluations are meaningful.
+
+4. **Add bootstrap confidence intervals** for the main pass@1 scores, especially for models with small performance gaps (2–3%), to clarify which differences are reliable.
+
+5. **Expand the context ablation** (Table 3) to more models and report per-model results more fully, or at minimum caveat the recommendation to use "+Highlight only" more explicitly given the mixed results.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors (all from /home/wg25r/review_agent/human_reviews_2026/):**
 
-- **DevBench** (`/home/wg25r/review_agent/human_reviews_2026/P9RZQ24j1z.md`): avg 3.00 (Reject). DevBench also collected real developer telemetry but used synthetic data generation that produced ceiling effects (84.8% pass@1). EditBench's in-the-wild collection is more authentic, its scores are more discriminative, and it evaluates 40 vs 9 models. EditBench is clearly stronger.
+| Anchor | Avg Score | Comparison to this paper |
+|--------|-----------|--------------------------|
+| `P9RZQ24j1z.md` (DevBench) | 3.00 | Weaker: suffered from ceiling effect (80%+ pass@1), synthetic data bias, and opaque curation. EditBench has more realistic data and better discriminative power. |
+| `DKvfjlXDJt.md` (BenchName) | 4.50 | Comparable quality: multi-task suite with manual verification but weaker lexical-similarity metrics. EditBench's execution-based evaluation is stronger but has similar validation gaps. |
+| `ThNHBP1qk9.md` (CodeInsightBench) | 4.00 | Weaker: built from Codeforces data (not in-the-wild), uses only one data source. EditBench's multi-source real-world pipeline is more innovative. |
+| `dnjTXfIapC.md` (Benchmarking LLM Benchmarks) | 2.50 | Much weaker: flawed assumptions, no significant contributions. EditBench has a clear, novel contribution. |
+| `cReExMQLiK.md` (How Reliable...) | 6.50 | Stronger: comprehensive experiments, rigorous methodology, clear actionable findings. EditBench's validation is less thorough. |
+| `9gw03JpKK4.md` (Gaia2) | 8.00 | Much stronger: comprehensive platform, rigorous fine-grained verification, extensible infrastructure, no significant weaknesses. EditBench has notable validation gaps. |
 
-- **CodeAlignBench** (`/home/wg25r/review_agent/human_reviews_2026/PGZInpg1Oj.md`): avg 3.33 (Reject). Shared the goal of evaluating beyond functional correctness but relied on competitive programming problems and had limited analysis. EditBench's real-world grounding and 40-model evaluation make it substantially more compelling.
-
-- **Code2Bench** (`/home/wg25r/review_agent/human_reviews_2026/QZmKyAy1VK.md`): avg 4.00 (Accept Poster). More rigorous test construction (PBT, 100% coverage gates) but less realistic data source and only 10 models evaluated. EditBench has stronger novelty and practical grounding but weaker evaluation rigor. Comparable overall quality.
-
-- **DL-Bench** (`/home/wg25r/review_agent/human_reviews_2026/NRLlB08IoE.md`): avg 5.00 (Reject). Similar dataset size (~520 instances) and similar validation gaps (no human baseline, inter-annotator reliability questioned). EditBench's real-world data collection is a stronger contribution than DL-Bench's GitHub scraping. Similar overall quality with EditBench having an edge in novelty.
-
-- **Gaia2** (`/home/wg25r/review_agent/human_reviews_2026/9gw03JpKK4.md`): avg 8.00 (Accept Oral). An entirely different tier — novel agent platform with comprehensive asynchronous evaluation, rigorous verifiers (0.98 agreement), and broad capability testing. EditBench is a solid benchmark contribution but lacks the ambition and rigor of Gaia2. EditBench is meaningfully below this level.
-
-**Calibration:** EditBench's real-world data collection is genuinely novel among code editing benchmarks, its 40-model evaluation is comprehensive, and its findings (context sensitivity, category-specific performance) are actionable. However, the test-harness validation gap, small core dataset, and absence of statistical rigor prevent it from reaching the 6+ tier. The paper sits comfortably above the 3–4 band (DevBench, CodeAlignBench, Code2Bench) and slightly above DL-Bench (5.0), but well below Gaia2 (8.0). A score of **5.5** reflects a solid benchmark paper with real contributions that would benefit from methodological strengthening in revision.
+EditBench is a solid paper with a genuine contribution — the first code editing benchmark built from real in-the-wild developer interactions, with innovative inclusion of contextual signals and multi-language support. However, the benchmark's central claims are weakened by unquantified test harness quality, lack of positive validation signal (weak correlation with existing benchmarks is not backed by evidence that EditBench better reflects real editing), and under-characterized translation quality. These are addressable gaps, not fatal flaws. The paper sits above reject-level anchors (DevBench at 3.0) but below the most rigorous benchmarks (Gaia2 at 8.0, How Reliable at 6.5).
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

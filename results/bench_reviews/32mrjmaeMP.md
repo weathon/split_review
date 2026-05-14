@@ -1,103 +1,72 @@
-Now I have enough context from both the paper and calibration anchors. Let me synthesize the review.
-
----
+Now let me compose the final review.
 
 ## Summary
 
-This paper proposes TAK (Task Arithmetic with KFAC regularization), a dataless regularizer for task arithmetic that promotes weight disentanglement during fine-tuning. The key insight is that under linearized fine-tuning, the representation-drift penalty reduces to a quadratic form involving the Jacobian Gram matrix — which is an instance of the Generalized Gauss-Newton (GGN) matrix. The authors then leverage Kronecker-Factored Approximate Curvature (KFAC) to make this quadratic form computationally tractable, and introduce a factor-merging scheme that yields constant complexity in the number of tasks. TAK matches or exceeds the data-dependent τJp regularizer on task addition and outperforms it on task negation across vision and language benchmarks, while eliminating the need for held-out validation data through robustness to the merging coefficient α.
-
----
+This paper proposes TAK (Task Arithmetic with KFAC regularization), a method for weight disentanglement in task arithmetic that eliminates the need for external task data during training. The key insight is that representation drift regularization — which normally requires data from other tasks — can be reframed as a curvature matrix approximation problem. By connecting the Jacobian Gram matrix to the generalized Gauss-Newton (GGN) matrix, the authors apply Kronecker-Factored Approximate Curvature (KFAC) to build a practical regularizer. A Kronecker-factor aggregation scheme further reduces per-task storage and computation to O(1) in the number of tasks. Experiments on vision (8 Vision benchmark with CLIP) and language (6NLI with T5-base) show that TAK matches or exceeds the data-dependent state-of-the-art method τJp in task addition while being dataless, and outperforms it in task negation (unlearning). Additional analyses demonstrate robustness to α-scaling, task localization, and memory-efficient KFAC compression.
 
 ## Strengths
 
-- **Novel theoretical connection (Section 3.1, Eq. 3):** The derivation showing that representation-drift regularization collapses to a GGN quadratic form under linearization is elegant and opens the door to leveraging the rich second-order optimization literature for task arithmetic. This is a genuinely non-obvious bridge between two previously disconnected areas.
+- **Elegant theoretical connection enabling a dataless regularizer**: The paper formally connects representation drift regularization to the GGN matrix (Section 3.2), showing that the Jacobian Gram matrix used to penalize drift is an instance of the GGN. This link allows the authors to leverage the well-studied KFAC approximation from second-order optimization — a transfer that is both principled and practical. The concrete value is demonstrated in Table 1: diagonal GGN achieves only 80.1% on ViT-B/32 versus TAK's 85.8%, confirming that structured curvature approximation matters.
 
-- **Strong empirical results matching data-dependent methods (Tables 1–2):** On the 8 Vision benchmark, TAK achieves 88.3%/91.6% absolute accuracy (ViT-B/16, ViT-L/14) at α=1, matching τJp which requires external task data, while being completely dataless. On task negation, TAK pushes target accuracy down to 3.4% while preserving ≥95% of pre-trained accuracy on control tasks — better than τJp.
+- **Competitive performance without task data**: TAK matches or exceeds the data-dependent τJp on vision task addition (Table 1: ViT-B/32 85.8 vs 85.0 at α=1; ViT-L/14 91.6 vs 90.9) while being strictly dataless during training. On task negation (Table 2), TAK achieves lower target accuracy (better forgetting) and higher control accuracy than τJp across all three ViT backbones — a genuine advantage over the leading data-dependent method.
 
-- **Constant-complexity KFAC merging (Section 3.4, Table 3):** The proposed aggregation of per-task Kronecker factors into a single surrogate (Eq. 8) reduces complexity from O(T) to O(1) with only marginal performance degradation. Table 3 validates this across three architectures.
+- **O(1) complexity via Kronecker-factor aggregation**: The accumulated regularizer (Eq. 8) merges per-task KFAC factors into a single surrogate, eliminating linear scaling with the number of tasks. Table 3 confirms marginal performance loss (86.0 vs 86.6 on ViT-B/32) relative to the idealized O(T) multi-task formulation, making the approach practical for many-task settings.
 
-- **Practical efficiency analysis (Figures 6–8):** The paper thoroughly analyzes computational costs: KFAC factors for all 8 Vision tasks can be pre-computed in ~4 minutes with MC=1; training-time overhead is roughly one-third that of τJp; memory overhead is modest (+12–22%); curvature updates can be scheduled every 16 steps with minimal degradation. This is unusually thorough for a methods paper.
+- **Robustness to task vector rescaling**: Figure 4a shows TAK maintains stable accuracy across a wide α range (0.25–1.75) on ViT-B/32, while competing methods (TSV, ISO, TIES) degrade sharply. This eliminates the need for validation-set tuning of α — a practical advantage when cross-task validation data is unavailable.
 
-- **Task localization evidence (Figure 5, Appendix F.5):** The distribution of Jacobian-projected output changes is pushed near zero for out-of-task inputs under KFAC regularization, providing interpretable evidence that the regularizer genuinely promotes weight disentanglement rather than just improving benchmark numbers.
-
-- **Robustness to merging coefficient (Figure 4):** TAK's simple task-vector summation maintains high accuracy over a wide α range, eliminating the need for cross-task validation data — a practically valuable property that the authors validate thoroughly.
-
----
+- **Thorough analysis supporting the method**: The task-localization analysis (Fig. 5, Fig. 13) provides clear empirical evidence that the regularizer confines each task vector's influence to its own input distribution. The extensive ablations on KFAC estimation (Fig. 7), MC samples, compression strategies (App. F.6), and the ImageNet-KFAC variant (Tab. 6) give a well-rounded picture of the method's practical behavior and robustness.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-None. The paper's core contributions are well-supported.
+None.
 
 ### Minor
+- **No variance reporting on headline results**: Tables 1, 2, 3, 4, 6, and 8 report single-point accuracy numbers without seed-to-seed variability. The λ-ablation in Table 5 shows non-negligible variance can exist (e.g., ViT-B/32 at λ=1: 81.7±0.648). While this practice is common in the task arithmetic literature (the companion works cited follow the same pattern), for a paper making state-of-the-art claims, the absence of confidence intervals on the main results makes it impossible to assess whether margins over baselines are statistically significant. This is the most significant gap in an otherwise well-executed experimental section.
 
-- **Scope limitation to linearized/near-linear regimes:** The theoretical justification (Section 3.1) relies on the linearized model f_lin (Eq. 1). The non-linear experiments are restricted to attention-only fine-tuning, chosen specifically because it "induces approximately linear fine-tuning dynamics." The paper is transparent about this ("our regularization is not theoretically exact in the non-linear regime," line 613), and the non-linear results with attention-only FT are genuinely strong. However, the abstract and introduction could more clearly telegraph this scope constraint, since a casual reader might assume the method works with standard full-parameter non-linear fine-tuning. The paper would benefit from a negative-result experiment showing what happens when TAK is applied to standard non-linear FT — this would delineate the boundary rather than leave readers to infer it.
+- **Non-linear regime extension lacks quantitative justification**: The paper acknowledges (line 613) that "our regularization is not theoretically exact in the non-linear regime" and justifies pairing with Attention-Only Fine-Tuning by citing that it "has been shown to induce approximately linear fine-tuning dynamics." However, no quantitative measure of how close attention-only fine-tuning is to linearization is provided (e.g., relative norm of the second-order term in the Taylor expansion). The empirical results on 8 Vision (Table 1, Fig. 2) suggest the combination works, but the hypothesis depends on the underlying fine-tuning method being sufficiently close to linear, which is not independently verified. The paper would benefit from either a quantitative characterization or tempering the claim about applicability outside the linearized regime.
 
-- **Error bound for merged KFAC (Appendix C) bounds the wrong quantity:** The Frobenius norm bound ∥E∥_F ≤ T σ_A σ_B (Eq. 18) characterizes matrix approximation error, but the quantity that matters for regularization is the quadratic form τ^⊤ E τ. A Frobenius norm bound provides only a loose guarantee on this quantity. The empirical validation in Table 3 largely compensates for this gap — the merged and idealized formulations perform similarly — but the bound itself is not as informative as it could be. This is a precision issue, not a correctness issue.
+- **"Dataless" framing is slightly overstated**: The method pre-computes KFAC factors from each task's data. While this can be done once and shared instead of raw data (and the paper acknowledges this in Sec. 3.1: "pre-computation – does not require further data access"), the abstract and introduction state "dataless approach" and "dataless regularization." Readers may infer that no data access is ever needed. The paper's own ImageNet-KFAC experiment (Tab. 6) shows that even a task-agnostic curvature prior works well, which actually strengthens the dataless claim, but the headline terminology could mislead. A more precise framing like "data-free during training" or "data-agnostic after pre-computation" would be more accurate.
+
+- **Unvalidated assumption behind the accumulated regularizer's error bound**: The error bound in Appendix C (Eq. 18) scales with T·σ_A·σ_B, where σ_A, σ_B measure variance of KFAC factors across tasks. The derivation relies on the assumption that per-task factors cluster tightly around their means. For CLIP backbones this may hold, but the paper does not empirically verify this assumption (e.g., by reporting σ_A, σ_B for representative layers across the 8 Vision tasks). An empirical measurement would strengthen confidence in the approximation.
 
 ### Trivial
-
-- The phrase "inherently privacy-preserving" (line 525) slightly overstates the case. TAK is dataless in that it doesn't require accessing other tasks' raw training data during regularization, but the KFAC factors are computed from task data and could in principle encode some distributional information. A brief acknowledgment of this nuance would be appropriate.
-
----
+- The main text does not explicitly state which KFAC variant (Exact vs. MC) is used for the headline experiments. The information is present — Appendix E states "a single Monte Carlo sample" and Fig. 6b labels "MC=1 (ours)" — but stating this clearly in the main experimental setup (Section 4) would improve readability.
 
 ## Nice-to-Haves
-
-- **Standard non-linear fine-tuning experiment (even as a negative result):** Running TAK with full-parameter non-linear fine-tuning and reporting the (likely degraded) results would help readers understand the method's boundary conditions and prevent misuse.
-
-- **Discussion of privacy implications of sharing KFAC factors:** While the "dataless" label is reasonable (no raw data access during regularization), a brief qualitative discussion of what information KFAC factors might leak would strengthen the paper's positioning on privacy.
-
-- **Comparison with free curvature proxies (e.g., Adam second moments, Li et al. 2025):** Using optimizer states already computed during pre-training as a diagonal curvature approximation could be a strong baseline, and comparing it against KFAC would clarify when the richer Kronecker structure is worth the additional computation.
-
----
+- Testing TAK+Attention-Only on a non-vision benchmark (e.g., language tasks) to determine whether the non-linear regime benefit generalizes beyond the 8 Vision setting.
+- Analyzing the variance of KFAC factors across tasks to empirically validate the error bound in Appendix C.
+- Applying TAK to parameter-efficient fine-tuning (LoRA, adapters), which the paper identifies as future work.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution:
 
-These points are flagged to be removed; treat them with caution.
-
-- **Harsh Critic Claim 1 — "Overclaimed applicability to general non-linear fine-tuning":** The paper explicitly states its limitation (line 613) and only presents non-linear results in the attention-only setting, with clear justification. The abstract and introduction could be more precise but are not misleading. The paper does not claim general non-linear applicability. **Moved to Minor as a scope-clarity issue rather than an evidential gap.**
-
-- **Harsh Critic Claim 3 — "Dataless property ignores privacy implications of sharing curvature factors":** The paper uses "dataless" to mean "does not require access to other tasks' training data during regularization" — a claim it fully supports. It never claims or implies differential privacy or that KFAC factors are information-theoretically free of data imprint. Criticizing the paper for not doing a privacy audit is scope creep. **Removed from main weaknesses; a brief note about the "privacy-preserving" wording is kept as Trivial.**
-
-- **Harsh Critic — "Comparison with τJp is not entirely fair on the dataless axis":** This misunderstands the comparison. TAK is compared favorably to τJp precisely because it achieves similar results without requiring other tasks' raw data. The fact that KFAC factors are derived from data is the mechanism by which TAK achieves being dataless — it compresses data into curvature statistics offline. The comparison is fair and well-motivated.
-
-- **Strength Finder — "Near-optimal performance with a shared, task-agnostic KFAC" (Table 6):** This is a genuine supporting finding but the table reference cannot be verified against the extracted text. Kept as a supporting strength with the caveat that the specific numbers come from the appendix.
-
-- **Harsh Critic — "Failure-mode analysis in non-linear regime" and various visualization requests:** These are reasonable suggestions but are requests for additional experiments, not weaknesses of the existing contribution. Moved to Nice-to-Haves.
-
----
+- **"KFAC variant not stated in main text"**: The paper does state MC=1 is used (line 803, Appendix E, Fig. 6b). Removed because the information is present, though it could be more prominent.
+- **"Missing comparison with τJp on normalized accuracy"**: The paper is transparent about τJp winning on some normalized accuracy metrics and explicitly states on language tasks that "τJp yields additional gains." Removed because the paper already addresses this honestly.
+- **Various formatting/style nitpicks** from Section-by-Section Notes: removed per hard rules.
 
 ## Novel Insights
 
-The most interesting observation emerging from this work is that weight disentanglement — a previously empirical property of task vectors — can be understood and enforced through the lens of curvature. The equivalence between the representation-drift quadratic form and the GGN under linearization is not merely a mathematical trick; it suggests a deeper relationship between parameter-space modularity and the loss landscape geometry around the pre-trained weights. The finding that a single shared ImageNet-KFAC retains 97–99% of task-specific KFAC performance (Appendix) further hints that the curvature structure of large pre-trained models may be surprisingly universal across downstream tasks, which has implications beyond task arithmetic — for continual learning, model merging, and modular deep learning more broadly.
-
----
+The most interesting tension across the reviews and the paper itself is between the "dataless" framing and the reality of pre-computation. TAK truly is data-free *during training*, but the KFAC pre-computation step still requires task data. However, the paper's own ImageNet-KFAC experiment (Tab. 6) suggests that even this coupling can be broken: a single curvature prior computed on generic image data recovers 97-99% of the per-task KFAC performance. This finding — that curvature structure is largely task-agnostic for vision backbones — is itself a non-trivial insight with implications beyond task arithmetic (e.g., for second-order optimization and Laplace approximation). The reviews did not fully explore this result's significance; it suggests the method could be made truly data-agnostic at all stages with minimal loss, which is a stronger position than the paper itself stakes out.
 
 ## Suggestions
+1. Report standard deviations over at least 3 seeds for the main results (Tables 1, 2, 3) in the final version.
+2. Clarify the "dataless" terminology — e.g., "data-free during training" or include a short caveat in the abstract about pre-computation.
+3. Either add a quantitative measure of linearization closeness for attention-only fine-tuning, or soften the claim about the non-linear regime.
+4. Empirically verify the KFAC factor variance assumption (report σ_A, σ_B for a representative layer) to validate the error bound in Appendix C.
 
-- Add a clear scope statement to the abstract: "Under linearized fine-tuning, we show that..." or "For models fine-tuned in the tangent space..."
-- Include a brief negative-result paragraph showing TAK's behavior under standard non-linear full-parameter fine-tuning — this would be informative even if performance degrades.
-- Replace "inherently privacy-preserving" (line 525) with "avoids sharing raw task data" to be more precise.
+## Calibration Anchors
 
----
+- **tcuaVzKm3e** (Task Vector Bases, avg 3.33): Task vector compression framework with weaker theoretical grounding and less thorough experiments than the current paper. The current paper is significantly stronger.
+- **fObtmKj0Ok** (Model Merging beyond Image Classification, avg 3.60): Extends merging to non-classification tasks; solid but narrower contribution. Current paper has deeper theory and cleaner results.
+- **IBRldWTC3F** (PAVE, avg 4.00): Data-dependent task vector purification for merging. Current paper's dataless property and curvature connection make it more novel.
+- **4UQt76OlL6** (OTMF, avg 2.67): Continual merging via optimal transport; requires labeled data and has presentation issues. Current paper is substantially stronger.
+- **iU026Hr90y** (One Model for All Tasks, avg 5.00, Accept): Multi-task planning with MoE; different domain but similar quality. Current paper is comparable or slightly stronger in theoretical depth.
+- **yxEop1S5le** (Gauss-Newton for LLMs, avg 6.50, Accept): Curvature-theme paper on LLM optimization; establishes an oracle upper bound. Extremely well-executed. Current paper is similarly rigorous but on a different problem — both are accept-level work.
+- **jdL6WB5jHZ** (Regularized Latent Dynamics, avg 6.50, Accept): Behavioral foundation models with representation regularization. Different domain; similar quality of exposition and experimentation.
 
-## Score and Decision
-
-### Anchor comparison:
-
-- **`ULxerRB2DF.md` (OTA Merging, avg 6.00, Reject):** Uses curvature (Adam second moments) for model merging. Similar in spirit but TAK has a cleaner theoretical derivation, broader architectural evaluation (3 ViT sizes + T5 vs. Llama-3.1 only), and creates its own curvature factors rather than depending on external training artifacts. TAK is methodologically stronger.
-- **`y0gom847Oy.md` (GMF-Mean, avg 5.33, Reject):** Post-hoc hyperparameter-free model merging. TAK has a more novel technical insight (the GGN-KFAC connection) and evaluates during-training regularization rather than post-hoc merging.
-- **`awyJs71tE7.md` (FlexMerge, avg 5.00, Accept Poster):** Studies accuracy-size trade-off in model merging. TAK offers a deeper methodological contribution and similarly thorough experiments.
-- **`fObtmKj0Ok.md` (Model Merging Reality Check, avg 3.60, Reject):** Extends model merging to heterogeneous tasks. TAK has stronger novelty and experimental depth.
-- **`e94X7pNmTq.md` (MIMA, avg 2.50, Reject):** Iterative averaging for task alignment. TAK's KFAC-based approach is substantially more sophisticated both theoretically and empirically.
-- **`tcuaVzKm3e.md` (Task Vector Bases, avg 3.33, Reject):** Compresses task vectors for efficiency. TAK targets a different problem (regularization during training) with a more elegant theoretical foundation.
-
-TAK is clearly stronger than the 5.0–5.33 papers (FlexMerge, GMF-Mean) and is at least comparable to OTA (6.0) while having a cleaner theoretical story and broader evaluation. The scope limitation (linearized regimes) prevents it from being an 8+ paper, but the contribution is genuine, well-executed, and practically valuable. Score: **6.5**.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

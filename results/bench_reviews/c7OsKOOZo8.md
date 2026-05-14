@@ -1,81 +1,73 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
-
----
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
-This paper proposes an end-to-end multi-view diabetic retinopathy (DR) grading framework with two novel modules: (1) GALP, which generates self-derived lesion proposals from grade-conditioned evidence maps using auxiliary classifiers, and (2) LGRF, a cross-view Mixture-of-Experts fusion module that routes lesion proposals through view-conditioned experts. The goal is to match the performance of externally-informed methods without requiring costly lesion/vessel annotations. Experiments on MFIDDR (4-view) and DRTiD (2-view) show the lesion-free variant reaching 83.9% accuracy on MFIDDR and 76.0% on DRTiD, competitive with or surpassing several annotation-dependent baselines.
+This paper proposes an end-to-end framework for multi-view diabetic retinopathy grading that generates "lesion proposals" on the fly via a Grade-Activated Lesion Proposal (GALP) module using CAM-based grade-conditioned evidence maps, and fuses them across views with a Cross-View Lesion Expert Guided Regional Fusion (LGRF) module using mixture-of-experts. The central claim is that self-generated proposals can substitute for costly external lesion annotations. The method is evaluated on two multi-view DR datasets (MFIDDR and DRTiD), achieving 83.9% accuracy without external annotations and 84.6% with them on MFIDDR.
 
 ## Strengths
-- **Novel architectural design with clear motivation**: GALP and LGRF are well-motivated modules that address a genuine practical bottleneck (annotation cost). The idea of using auxiliary classifiers to generate grade-conditioned proposals that feed into cross-view expert routing is conceptually sound and technically coherent (Sections 3.2–3.3).
-- **Effective ablation study**: Table 4 demonstrates that removing GALP (82.7%), the expert pool (82.6%), or the entire LGRF module (82.3%) each cause clear drops from the full model's 83.9% accuracy on MFIDDR, confirming each component contributes within the proposed framework.
-- **Competitive results on two benchmarks**: The lesion-free variant outperforms all end-to-end baselines on MFIDDR (Table 1) and surpasses externally-informed methods including CrossFiT and CVSA on DRTiD (Table 3), providing evidence that self-derived proposals can partially substitute for external annotations.
-- **Hyperparameter sensitivity analysis provided**: Figure 3 studies the impact of retention ratio α, number of experts M, and activated experts K₂, giving readers some insight into configuration robustness.
+- **Self-generated lesion proposals reduce external annotation dependency**: The lesion-free variant achieves 83.9% accuracy on MFIDDR, surpassing all end-to-end baselines (best prior: ETMC at 81.5%) and matching or outperforming externally informed methods like LFMVDR (82.2%) and CVSA (82.6%) (Table 1). This directly supports the core claim that self-derived proposals can substitute for expert annotations.
+- **SOTA results on DRTiD without external annotations**: The purely end-to-end method achieves 76.0% accuracy on DRTiD, outperforming CrossFiT (75.6%) and CVSA (74.7%) that rely on OD/macula coordinates or vessel masks (Table 3). This demonstrates generalization across a second benchmark with a different imaging setup (two-view, 512×512 resolution).
+- **Ablation study isolates module contributions**: Removing GALP drops accuracy by 1.2% (from 83.9% to 82.7%), removing Experts drops it by 1.3% (to 82.6%), and removing LGRF drops it by 1.6% (to 82.3%), with all three components showing complementary benefits (Table 4). The controlled ablation design cleanly attributes gains to the proposed components.
+- **Hyperparameter analysis**: The paper systematically varies the retention ratio α (20%–100%), expert count K₂ (1–6), and total experts M (2–8), showing α=50%, K₂=2, M=6 as optimal (Fig. 3). This provides practical deployment guidance.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **Backbone asymmetry in SOTA comparisons**: The paper uses Swin-B (~88M parameters) as backbone while most compared end-to-end and externally-informed baselines use substantially weaker backbones (ResNet-50 at ~25M, VGG-19). The authors match pretraining strategies (ImageNet for MFIDDR, EyePACS for DRTiD) as noted in implementation details, but architectural capacity differs significantly. The ablation (Table 4) shows each module contributes *within* the Swin-B framework, but there is no baseline of a simple "Swin-B + GAP per view + concatenate + linear classifier" to quantify how much the GALP+LGRF stack adds over a strong vanilla multi-view model with identical representation power. Consequently, the claim of "SOTA competitiveness" (Section 4.2) and "matches or surpasses strong baselines" (Abstract) is not fully isolated from backbone effects.
-
-- **No validation that CAM-derived regions correspond to lesions**: The paper's central mechanism assumes that grade-conditioned evidence maps (GEMs) yield "lesion proposals." However, the paper provides zero qualitative or quantitative evidence that the selected Top-K regions correspond to actual pathological structures (e.g., microaneurysms, hemorrhages, exudates) rather than non-lesion discriminative regions (optic disc, vessels, image artifacts). The MFIDDR dataset explicitly provides lesion segmentation masks generated by a model (Section 4.1), yet these are not used to evaluate proposal quality. Claims about "micro-lesion sensitivity" and "recovering small, low-contrast lesions" (Section 1, Contributions) are therefore unsubstantiated. While the performance results provide indirect support, a core mechanistic claim left entirely unevidenced is a significant gap.
+- **Unvalidated "lesion proposal" claim**: The paper repeatedly asserts that high-CAM regions in the GEMs correspond to lesions ("grade evidence in DR is predominantly localized to lesions"), but provides no evidence for this. The MFIDDR dataset explicitly provides lesion segmentation masks (line 440: "The provider also releases lesion segmentation masks generated by a segmentation model"), yet the paper never computes any overlap metric (IoU, Dice) between GALP proposals and these ground-truth masks. Without this validation, the central framing that GALP generates "lesion proposals" is an unsupported interpretation — the selected regions could capture artifacts, normal anatomical structures that covary with disease severity, or global texture changes. The method may work for other reasons (e.g., attention regularization via proposal selection), but the paper's name and motivation commit it to the lesion-interpretation claim, which remains unsubstantiated.
+- **No statistical significance reporting**: Across Tables 1, 3, and 4, no confidence intervals, standard deviations, or p-values are reported. The performance gaps are small (e.g., 83.9 vs 84.2 on MFIDDR, 76.0 vs 75.6 on DRTiD — a 0.4% margin). Without any indication of variance, the reader cannot assess whether the reported improvements are statistically reliable or within run-to-run noise. This is a standard expectation for medical imaging papers.
 
 ### Minor
-- **Marginal performance differences without statistical reporting**: The lesion-free variant trails WGLIN by only 0.3pp (83.9% vs. 84.2%) on MFIDDR and leads CrossFiT by only 0.4pp (76.0% vs. 75.6%) on DRTiD. No confidence intervals, standard deviations over multiple runs, or statistical tests are reported. These small margins could fluctuate under different random seeds, yet the paper makes strong claims about surpassing baselines (e.g., "surpassing all baselines" in Section 4.2).
-
-- **No analysis of proposal robustness during training**: GALP generates CAMs using *predicted* grades from auxiliary classifiers, not ground-truth grades. There is no discussion or analysis of proposal quality during early training epochs when auxiliary predictions are unreliable, or whether incorrect intermediate predictions degrade the fusion process.
-
-- **The "w/o LGRF" ablation variant is ambiguously specified**: Section 4.3 states it "simply concatenates lesion proposals with cross-view tokens." A precise architectural description (dimensions, how concatenation feeds into subsequent stages) would improve reproducibility.
+- **Missing equal-backbone controlled comparison**: The paper uses Swin-B while many baselines use smaller backbones (ResNet50 in MVCNN_R, VGG19 in MVCNN_V). Although the paper discloses pretraining protocols ("consistent with CVSA", "following CrossFiT"), there is no baseline using Swin-B with a simple fusion strategy (e.g., concatenation + linear classifier, or vanilla cross-attention without experts) trained under identical conditions. The w/o GALP and w/o LGRF ablations partially address this, but a simple Swin-B fusion baseline would more cleanly isolate the method's contribution beyond backbone strength. (Note: the paper's ablations already use the same backbone, so this is a framing weakness, not a fatal flaw.)
+- **No analysis of expert specialization**: The LGRF module uses a mixture-of-experts motivated as "selecting relevant feature extractors," but there is no analysis of whether experts actually specialize (routing patterns, per-expert proposal type analysis, expert utilization histograms). The load-balancing loss (Eq. 11) is presented but its effect is never measured. The MoE literature routinely provides such analysis.
+- **Grade 4 performance drop without lesions**: In Table 2, "Ours (w/o lesion)" achieves F1=36.0 on Grade 4 (proliferative DR) vs. 51.6 with lesions, and even trails several externally informed methods (e.g., CVSA at 64.1, SMVDR-W at 40.8). The paper does not discuss why the self-derived proposals fail for proliferative DR or what lesion types are being missed. This is a significant performance gap that warrants analysis.
 
 ### Trivial
-- The "Conv Block" description in Section 3.1 is imprecise for a Swin Transformer backbone (which uses patch embedding, not a traditional convolutional stem). This does not affect technical correctness but may confuse readers.
+- Notation fragmentation throughout Equations 3–14 makes parts of Section 3 difficult to follow (e.g., the GEM equation has a subscript "sn" used both as stage index and within subscript positions inconsistently).
+- The description of the w/o GALP ablation ("removes GALP and directly uses all tokens for LGRF fusion") is ambiguous — if GALP is removed, what are the "lesion proposals" being fused by LGRF?
 
 ## Nice-to-Haves
-- Side-by-side visualizations overlaying Top-K GALP proposals on original fundus images (for both success and failure cases) would substantially strengthen the interpretability claims.
-- A study correlating auxiliary classifier accuracy with downstream grading performance across training epochs would illuminate whether poor early proposals harm the model.
-- Testing on scenarios with artificially limited annotations (e.g., varying amounts of training data) would directly demonstrate the method's claimed advantage in reducing annotation reliance.
+- Provide visualizations of GALP proposals overlaid on original fundus images alongside ground-truth lesion masks (available for MFIDDR). This would directly validate the central assumption.
+- Ablate the auxiliary classification loss independently: does removing it degrade GEM quality even if the proposal mechanism is retained?
+- Analyze expert routing patterns: which experts fire for which types of proposals, and does the load-balancing loss actually improve routing diversity?
+- Report results averaged over multiple random seeds with confidence intervals.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
 
-1. **Harsh Critic claim: "The paper does not re-implement any multi-view baseline with the same Swin-B backbone"** — This is a valid concern (retained as Major weakness above) but the harsh critic frames it as fatal. The ablation within the same backbone partially mitigates this, so the criticism is retained but downgraded from Fatal to Major.
+These points are flagged to be removed, treat them with caution:
 
-2. **Harsh Critic claim: "The description of the Conv Block is imprecise for a Swin Transformer backbone"** — Retained as Trivial since Swin-B's patch embedding is technically a Conv2d with stride=patch_size. The description is slightly imprecise but functionally correct.
+- **Critical Issue 3 (inconsistent annotation setting)**: The critic claims the paper conflates "w/o lesion" and "with lesion" settings. However, the paper clearly separates the two variants in Table 1 and explicitly states that the main contribution is the lesion-free variant. The "with lesion" version is presented transparently as an additional result (SPADE fusion), not as the primary claim. The paper's narrative is consistent: "even without any external side information, our framework already closes the gap with methods that require costly annotations" — this is a valid framing, not a contradiction. [Removed: misreading of paper's clear dual reporting.]
 
-3. **Harsh Critic: "No analysis on how robust CAMs are during early epochs or for mis-predicted intermediate stages"** — Retained as Minor. This is a valid observation but less severe than the harsh critic implies; many CAM-based methods share this limitation.
+- **Patch size (q=7 vs q=8) concern**: The critic questions whether q=8 divides all feature map sizes for DRTiD. For Swin-B with 512×512 input (DRTiD resolution), the feature maps are approximately 128×128 → 64×64 → 32×32 → 16×16, all divisible by 8. For MFIDDR at 224×224, maps are 56→28→14→7, divisible by 7. The paper's description is thus correct. [Removed: factually incorrect criticism.]
 
-4. **Harsh Critic: "The load-balancing loss interaction with cyclic view pairing is not discussed"** — Removed. The cyclic pairing (j = i+1 or wrap-around) is a standard design choice for multi-view fusion and the load-balancing loss operates on expert assignments independently of view pairing. The critic's concern about routing collapse is speculative without evidence.
+- **Backbone pretraining disclosure**: The critic claims the paper doesn't disclose baseline backbones. The paper explicitly states "for MFIDDR, the backbone is pretrained on ImageNet, consistent with CVSA (Lin et al., 2025a); for DRTiD, the backbone is pretrained on the fundus dataset EyePACS, following CrossFiT (Hou et al., 2022)." This is standard disclosure practice. [Removed: factually incorrect; paper does disclose.]
 
-5. **Harsh Critic: "The narrative that prior end-to-end pipelines leave a 'performance ceiling' is never empirically demonstrated"** — Removed as a standalone weakness. This is a motivational claim setting up the problem, not an empirical claim. The paper does not need to prove the ceiling exists; it only needs to show its method improves over existing approaches, which it does.
+- **All generic "presentation" and "formatting" nitpicks**: Typos, spelling, and grammatical issues flagged by the critic are parser artifacts and not present in the original submission. [Removed per hard rules.]
 
-6. **Harsh Critic: "The paper makes no use of [MFIDDR lesion masks] for evaluating proposal quality — a missed opportunity"** — This is retained within the Major weakness about proposal validation, not as a separate point.
-
-7. **Strength Finder: "Rigorous empirical validation"** — Dropped. While the paper evaluates on two datasets with multiple baselines and ablations, the "rigorous" characterization is weakened by the backbone asymmetry and missing proposal validation. Moved to Removed Points.
-
-8. **Strength Finder: "The method is evaluated against a wide range of end-to-end and externally informed multi-view baselines"** — Kept with qualification. The range is indeed wide, but the backbone disparity limits the fairness of the comparison.
+- **Various weak/unsupported criticisms from the Harsh Critic**: Criticisms about missing appendix content, missing proofs, or missing related works are removed per the hard rules (parser strips appendix sections, and the model has no external sources to confirm related-work omissions).
 
 ## Novel Insights
-None beyond the paper's own contributions. The idea of using auxiliary classifiers to generate self-derived lesion proposals for cross-view fusion is the paper's own novel contribution; the reviews did not surface additional synthetic insights about the method beyond those already in the paper.
+The most interesting observation emerging from the reviews is the tension between the paper's architectural contribution and its interpretability claims. The GALP+LGRF pipeline likely improves DR grading for reasons that may be orthogonal to its stated motivation — the proposal mechanism regularizes attention by forcing the model to focus on a sparse set of discriminative regions, and the MoE fusion enriches the feature representation. Whether those regions are actually "lesions" in a clinically meaningful sense is a separate, and unvalidated, claim. This disconnect between the mechanistic explanation (lesion proposals) and the potential real driver (attention sparsity / feature enrichment) is a pattern that appears across many weakly-supervised medical imaging papers. The paper would be substantially stronger if it acknowledged this ambiguity and validated what the proposals actually capture.
 
 ## Suggestions
-- Add a simple Swin-B multi-view baseline (GAP per view → concatenate → linear classifier) on MFIDDR. This is a minimal-cost experiment that would strongly bound the contribution of GALP+LGRF over a vanilla strong backbone.
-- Overlay the Top-K GALP proposals on original fundus images for several representative cases (e.g., one per DR grade). Even qualitative visual examples would substantially strengthen the "lesion proposal" claim. If possible, compute a basic overlap metric with the MFIDDR-provided segmentation masks.
-- Report results over at least 3 random seeds with mean ± std to contextualize the small performance margins.
-- Clarify the architecture of the "w/o LGRF" ablation variant with a precise description.
+1. **Validate GALP proposals against ground-truth lesion masks** (available on MFIDDR): compute region-level IoU or Dice between Top-K proposal regions and lesion segmentation maps. This would either substantiate or refute the paper's core interpretability claim.
+2. **Add statistical significance** (95% CI across 3–5 random seeds) to the primary comparisons in Tables 1, 3, and 4. Given the small performance margins, this is essential.
+3. **Add a Swin-B + simple fusion baseline** (e.g., average pooling + linear classifier, or vanilla cross-attention) under identical training conditions to isolate the contribution of the proposed modules beyond backbone strength.
+4. **Analyze the Grade 4 failure case**: why does the lesion-free variant drop to F1=36.0 on proliferative DR, and what does this reveal about the limitations of GALP for detecting neovascularization?
 
 ## Score and Decision
 
-### Anchor comparison:
-- **cESVZ0SfjA** (avg 1.50, Reject): Label Transfer Hypothesis paper with no formal theory, limited experiments, outdated baselines. The paper under review is substantially stronger in methodology, experimental scope, and results.
-- **mkoeblmWvN** (avg 2.67, Reject): Semantic robustness case study with limited contribution. The paper under review has a clearer, more impactful contribution.
-- **WuEE1f4NId** (avg 4.00, Withdrawn/Reject): DR grading with concept learning; suffered from underwhelming performance, incremental methodology, and baseline gaps. Our paper has stronger results and clearer novelty but shares some evaluation gaps. The paper under review is somewhat stronger.
-- **9gc58FeBba** (avg 5.00, Reject): Multi-view DR with concept reasoning; had synthetic data concerns, marginal gains, and complexity issues. Our paper has cleaner methodology and stronger empirical results, placing it slightly above this anchor.
-- **h2p5eOFpcF** (avg 5.50, Accept Poster): Multi-image medical reasoning benchmark with thorough evaluation and clear contribution. Our paper has a different contribution type (method rather than benchmark) but less thorough evaluation, placing it below this anchor.
-- **LxjdknhUen** (avg 3.33, Withdrawn): Multi-view pedestrian detection fusion. Less relevant topically; our paper is stronger.
-- **QCCMvWYwPN** (avg 4.50, Reject): Multi-retinal disease detection dataset. Our paper has a stronger methodology contribution but similar score range.
+### Calibration Anchors
 
-The paper under review has genuine methodological novelty and competitive results, but two major experimental gaps (backbone-controlled comparisons and lesion proposal validation) prevent it from being a clear accept. These issues are addressable in revision but significantly weaken the current empirical case.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/h21iXALHk6.md` | 1.00 (Reject) | RegionMed-CLIP had fabricated references and missing technical details. This paper is far stronger — real methodology, real results, proper citations. |
+| `/home/wg25r/review_agent/human_reviews_2026/sWQe6bKsLW.md` | 3.00 (Reject) | MediBench was a narrow benchmark with questionable framing. This paper has a concrete methodological contribution and empirical validation. Clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/WuEE1f4NId.md` | 4.00 (Reject) | KCCL for DR grading had weak absolute performance (F1≈47) and heavy dependence on curated lesion annotations. This paper achieves much stronger results (83.9% Acc) with fewer external dependencies. Stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/9gc58FeBba.md` | 5.00 (Reject) | ProConMV for multi-view DR used synthetic multimodal data. This paper's self-supervised lesion proposals are a cleaner contribution, though both share strengths in problem framing. Slightly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/Ro282CMb1O.md` | 5.00 (Reject) | U-Bench was a benchmark paper with implementation concerns. This paper has an actual method with good ablations, but shares the issue of unsubstantiated framing claims. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/h2p5eOFpcF.md` | 5.50 (Accept) | MedThinkVQA was a well-executed benchmark with thorough evaluation. As a methodological paper, this work faces harder standards of proof and has larger evidential gaps (unvalidated proposals). Slightly weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/S5Io33pc78.md` | 6.50 (Accept) | MAMMOTH had thorough experiments across 19 tasks with clear ablation and interpretability analysis. This paper has more limited validation and a key unsubstantiated claim. Weaker. |
+
+**Score rationale**: The paper has a genuine architectural contribution (GALP + LGRF), solid results on two benchmarks, and good ablations. However, the central "lesion proposal" claim is unvalidated despite available ground-truth masks, statistical significance is entirely absent, and the Grade 4 performance gap raises concerns about the method's limitations for advanced disease. These are fixable issues, but they prevent the paper from being a strong accept. Positioned against the anchors, the paper is between the ~5.00 reject-level papers and the ~6.00+ accept-level papers — better than MediBench (3.00) and the unvalidated DR generalizations, but significantly weaker than MAMMOTH (6.50) which had comprehensive validation.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,91 +1,120 @@
-Now I have all the information I need. Let me write the consolidated review.
-
----
+Now I have all the evidence I need to write the final consolidated review.
 
 ## Summary
-
-This paper presents DGNet, a multi-head SimCLR framework for EEG-based dementia classification. The key idea is to decompose EEG into five neurophysiologically meaningful frequency bands (delta through gamma), process each band with independent CNN encoders and projection heads, and apply an adaptive contrastive loss with temperature regularization for self-supervised pre-training. Under leave-one-subject-out (LOSO) evaluation on a public dataset of 65 subjects (36 AD, 29 CN), DGNet achieves 92.90% accuracy, outperforming 12 baseline models. The ablation study systematically isolates the contributions of SSL pre-training, multi-band heads, adaptive temperature, and regularization.
+2-3 sentence summary of the paper's contribution.
 
 ## Strengths
-
-- **Well-motivated multi-band design grounded in neurophysiology**: The decomposition into five canonical EEG frequency bands directly aligns with established spectral biomarkers of dementia (increased delta/theta, decreased alpha/beta/gamma). This makes the architecture clinically interpretable rather than a black-box choice.
-- **Comprehensive and informative ablation study (Table 3)**: The paper systematically isolates each component: w/o SSL (63.35%), single-head (73.52%), w/o augmentation (78.58%), multi-head without adaptive temperature (79.55%), constant temperature (86.53%), w/o regularization (90.64%), and the full model (92.90%). This gives clear insight into the contribution of each design choice.
-- **Strong empirical results with rigorous subject-independent evaluation**: DGNet achieves 92.90% accuracy and 92.85% F1 under LOSO cross-validation, outperforming 12 baselines including both supervised (ATCNet, EEGNet, Deep4Net, etc.) and SSL models (BIOT, Labram, S-JEPA). Comparison with recent LOSO-evaluated methods on the same dataset (Table 2) shows DGNet surpasses the next-best BI-MCGNN (91.25%).
-- **Appropriate EEG-specific augmentations**: Gaussian noise, amplitude scaling, time/frequency masking, and channel dropout (Figure 4) are well-chosen for the low-SNR, high-variability nature of EEG.
-- **Interpretable visualizations**: Embedding spectrograms (Figure 3) and delta-band topography (Figure 7 in appendix) connect learned features to known neurophysiological signatures.
-- **Code and hyperparameters documented**: Reproducibility is supported by released code and detailed hyperparameter tables (Tables 5-6).
+- strength 1 with evidence
+- strength 2 with evidence
 
 ## Weaknesses
 
 ### Fatal
-
-None.
+- weakness 1 — why it matters
 
 ### Major
-
-- **SSL pre-training protocol may conflate subject-specific and disease-specific representations**: The paper pre-trains the SSL encoder once on all available EEG data, then applies LOSO only during the linear evaluation stage (Section 3, lines 425-432: "During the pre-training stage... In the subsequent linear evaluation stage, Leave-One-Subject-Out (LOSO) cross-validation was used"). This means the encoder sees data from the held-out test subject during pre-training, albeit without labels. With only 65 subjects and the large gap between supervised-from-scratch (63.35%) and SSL-pre-trained (92.90%) performance, there is a nontrivial risk that the encoder partially captures subject identity rather than purely disease-relevant features. The paper does not discuss this limitation or provide a diagnostic (e.g., testing whether pre-trained features can classify subject identity, which would confirm the concern). Standard SSL practice varies — some works pre-train on all data, others do fold-wise pre-training — but for a small clinical dataset where subject-specific signal characteristics are strong, the paper should at minimum acknowledge and analyze this risk. This does not invalidate the results but substantially weakens confidence in the claimed generalization.
+- weakness 1 — why it matters
 
 ### Minor
-
-- **No subject-level evaluation reported**: The paper computes accuracy across all 30-second segments of the held-out subject under LOSO, but does not report subject-level metrics (e.g., majority-vote accuracy per subject). Segment counts vary across subjects, and a few difficult subjects with many segments could be misclassified while segment-level accuracy remains high. Subject-level accuracy is more clinically meaningful and would strengthen the paper's diagnostic claims.
-- **Limited methodological novelty beyond the application context**: The adaptive NT-Xent loss with temperature regularization (Equation 1) is taken directly from Wang et al. (2024) and applied to EEG frequency bands. The multi-band decomposition uses standard bandpass filtering. The core architectural contribution is the combination of these existing components into a multi-head SimCLR framework for EEG, which is a solid engineering contribution but incremental from a methodological perspective.
-- **Single-dataset evaluation** : All experiments use one dataset (Miltiadous et al., 2023b) with 65 subjects. While comparisons with prior work on this same dataset are fair, external validation on additional dementia EEG datasets would substantially strengthen the generalizability claims.
-- **No discussion of limitations**: The conclusion (Section 5) repeats the contributions without addressing the small sample size, single-dataset evaluation, or the pre-training protocol concern.
+- weakness 1 — why it matters
 
 ### Trivial
-
-- **Confusing "linear evaluation" terminology** (Section 2.1, lines 291-295): The paper describes two downstream approaches, calling the second one "linear evaluation" but describing it as updating all model parameters including the encoder — which is actually fine-tuning, not linear evaluation in the standard SSL sense. The actual experiments (Section 3) correctly use the first approach (frozen encoder), so the results are unaffected.
-- The classifier architecture (512 → 256 nodes with ReLU and dropout) is described as an MLP but is not a "linear" classifier. This does not affect the results but the terminology is imprecise.
+- weakness 1
 
 ## Nice-to-Haves
-
-- A subject-identity classification experiment using pre-trained features to diagnose whether the encoder captures subject-specific vs. disease-specific information.
-- Evaluation on the FTD class (23 subjects available in the dataset) to test multi-class generalization.
-- Confidence intervals or standard deviations for the main results (BI-MCGNN reports these in Table 2; DGNet does not).
-- Comparison with a single-head SimCLR pre-trained with identical augmentations and backbone but on the same data, to more cleanly isolate the multi-band contribution from the in-domain SSL benefit (the current single-head ablation differs in architecture, not just the band decomposition).
+- suggestion that would improve but is not a core flaw
 
 ## Removed Points
-
-These points were flagged by the Harsh Critic but are removed from the main review. Treat them with caution.
-
-1. **"Pre-training data leakage invalidates the main results" — REMOVED as a fatal claim, retained as a major concern**: The Harsh Critic characterized this as a structural flaw that "invalidates" all results and "renders the headline 92.9% accuracy uninterpretable." This overstates the problem. SSL pre-training on all unlabeled data is a common and accepted practice in the SSL literature (the encoder never sees labels). The risk of learning subject-specific features is real and worth investigating, but does not "invalidate" the results or constitute label leakage. The concern is downgraded to Major.
-
-2. **"Unfair baseline comparison overstates the contribution" — REMOVED as a major claim, partially incorporated as context**: The Critic argued the comparison is unfair because baselines lack in-domain SSL. However, Table 1 includes three SSL baselines (BIOT, Labram, S-JEPA) that were pre-trained on large external datasets and fine-tuned. The ablation (Table 3) already includes a "w/o SSL" baseline (63.35%) that quantifies the SSL benefit. The Critic's demand for a "standard single-head SimCLR pre-trained on the same data with identical augmentation and backbone" is partially addressed by the single-head ablation (73.52%) and the multi-head ablation (79.55%). The gap from these to the full model is attributed to adaptive temperature and regularization, which are genuine methodological contributions. The baseline comparison is reasonable by community standards.
-
-3. **"The adaptive NT-Xent loss is taken directly from Wang et al. (2024)... this is a straightforward domain adaptation, not a new loss design" — REMOVED**: This observation is factually correct but the paper explicitly cites Wang et al. (2024) and does not claim to invent the loss. Applying an existing loss to a new domain with appropriate modifications is standard practice. This is already captured under "limited methodological novelty."
-
-4. **"The paper does not discuss why separate band-wise projection heads are preferable to a single multi-band encoder with a shared head, beyond a simple ablation" — REMOVED**: The ablation (single-head: 73.52% vs. multi-head: 79.55%) is the discussion. The paper provides quantitative evidence for the design choice, which is more compelling than a qualitative argument.
-
-5. **"No indication that pre-training was confined to the training subjects within each LOSO fold" — INCORPORATED**: This factual observation is retained in the Major weakness but the conclusion that it "disqualifies the evaluation" is removed as excessive.
-
-6. **All formatting/style/typo nitpicks — REMOVED per hard rules**: These are parser artifacts, not paper issues.
+Weaknesses that are removed keep the details
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews did not surface genuinely novel observations that the paper had not already made.
+One paragraph synthesizing genuinely novel observations.
 
 ## Suggestions
+- specific actionable suggestion
 
-- **Primary**: Add a subject-identity classification experiment using pre-trained features. If accuracy is high, it confirms the encoder captures subject-specific patterns, and the paper should discuss this limitation. If accuracy is near chance, it strengthens confidence in the disease-specific nature of the learned representations.
-- Run a fold-wise SSL pre-training experiment (pre-train separately for each LOSO fold) on at least a subset of folds and report whether performance changes. This would directly address the major concern.
-- Report subject-level accuracy (majority vote) alongside segment-level accuracy.
-- Include a discussion of limitations in the conclusion, addressing sample size, single-dataset evaluation, and the pre-training protocol.
-- Clarify the "linear evaluation" terminology — the experiments use a frozen encoder with an MLP classifier, which is standard linear probing, not the fine-tuning described in Section 2.1.
+DO differentiate between papers of varying quality clearly.
 
 ## Score and Decision
 
-### Anchor comparison:
+Let me now write the full review.
 
-| Anchor | Path | Avg Score | How DGNet compares |
-|--------|------|-----------|---------------------|
-| MTSSRL-MD | `qD4N15aL2W` | 2.00 | DGNet is substantially stronger — it has a clear ablation, strong results, and addresses a well-defined problem rather than being unaware of literature |
-| CLIQ | `rNNSuV4ZP9` | 3.00 | DGNet is stronger — more rigorous evaluation (LOSO), better ablation, clearer contribution |
-| LEAD | `KuhCUX2oIt` | 4.00 | Comparable in ambition (dementia diagnosis) but DGNet has more transparent ablation and less overclaiming; LEAD had marginal architecture gains contradicted by its ablation |
-| SPR | `gpf2dYfVwg` | 4.50 | Comparable — both have a clear novel angle (spatial coherence vs. multi-band), strong results, but incremental methodology on top of existing frameworks |
-| RHOP | `66h1sCMm7F` | 6.00 | RHOP is stronger — more principled methodology (Riemannian geometry), evaluated across multiple tasks/backbones/paradigms, comprehensive |
-| Beyond Hearing | `s79tJrxDmt` | 6.00 | Stronger — novel data collection + methodology, broader evaluation |
+---
 
-DGNet sits between the 4.00–4.50 reject papers and the 6.00 accept papers. The multi-band design is well-motivated, the ablation is thorough, and the results are strong. However, the pre-training protocol concern (Major weakness), limited novelty beyond application, single-dataset evaluation, and absence of subject-level metrics collectively hold it below the accept threshold. The paper makes a solid application contribution but has methodological gaps that weaken confidence in the core generalization claims.
+## Summary  
+This paper proposes DGNet, a self-supervised multi-band EEG representation learning model that decomposes EEG into five canonical frequency bands (delta, theta, alpha, beta, gamma) and processes each band through independent CNN encoders and projection heads using SimCLR-style contrastive learning with adaptive temperature. Evaluated on a small resting-state EEG dataset (88 subjects, 65 for AD/CN) under leave-one-subject-out cross-validation, the method reports 92.90% accuracy for Alzheimer's vs. cognitively normal classification.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+## Strengths
+1. **Neurophysiologically motivated architecture**: Decomposing EEG into canonical frequency bands and learning independent representations for each band is well-motivated by the known spectral slowing biomarkers in AD (increased delta/theta, decreased alpha/beta/gamma). This design choice has a clear biological rationale that distinguishes the approach from monolithic EEG models.
+
+2. **Systematic ablation study**: Table 3 decomposes performance contributions across six components (from-scratch training, single-head, multi-head, constant temperature, w/o regularization, full model), showing a clear progression from 63.35% (from scratch) to 92.90% (full model). Despite a labeling issue (see Weaknesses), this provides more component-level analysis than most EEG SSL papers.
+
+3. **Appropriate evaluation protocol**: Leave-one-subject-out cross-validation is the correct protocol for assessing generalization to unseen subjects in EEG, preventing data leakage. The code is provided for reproducibility.
+
+4. **Interpretability visualizations**: The paper includes spectrogram embeddings per frequency band (Figure 3) and delta-band topography comparing AD vs. CN groups (Figure 7), connecting learned features to known neurophysiology.
+
+## Weaknesses
+
+### Fatal  
+- **Suspiciously low baseline performance invalidates the central claim.** Table 1 reports multiple well-established EEG models performing at or below chance on a binary AD/CN task: EEGInception at 39%, TIDNet at 44%, EEGNet at 46%, Deep4Net at 49%, S-JEPA at 50%, BIOT at 53%. For binary classification, chance is 50% — several of these models are *worse than random guessing*. This is irreconcilable with the known capabilities of these architectures. The most plausible explanation is that the baselines were not properly implemented, tuned, or adapted to the dataset and evaluation protocol. Since the paper's headline claim ("significantly outperforming all comparison models") rests entirely on these comparisons, and since the largest gaps are against baselines that appear to be malfunctioning, the core result is unsupported. The authors would need to demonstrate that all baselines were run under identical conditions (same data splits, preprocessing, training budgets, and hyperparameter tuning) before any superiority claim can be credible.
+
+### Major
+1. **Arithmetic error in the abstract.** The abstract claims a "31.5% relative performance improvement over training from scratch" and "25.4% improvement over the single-head approach." From Table 3: from-scratch accuracy is 63.35%, full model is 92.90%. The correct relative improvement is (92.90 − 63.35) / 63.35 = **46.6%**, not 31.5%. The single-head improvement should be (92.90 − 73.52) / 73.52 = **26.4%**, not 25.4%. The 31.5% figure has a ~48% relative error. While perhaps a draft mistake, this undermines confidence in all reported numbers and suggests the authors did not carefully verify their own results.
+
+### Minor  
+1. **Misleading ablation label.** The "w/o augmentation" row (78.58%) does not simply remove augmentation — it *replaces the entire contrastive learning objective* with a masked-reconstruction task (masking 15% and using MSE loss). This ablates the pretraining paradigm itself, not just data augmentation. The label conflates two separate changes and makes the ablation structure harder to interpret.
+
+2. **Table 2 comparisons are not controlled.** The paper states "all models were evaluated using strict LOSO cross-validation," but Table 2 cites published results from other papers (kNN, Random Forest, DICE-Net, BI-MCGNN, etc.) that used the same dataset but likely differ in preprocessing, segmentation, and cross-validation fold assignment. The 1.65 percentage point margin over BI-MCGNN (92.90% vs. 91.25%) could easily vanish with proper replication under identical conditions. While citing prior results is common practice, the phrasing overstates the degree of control.
+
+3. **No variance reported for Table 1.** The LOSO results in Table 1 lack any measure of variance (standard deviation, confidence intervals, or per-fold results). Table 2 reports one standard deviation for one model. Without variance, the significance of the reported improvements cannot be assessed, especially on a dataset of only 65 subjects.
+
+4. **BIOT mischaracterized.** The appendix describes BIOT as "a large language model for biosignal classification." BIOT is a biosignal transformer, not a language model. This inaccuracy suggests the authors are not deeply familiar with the baselines they compare against.
+
+### Trivial  
+- Both Table 1 and Table 2 report overlapping performance for DGNet (same 92.90%/92.85% in both), yet Table 1 is positioned as benchmark model comparison and Table 2 as LOSO comparison with prior published work. The duplication is unnecessary and slightly confusing.
+
+## Nice-to-Haves  
+- Reporting per-class recall and confusion matrices would clarify whether errors are balanced, especially given the mild class imbalance (36 AD vs. 29 CN).
+- A simple band-power + logistic regression baseline would help calibrate expectations: if DGNet cannot substantially beat such a straightforward spectral feature baseline, the architectural complexity may not be justified.
+- Including standard deviations for all LOSO results would enable significance assessment.
+
+## Removed Points  
+*These points were raised by reviewers but are removed per filtering rules. They are listed here for transparency but should not be treated as valid weaknesses.*
+
+- **"The path to home-based screening is unsupported"** — The paper frames home-based screening as a long-term vision in the introduction, not as an experimental claim. Criticizing a methods paper for not demonstrating deployment readiness is scope creep.
+- **"Learned bandpass filters may not correspond to canonical EEG ranges"** — The paper explicitly states (line 250) that the initial decomposition uses bandpass filters, not learned convolutions. The depthwise conv layers operate after this decomposition. The concern is based on a misreading.
+- **"The abstract should include confidence intervals"** — Not standard practice at ICLR for an empirical methods paper.
+- **"Missing variance in Table 1"** is kept in minor weaknesses — this is a substantive concern, so it stays.
+- **"Table duplication weakens the narrative"** — This is a stylistic nitpick, not a substantive weakness.
+- **General reproducibility concerns about undisclosed hyperparameters** — Hyperparameters are provided in Tables 5–6 (Appendix B).
+
+## Novel Insights  
+None beyond the paper's own contributions. The adaptive multi-head contrastive learning strategy is adapted from Wang et al. (2024, ECCV), and the key design insight — that per-band self-supervised learning with adaptive temperature outperforms monolithic SSL on EEG — is sensible but not deeply analyzed in terms of *why* different bands benefit from different temperatures or what representations each band learns. The most novel aspect (frequency-band specific encoding via parallel depthwise convs) is described but not extensively ablated against simpler alternatives.
+
+## Suggestions  
+1. **Re-run all baselines under identical conditions** with proper hyperparameter tuning and report means and standard deviations. If the baselines truly perform below chance, that itself requires explanation; otherwise, the current Table 1 is not interpretable.
+2. **Correct the arithmetic error in the abstract** and verify all reported relative improvements.
+3. **Rename the "w/o augmentation" row** to something like "reconstruction pretraining (w/o contrastive)" to accurately reflect what was changed.
+4. **Add a simple spectral-feature baseline** (e.g., band-power features + linear classifier) to provide an interpretable floor for comparison.
+
+## Score and Decision
+
+### Calibration Anchors
+Anchors retrieved from human-review corpus on EEG representation learning / AD classification topics:
+
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| LEAD (KuhCUX2oIt) — Large Foundation Model for EEG AD Detection | 4.0 | Larger scale (2255 subjects), stronger evaluation, but similar issues with incremental contribution and modest gains over baselines. The current paper has weaker experimental evidence. |
+| SPR (gpf2dYfVwg) — Self-Supervised Spatiality Preserving Repr. for EEG | 4.5 | More technically polished, but had its own implausible-results concerns. Current paper is less polished and has arithmetic errors. |
+| MTSSRL-MD (qD4N15aL2W) — Multi-Task SSL for EEG | 2.0 | Much weaker paper with outdated baselines and missing ablations. Current paper is stronger. |
+| HEEGNet (CNDNRjpVIL) — Hyperbolic Embeddings for EEG | 5.5 (Accept) | Stronger experimental scope (multiple datasets/tasks), no arithmetic errors, no implausible baselines. Current paper falls well below this quality bar. |
+| EEG Foundation Models Benchmark (5Xwm8e6vbh) | 5.5 (Accept) | Comprehensive benchmarking paper with strong experimental rigor. Not directly comparable in contribution type, but the current paper is far less rigorous. |
+| Randomized trials in EEG (81YN7QFPi4) — confound/drift paper | 2.0 | Very different type of paper. Not a direct comparison. |
+
+Relative to these anchors, the current paper sits below the SPR/LEAD tier (~4.0–4.5) due to the combination of implausible baselines and an arithmetic error in the abstract. It is above the weakest anchors (~2.0). The baseline implausibility is a fatal flaw that prevents acceptance.
+
+**Score**: 3.0  
+**Decision**: Reject
+
+MY FINAL SCORE: <pineapple>3.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

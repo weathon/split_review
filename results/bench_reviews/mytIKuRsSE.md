@@ -1,103 +1,86 @@
-Now I have thoroughly read the paper and all relevant sections. Let me compile the final review.
-
----
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper identifies and formalizes the Dual-level Noisy Correspondence (DNC) problem in multi-modal entity alignment (MMEA), where both intra-entity (entity-attribute) and inter-graph (entity-entity, attribute-attribute) correspondences can be erroneous. The authors propose RULE, which estimates correspondence reliability via a combination of evidential uncertainty and a consensus measure, partitions pairs into clean/uncertain/low-consensus subsets, applies tailored robust losses, and adds a test-time MLLM-based correspondence reasoning (TTR) module. Experiments across five benchmarks and multiple noise levels show consistent improvements over seven baselines.
-
----
+This paper identifies and formalizes a new problem in multi-modal entity alignment (MMEA) called Dual-level Noisy Correspondence (DNC), where both intra-entity (entity-attribute) and inter-graph (entity-entity and attribute-attribute) correspondences are noisy. To address DNC, the authors propose RULE, which estimates correspondence reliability via uncertainty (evidential learning) and consensus principles, then uses these estimates to guide robust attribute fusion (DRF) and robust inter-graph discrepancy elimination (DRL) during training. At test time, RULE further employs an MLLM-based correspondence reasoning module (TTR) to uncover latent attribute connections. Extensive experiments on five benchmarks under three noise levels show strong improvements over seven baselines.
 
 ## Strengths
 
-- **Well-motivated problem with real-world grounding.** The paper argues convincingly that real MMEA benchmarks contain substantial DNC. Appendix B reports a manual inspection of 1,000 entity pairs from ICEWS benchmarks finding over 50% suffer from some form of DNC, and the paper provides a plausible account of how both crowdsourcing errors and semi-automated cross-graph annotation introduce these errors (Section B).
+1. **Well-motivated problem with real-world grounding.** The paper provides empirical evidence (Appendix B.1) that over 50% of entity pairs in widely-used ICEWS benchmarks suffer from DNC, with concrete examples (Fig. 1a) showing how annotation errors propagate across entity-attribute and entity-entity levels. This convincingly establishes that existing methods' assumption of clean correspondences is unrealistic.
 
-- **Principled reliability estimation combining uncertainty and consensus.** The two-fold principle (Eq. 1) is grounded in Dempster-Shafer theory and Subjective Logic. Theorem 1 provides formal justification that uncertainty alone is insufficient — a low-uncertainty prediction may still place belief on the wrong correspondence. Fig. 3(b) and Fig. 4 empirically confirm that the joint reliability cleanly separates clean and noisy pairs.
+2. **Strong empirical results with clean ablation decomposition.** RULE achieves substantial gains across all five datasets and noise levels. Critically, even without the TTR module, RULE (w/o TTR) achieves 56.5% H@1 on ICEWS-WIKI (Non-name, 50% DNC) versus the best baseline HHEA at 43.9% — a 12.6-point gap that comes entirely from the training-time components (DRL + DRF). The ablation in Table 3 cleanly isolates each component's contribution, showing that DRL (removing it drops to 31.6%) and DRF are both essential.
 
-- **Effective robust training design with clear ablation support.** The pair division into \(S_U\), \(S_I\), \(S_C\) and the dually robust loss (Eq. 11) are well-motivated. Table 3 shows removing DRL causes H@1 to drop from 58.2 to 31.6 on ICEWS-WIKI under 50% DNC. Both uncertainty-only and consensus-only variants outperform the standard MSE baseline, confirming each principle contributes.
+3. **Principled two-fold reliability estimation.** The combination of evidential uncertainty (Dempster-Shafer theory) and consensus modeling addresses a genuine limitation of using uncertainty alone — Theorem 1 correctly notes that low uncertainty does not guarantee correct annotation. Fig. 3(b) and 4 visually confirm that the combined reliability metric separates clean, low-consensus, and high-uncertainty pairs, supporting the tailored training strategy for each subset.
 
-- **Comprehensive empirical validation.** Five benchmarks, seven baselines, three noise regimes (inherent, 20%, 50%), and two evaluation protocols (Non-name, All-attributes). RULE achieves SOTA in every configuration, often by wide margins (e.g., ICEWS-WIKI Non-name 50% DNC: H@1 58.2 vs. best baseline 43.9). The noise-ratio sweep (Fig. 3a) shows RULE degrades significantly more slowly than baselines as noise increases.
+4. **Model-agnostic design confirmed across backbones.** Appendix G.11 shows consistent improvements over baselines with SigLIP and BLIP backbones (e.g., 45.4% vs. 32.2% H@1 on SigLIP Non-name, 50% DNC), confirming that RULE's robustness is not tied to a specific feature extractor.
 
-- **Multi-MLLM validation for TTR.** Table 12 (Appendix G.7) shows TTR gains generalize across Qwen2.5-VL at 3B, 7B, 72B scales and LLaVA-1.6 34B, reducing concerns that gains are tied to one specific large model.
-
----
+5. **Exhaustive evaluation scope.** The paper evaluates under three noise levels (inherent, 20%, 50% DNC), individual noise types (E-E, E-A, A-A NC in Appendix G.1), varying noise ratios (0–70%), and multiple MLLM backbones (Qwen2.5-VL 3B/7B/72B, LLaVA-1.6 34B), providing strong evidence of robustness.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Mismatch between A-A NC definition and injection.** The paper defines attribute-attribute NC as a misaligned correspondence (\(y_{ij}^{[m]}\) being incorrect due to upstream E-E or E-A errors). However, the synthetic A-A NC injection (Section 3.1) adds Gaussian noise to visual attributes and random character replacements to textual attributes — this is *content corruption*, not correspondence mismatch. The paper does discuss that real-world attributes can suffer from "textual typos or visual ambiguity" (Appendix B, lines 991–993), which partially motivates the injection, but the primary definition of A-A NC is about *pairing errors*, not content degradation. This weakens the evidence that RULE specifically handles A-A *correspondence* noise as formally defined. The E-E and E-A injection methods are correctly aligned with their definitions, so this affects only one of the three NC types.
+1. **The DNC novelty claim is partially overclaimed without a critical control experiment.** The paper frames DNC as a "new problem" distinct from studying entity-entity noise (REA) and entity-attribute noise (KG refinement) separately. However, no experiment tests whether joint dual-level handling outperforms a pipeline that applies existing entity-entity denoising + existing entity-attribute denoising sequentially. While the ablation in Table 3 shows that both DRL and DRF contribute, this does not demonstrate that the "dual-level" framing is necessary beyond combining known techniques. The paper would be stronger if it directly compared against pipeline baselines or framed the contribution more modestly.
+
+2. **The TTR module creates a comparison asymmetry that the paper does not adequately acknowledge in the main text.** While Tables 1–2 present RULE's full results (with TTR) as the primary comparison, the paper correctly provides ablation showing w/o TTR still beats baselines significantly (56.5 vs. 43.9). However, the presentation in the main paper does not clearly flag to the reader that roughly 1.7 of the ~14-point gain on the Non-name 50% DNC setting comes from MLLM re-ranking that baselines cannot match. This is not a fatal flaw — the ablation exists — but the paper should explicitly decompose the "headline gap" into training-time and test-time contributions in the main text rather than deferring it to Appendix G.8.
 
 ### Minor
 
-- **Inference-time greedy correspondence estimation is indirectly validated.** Assumption 1 (that correctly associated attributes yield non-negative marginal contribution) is stated without formal proof. The paper provides an empirical analysis in Appendix G.5 (Table 10), but this evaluates downstream H@1 rather than directly measuring how often \(\hat{\mathbf{y}}_i\) matches the ground-truth alignment. The practical effectiveness is demonstrated, but a more direct validation would strengthen the claim.
+1. **No confidence intervals or significance tests.** Results are reported as point estimates with three significant digits (e.g., 58.2, 69.7, 63.6) without variance measures across runs. Given the modest size of some test sets (e.g., ~5,000 pairs for ICEWS-WIKI), it is unclear whether small differences between ablations (e.g., 56.5 vs. 56.6 in Table 3) are meaningful.
 
-- **Attribute-level reliability computation is described only by symmetry.** Section 2.2 states it takes entity-entity correspondence "as a showcase" and Appendix F.2 (line 1315) notes that attribute uncertainty and consensus "rely on correct cross-graph entity-entity correspondence," with DRF applied only when the entity-level reliability condition \((1-u_i)+c_i \geq 1\) holds. The mechanism is inferable but not explicitly step-by-step for attributes. This is a presentation gap rather than a methodological flaw.
+2. **The evidence formulation choice (tanh) is not justified.** The evidence in Eq. 2 uses exp(tanh(s_ij/τ)), which bounds evidence in [e⁻¹, e¹] ≈ [0.37, 2.72]. This is an unconventional choice compared to the softplus or exponential commonly used in evidential deep learning. The paper provides no ablation or justification for this design decision and no comparison against alternative formulations.
 
-- **Real-world DNC statistics rely on a single-inspector manual study.** Appendix B reports a manual inspection of 1,000 pairs but does not report inter-annotator agreement or detailed annotation protocol, making the "over 50%" claim harder to assess. The qualitative account of how DNC arises in practice is persuasive on its own, but the quantitative claim would benefit from stronger methodological reporting.
+3. **No convergence or stability analysis for the bootstrapped reliability estimation.** The greedy marginal contribution strategy (Eq. 6–7) depends on representations trained with previous epoch's reliability estimates, creating an iterative dependency. The paper provides no analysis (empirical or theoretical) of whether this bootstrap converges to stable subsets across training runs or different initializations.
 
-- **Significant TTR computational cost for the largest MLLM.** The 72B Qwen2.5-VL configuration requires ~10,000 seconds on ICEWS-WIKI Non-name (Appendix G.8, Table 13). The paper does show that smaller MLLMs (3B: 2,122s; 7B: 2,690s) preserve most gains, and even without TTR, RULE outperforms all baselines (56.5 vs. 43.9 H@1). This cost concern is real but mitigated by the paper's transparency and the availability of lighter alternatives.
+4. **The "over 50% DNC" statistic relies on a single-sample annotation without inter-annotator agreement.** The statistic in Appendix B.1 is based on manual annotation of 1,000 random pairs by an unspecified number of annotators, and no inter-annotator agreement score is reported. This weakens the claim about DNC prevalence.
 
 ### Trivial
-
-- The paper could more clearly state in the main text that the TTR module is optional and that RULE without TTR already surpasses all baselines — this fact is relegated to Appendix G.8.
-
----
+- The parameter analysis in Appendix G.2 varies one hyperparameter at a time, ignoring potential interactions between λ, τ, and β. A small grid or sensitivity surface would be more informative.
 
 ## Nice-to-Haves
-
-- **Comparison with generic noise-robust learning methods.** Adapting one off-the-shelf noisy-correspondence method (e.g., NCR, co-teaching) to the MMEA setting would further contextualize RULE's gains, though the seven MMEA-specific baselines already provide a thorough comparison.
-
-- **A-A NC injection redesign.** Simulating A-A NC by actually mismatching cross-graph attribute pairs (e.g., shuffling attribute assignments across aligned entities) would directly test the correspondence-noise robustness the paper defines, rather than content-noise robustness.
-
----
+- Comparing RULE (w/o TTR) against baselines augmented with the same MLLM re-ranking would cleanly address the asymmetry concern.
+- A pipeline baseline (first denoise E-E pairs with REA's method, then denoise E-A pairs separately, then run standard MMEA) would substantiate the "dual-level" framing.
+- Reporting variance across 3–5 random seeds would improve interpretability of the numerical results.
 
 ## Removed Points
-
-These points are flagged to be removed — treat them with caution.
-
-1. **Data contamination from MLLM (Harsh Critic #1).** The critic speculates that Qwen2.5-VL-72B may have been trained on ICEWS/DBP15K entities and images, creating unfair comparison. This is inherently speculative — contamination is nearly impossible to prove or disprove definitively for any large pre-trained model. Moreover, the paper validates TTR across four different MLLMs from two families (Qwen2.5-VL 3B/7B/72B, LLaVA-1.6 34B) with consistent gains (Table 12), and the training-time components (DRL, DRF) alone outperform all baselines. The concern does not rise to the level of a valid weakness.
-
-2. **Missing noise-robust baselines (Harsh Critic #6).** The paper already compares against seven MMEA-specific baselines. Requiring adaptation of methods from adjacent fields (noisy label learning) goes beyond reasonable scope for an MMEA paper.
-
-3. **"Missing appendix" or "proofs in appendix."** The parser strips appendices; the original submission includes them. All appendix-referenced content (Appendix B, E, F, G) is described and referenced in the main text.
-
----
+- **"The TTR module re-uses the test set labels during inference."** This is factually incorrect. The TTR module selects top-10 candidates using the model's own prior similarity scores **s**_i_^m (model predictions), not ground-truth labels. The paper is clear that `T_i^m` denotes "the set of correspondences with the highest similarity in prior results **s**_i_^m" (Eq. 16, line 421). This is standard re-ranking practice and does not leak test labels.
+- **"The comparison is fundamentally unfair because baselines don't have MLLM."** Overstated. The paper provides ablation (Table 3) showing w/o TTR achieves 56.5 vs. best baseline 43.9 on the hardest setting. The training-time components alone produce the majority of the gains. This is acknowledged in Appendix G.8. The criticism is partially valid as a presentation concern (see Major #2 above) but not as a fatal flaw invalidating all results.
+- **"The DRL loss is identical to Sensoy et al. (2018)."** The paper clearly states the closed-form MSE loss follows Sensoy et al. (2018). The novelty is in the pair division and refined correspondence **ŷ**_i_ (Eq. 12), which differs from standard evidential learning. The paper does not claim the MSE formulation itself is novel.
+- **"The problem framing overclaims novelty."** Weakened to a Major weakness (see above) rather than treated as fatal, since the paper does provide ablation evidence that both levels matter but lacks the pipeline control experiment.
+- **Missing related works.** Removed per instructions as I cannot independently verify existence of uncited works.
+- **Formatting and presentation nitpicks.** Removed per instructions (parser artifacts).
+- Various minor points about missing appendix content — removed per instructions (parser strips appendix content from all papers).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that combining evidential uncertainty with a consensus measure provides a more reliable indicator of correspondence quality than either alone (Theorem 1) — is genuinely novel within the MMEA context and represents the paper's core intellectual contribution.
-
----
+None beyond the paper's own contributions. The reviews surface a genuine tension: the paper makes a strong empirical case for the RULE method through careful ablation, but the "new problem" framing of DNC and the asymmetric TTR evaluation each introduce ambiguities that the paper could resolve with one additional control experiment each. The most interesting observation from the review process is that the core training-time contribution (DRL + DRF) is quite clearly responsible for the bulk of the performance gains (56.5 vs. 43.9), making the TTR asymmetry a secondary concern — a fact the paper could signal more prominently in the main text.
 
 ## Suggestions
 
-- Redesign the A-A NC synthetic experiment to inject correspondence noise (e.g., shuffling attribute assignments across aligned entity pairs) rather than content noise, to properly test robustness against the defined A-A NC.
-- Report a direct accuracy metric for the greedy correspondence estimator (Assumption 1) against ground-truth alignment, not only downstream H@1.
-- Include inter-annotator agreement statistics for the manual DNC inspection in Appendix B, or soften the quantitative "over 50%" claim to a qualitative observation.
-- Move the key finding that "RULE without TTR already outperforms all baselines" from Appendix G.8 into the main text to contextualize the TTR module's role.
+1. **Add a training-time-only leaderboard to the main paper.** Present a version of Tables 1–2 where the RULE column reports w/o TTR results, with the full RULE results in parentheses or a separate column. This would immediately clarify that the large gains are not driven by the MLLM.
 
----
+2. **Add a "separate vs. joint" experiment.** Compare RULE against a pipeline that applies existing EE denoising (e.g., REA) followed by EA denoising independently, to substantiate the claim that joint dual-level handling is necessary.
+
+3. **Report standard deviations** across multiple runs for at least the key settings (ICEWS-WIKI 50% DNC, DBP15K ZH-EN inherent DNC).
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors (retrieved from human review corpus):**
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| CorreGen (noisy MVC) | a4S1nQay3b | 7.0 (Oral) | Cleaner theoretical framework; RULE's A-A NC mismatch and MLLM dependence keep it below this tier. |
-| DiffNCL (noisy correspondence) | 6xQfjJxija | 5.0 (Reject) | Similar domain but messier experiments; RULE's validation is substantially more thorough and its methodology more principled. |
-| ALMEA (MMEA) | iitxXWqODX | 5.0 (Reject) | Directly comparable MMEA paper; RULE has better motivation, more principled method, more datasets, stronger results. |
-| ContrastEA (KG entity alignment) | eJ8p42r755 | 3.5 (Reject) | Limited technical novelty; RULE is substantially stronger. |
-| NA-MVP (noisy few-shot) | wIHaIruGMN | 3.0 (Reject) | Poor clarity and incremental contribution; RULE is far stronger. |
-| Slot-Guided Alignment | vmqHfIKbxM | 2.5 (Reject) | Unrelated domain; RULE is far stronger. |
-| M3E (multimodal embedding) | YLtowTDHAi | 3.33 (Reject) | Different problem; RULE's contribution is more focused and better validated. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| ALMEA (MMEA + active learning) | 5.0 | Similar domain, less thorough experiments (2 datasets vs. 5), less novel problem. RULE is stronger. |
+| DiffNCL (noisy correspondence learning) | 5.0 | Similar noise-robustness theme but weaker empirical support and missing implementation details. RULE is more complete. |
+| CorreGen (noisy correspondence for MVC) | 7.0 | Accepted Oral. Cleaner theoretical framing (EM + OT), comparable experimental rigor. RULE has broader benchmarks but a less clean theoretical contribution. |
+| ContrastEA (entity alignment) | 3.5 | Limited technical novelty, narrow evaluation. RULE is substantially stronger. |
+| Noise-Aware Few-Shot Learning | 3.0 | Weak motivation and execution. Not comparable. |
+| RAM-TTT (test-time reasoning) | 4.67 | Different domain, less convincing results. |
+| Graph Alignment for GNN | 4.0 | Different problem, weaker empirical support. |
 
-RULE sits clearly above the 5.0-level anchors (ALMEA, DiffNCL) — its problem formulation is more original, its methodology more principled, and its experiments more comprehensive. It does not reach the 7.0 level of CorreGen, which has a cleaner theoretical framing and no experimental-design mismatch. The A-A NC injection mismatch is a genuine weakness that holds it back, but it affects only one synthetic experiment and does not undermine the core contribution validated under inherent DNC and correctly-injected E-E/E-A noise.
+Positioning relative to anchors: RULE is clearly stronger than the rejected MMEA/noisy-correspondence papers (ALMEA 5.0, DiffNCL 5.0) and substantially stronger than low-scoring entity alignment papers (ContrastEA 3.5). It is comparable to but slightly below the accepted CorreGen (7.0) due to the cleaner theoretical framing of that paper and the evaluation asymmetry concern in RULE. The paper has genuine contributions (problem identification, two-fold reliability, strong empirical results) but is held back by the overstated novelty claim and the insufficiently decomposed evaluation.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>6.0</pineapple>**
+**MY FINAL DECISION: <orange>Accept</orange>**

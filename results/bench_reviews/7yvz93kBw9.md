@@ -1,20 +1,20 @@
-Now I have a comprehensive view of the paper and calibration anchors. Let me write the final review.
+## Summary
+
+This paper addresses spatial imbalance in sparse-view 3D Gaussian Splatting, where near-field regions overfit with excessive Gaussians while far-field regions underfit. The authors propose D²GS, consisting of: (1) DD-Drop, a depth-and-density guided probabilistic dropout that selectively regularizes near-field over-reconstruction while protecting underfitted far-field regions; and (2) DAFE, a distance-aware fidelity enhancement module that boosts supervision in distant regions using monocular depth priors. The paper also introduces IMR, an inter-model robustness metric measuring consistency across independently trained runs. Experiments on LLFF, MipNeRF360, and DTU show consistent improvements over optimization-based sparse-view baselines.
 
 ---
 
-## Summary
-D²GS addresses two failure modes of sparse-view 3DGS — near-field overfitting and far-field underfitting — through complementary modules: (1) Depth-and-Density Guided Dropout (DD-Drop), which adaptively suppresses redundant near-field Gaussians via a probabilistic, depth-and-density-informed dropout score, and (2) Distance-Aware Fidelity Enhancement (DAFE), which boosts far-field supervision using monocular depth masks. The paper also introduces Inter-Model Robustness (IMR), a Wasserstein-distance-based metric for quantifying the stability of learned Gaussian distributions across training runs. Experiments on LLFF, MipNeRF360, and DTU show consistent PSNR/SSIM/LPIPS improvements over strong baselines including DropGaussian, CoR-GS, and FSGS.
-
 ## Strengths
-- **Concrete, evidence-backed problem diagnosis**: Figure 1 quantifies the near/far imbalance with explicit Gaussian counts (11,450 vs 6,112 near-field; 3,082 vs 5,224 far-field), directly motivating both DD-Drop and DAFE. This is a clear, falsifiable observation rather than a vague claim.
 
-- **Well-designed complementary modules**: DD-Drop uses a local continuous scoring function (Equation 1) combined with global depth-based layering and time-dependent rate scheduling (Equation 3), avoiding the rigid "top-k" removal that prior selective dropout methods suffered from. DAFE provides targeted supervision where it is most needed. Ablation (Table 4) shows each component — density score, depth score, depth layering, DAFE — contributes incremental PSNR/SSIM/LPIPS/IMR gains.
+1. **Clear problem diagnosis with quantitative evidence**: Figure 1 concretely demonstrates the spatial imbalance — sparse-view training produces 11,450 Gaussians in near-field (vs. 6,112 for dense views) and only 3,082 in far-field (vs. 5,224 for dense views). This goes beyond anecdotal observation and grounds the method in a measurable failure mode.
 
-- **Thorough and honest ablation studies**: Table 5 examines weight balance (ω_depth/ω_density), dropout rate range (r_min/r_max), depth threshold τ, and DAFE loss weight λ_DAFE. Table 6 tests three different monocular depth estimators (MiDaS, DPT, DepthAnything V2) showing consistent gains regardless of backbone. The paper reports ablations on the same baseline, making relative improvements interpretable.
+2. **Consistent quantitative gains across multiple datasets and settings**: On LLFF 1/8 resolution, D²GS outperforms DropGaussian by 0.59 dB PSNR and CoR-GS by 0.9 dB. On DTU (Table 9), the gains are even larger (21.25 vs. 20.29 PSNR for 3-view). The improvements hold across 3-view and 6-view settings, and on all three standard benchmarks. The ablation (Table 4) shows each component contributes cumulatively, with the full model gaining +2.13 dB over the baseline.
 
-- **Consistent quantitative improvements across diverse settings**: On LLFF 3-view 1/8 resolution, D²GS achieves 21.35 PSNR, exceeding DropGaussian (20.76), LoopSparseGS (20.85), and CoR-GS (20.45). Gains persist at 1/4 resolution, on MipNeRF360 (24.13 vs 23.75 for DropGaussian), and on DTU (21.25 3-view, 25.25 6-view). The method also shows better IMR scores in Table 3 (3.039 vs 3.162 baseline), indicating more stable Gaussian distributions.
+3. **DAFE module is well-designed and robust to depth estimator choice**: Table 6 shows DAFE improves performance with MiDaS, DPT, and DepthAnything V2, with consistent gains across all three. This demonstrates the module's practical utility beyond dependence on a single depth estimator.
 
-- **Practical training efficiency**: Table 7 shows D²GS trains in 82 seconds on LLFF, which is only ~46% slower than DropGaussian (56s) and dramatically faster than FSGS (425s) and CoR-GS (223s).
+4. **Reasonable training overhead**: Table 7 reports D²GS training takes 82s vs. DropGaussian's 56s on LLFF — a modest increase considering the consistent improvement, and far faster than FSGS (425s) or CoR-GS (223s).
+
+---
 
 ## Weaknesses
 
@@ -22,64 +22,75 @@ D²GS addresses two failure modes of sparse-view 3DGS — near-field overfitting
 None.
 
 ### Major
-- **Uncertainty around DropGaussian comparison**: The paper (Appendix E) states: "Due to the unconditional dropout strategy used in DropGaussian, its training exhibits significant instability... we found it difficult to reproduce the results reported in their paper, and thus, we report the results obtained from our training." This is transparent, but it means the 0.59 dB PSNR gain over DropGaussian on LLFF 1/8 — the most direct baseline since D²GS is built on DropGaussian's codebase — may be partially attributable to suboptimal baseline tuning rather than methodological superiority. The paper does not describe a hyperparameter search for DropGaussian or compare against the original paper's reported numbers. While the gains over other methods (CoR-GS, LoopSparseGS, FSGS) independently support the method's effectiveness, the claim of outperforming DropGaussian specifically requires this caveat. A controlled comparison with matched tuning budget would substantially strengthen the paper.
+1. **No error bars or variance reported on quantitative results**: All main tables (Tables 1, 2, 8, 9) report single point estimates with no standard deviations or confidence intervals. Given that the paper's own motivation (Section 3.4, Figure 3) highlights the significant variance across training runs in sparse-view 3DGS, the absence of any variance reporting is a significant omission. The claimed margins of 0.59 dB or 0.35 dB PSNR could easily fall within run-to-run noise. This must be addressed to establish statistical significance.
+
+2. **DropGaussian baseline reproducibility issue is insufficiently surfaced**: The paper discloses in Appendix E that "we found it difficult to reproduce the results reported in their paper, and thus, we report the results obtained from our training." This is a critical detail — the primary baseline numbers in the main text may not correspond to the officially reported DropGaussian performance. This disclosure belongs in the main paper alongside the quantitative tables, not buried in an appendix. While the authors are transparent about this, burying it undermines reader trust in the comparisons.
 
 ### Minor
-- **IMR metric lacks validation against practical robustness measures**: IMR is presented as measuring "stability of learned Gaussian distributions," but the paper never demonstrates that lower IMR correlates with reduced variance in rendered quality (e.g., variance of PSNR/SSIM across the same 10 independent training runs used for IMR). Figure 3 (left) shows PSNR fluctuation but does not analyze its relationship with IMR. The IMR formula (Equation 14) uses a log-ratio of squared distances to linear distances, whose behavior is not motivated or analyzed. Additionally, the Bures metric uses a first-order Taylor approximation (Equation 11) whose error is neither bounded nor empirically validated. The depth-stratified importance sampling deliberately oversamples far-field Gaussians ("given that far-field Gaussians are more prone to noise"), introducing a bias that may conflate coverage with consistency. These issues make IMR an interesting but insufficiently validated contribution. However, since IMR is a supplementary evaluation tool rather than the paper's core contribution, this does not threaten the main claims.
+1. **DD-Drop design rationale could be clearer, not fundamentally contradictory**: The local dropout score (Eq. 1) increases with depth (penalizing far-field Gaussians), while the global layering (Eq. 2) then protects far-field Gaussians via λ_far=0.3. The critic calls this a "contradiction," but it is better described as a two-stage design where the local score identifies all potentially problematic Gaussians (based on density and depth) and the global modulation then selectively attenuates regularization in regions known to be underfitted. This is functionally coherent — near-field dense Gaussians get high local scores and no attenuation, while far-field dense Gaussians get high local scores but are attenuated — but the exposition in Section 3.2 could explain this logic more directly rather than relying on the reader to piece it together.
 
-- **Hand-crafted depth thresholds and attenuation factors**: DD-Drop uses fixed tertiles for layer division and hard-coded attenuation factors (λ_far = 0.3, λ_middle = 0.7). The paper acknowledges this in Appendix D: "it relies on hand-crafted depth thresholds and fixed weight coefficients, which may not fully capture complex scene-specific priors." While the ablation in Table 4 demonstrates that depth-based layering helps, the specific choice of three layers and these λ values may not generalize optimally. This is an acknowledged limitation, not a hidden flaw.
+2. **IMR metric lacks explicit validation**: While IMR is a reasonable measure (lower variance across runs = more robust), and Table 4 shows it correlates with PSNR improvements in the ablation study, the paper does not explicitly validate IMR against human judgments, downstream tasks, or demonstrate that it captures information beyond what PSNR/SSIM already tell us. The metric adds value as a secondary diagnostic but is presented as a standalone contribution without the supporting evidence one would expect for a new evaluation metric.
+
+3. **Missing comparison against feed-forward methods**: PixelSplat, MVSplat, and HiSplat are discussed in Related Work but not compared in experiments. While these operate under a different paradigm (generalizable feed-forward vs. per-scene optimization) and have different data requirements, a discussion of how D²GS relates to or complements these approaches would strengthen the positioning. This is scope-appropriate — the paper's baselines (DropGaussian, CoR-GS, FSGS, etc.) are the correct optimization-based comparisons — but acknowledging the gap is warranted.
+
+4. **No explicit failure case analysis or visualization**: The paper shows only successful results. Discussing or visualizing cases where D²GS still struggles (e.g., thin structures, large depth discontinuities, scenes where the depth estimator fails) would provide a more balanced assessment.
 
 ### Trivial
-- The motivation figure (Figure 1) shows Gaussian counts from a single scene. A distributional analysis across the full dataset would strengthen the motivation, though the qualitative pattern is clear and convincing.
-
-## Nice-to-Haves
-- A controlled experiment comparing DD-Drop against a random-dropout baseline with matched overall dropout ratio and schedule would isolate the benefit of depth/density guidance from the effect of the dropout schedule alone. This would directly address whether guided dropout outperforms uniform dropout when both use the same aggregate dropout rate.
-
-- Validating IMR by correlating it with per-run PSNR/SSIM variance across the 10 independent training runs used for Table 3 would make the metric contribution substantially stronger.
-
-- Exploring learned or data-driven partitioning for depth layers instead of fixed tertiles, as the authors themselves suggest as future work.
-
-## Removed Points
-These points are flagged to be removed, treat them with caution.
-
-- **"Table 2 is incomplete; claims about MipNeRF360 gains are only in Appendix E"**: This is a parser artifact. The paper explicitly states "More results are presented in the Appendix E" and the full Table 8 in Appendix E contains all methods including CoR-GS and DropGaussian on MipNeRF360. The main text (lines 523-525) clearly summarizes these results.
-
-- **"The evaluation uses a fixed number of training iterations (10k) across methods; if some baselines were originally trained for different steps, the comparison may not reflect optimal performance"**: The paper states its implementation follows the DropGaussian setup (line 503-504: "Our implementation is built on DropGaussian, with 10k training iterations per dataset"). This follows standard practice in the sparse-view 3DGS literature. Uniform iteration budget is the conventional way to ensure fair comparison, and the paper's own method is evaluated under the same constraint.
-
-- **Generic strength "the paper addressed an important problem"**: Dropped — this is too generic and doesn't cite specific evidence from the paper.
-
-- **"The IMR comparison (Table 3) is reported only for LLFF and only for D²GS"**: The table header shows it compares methods (with baseline 3DGS at IMR=3.162 visible in Table 4 ablation). The extracted text is garbled but the paper clearly compares IMR across methods.
-
-- **Criticism about dependence on depth estimator quality and requesting test with poor depth estimates**: The paper already tests three different depth estimators in Table 6 (MiDaS, DPT, DepthAnything V2) and shows consistent gains. Testing with deliberately degraded depth would be scope creep — the point is that even with standard off-the-shelf depth estimators, DAFE provides consistent improvements.
-
-- **Request for exhaustive hyperparameter sweeps for DropGaussian to prove the baseline is properly tuned**: While the DropGaussian comparison concern is valid (kept as a Major weakness), demanding exhaustive sweeps goes beyond standard practice. The paper is transparent about the reproduction difficulty and reports its own training. The concern is noted but the specific demand is excessive.
-
-- **"The motivation is only anecdotal (a single scene)"**: Moved to Trivial — it's a minor presentation issue, not a methodological flaw. The quantitative results across full datasets validate the approach regardless.
-
-## Novel Insights
-The paper's decomposition of sparse-view 3DGS failure into two separable, spatially asymmetric problems (near-field overfitting due to excessive Gaussian density; far-field underfitting due to sparse coverage and occlusion by near-field Gaussians) is genuinely insightful and well-supported by the Gaussian-count analysis in Figure 1. The recognition that uniform dropout can harm under-fitted regions while suppressing over-fitted ones (unlike the proposed spatially adaptive approach) is a clean insight that motivates DD-Drop's design and distinguishes it from prior work like DropGaussian. The observation that prior selective dropout failed not because of the signal used (depth, gradient) but because of the *hard* removal strategy (Appendix C) is a useful nuance that could inform future work.
-
-## Suggestions
-- Report the original DropGaussian paper's numbers alongside your reproduced numbers in a clear side-by-side, and discuss the discrepancy transparently in the main text rather than only in Appendix E. This would preempt concerns about baseline tuning.
-- Correlate IMR with per-run PSNR/SSIM variance using the 10 independent training runs from Table 3. A simple scatter plot would either validate the metric or reveal limitations.
-- Consider a random-dropout-with-matched-schedule baseline in the ablation to cleanly isolate the benefit of depth/density guidance.
+- The MipNeRF360 main table (Table 2) only lists 3DGS and FSGS, while CoR-GS and DropGaussian results are relegated to Appendix Table 8. The full set of baselines should appear in the main table for completeness.
 
 ---
 
-**Calibration anchors:**
+## Nice-to-Haves
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `o1sF4XaFdY` (SurfSplat) | 6.50 | Stronger novelty (feed-forward 2DGS + surface continuity prior) and a new evaluation metric (HRRC) that is better justified. D²GS has more modest architectural novelty. |
-| `51JEkjP0gF` (Universal Beta Splatting) | 6.00 | More theoretically ambitious (generalizing 3DGS to Beta kernels). D²GS is more empirically focused with less theoretical depth. |
-| `egE7czf8qg` (Path Matters) | 5.20 | Similar tier — identifies implicit 3DGS biases and addresses them. Path Matters has a more novel framing (camera trajectory optimization) but reviewers noted marginal quantitative gains. D²GS has more consistent and larger quantitative improvements across datasets. |
-| `kdPmsMVhZf` (G4Splat) | 5.00 | Accept Poster. Similar approach of using geometric priors to improve sparse-view GS. D²GS has more thorough ablations and more datasets. Comparable overall quality. |
-| `BpwRgbmTW9` (DRGSplat) | 4.67 | Reject. DRGSplat had good results but limited novelty (depth regularization is well-trodden). D²GS has clearer problem identification and more targeted solutions, plus an additional metric contribution. |
-| `eH9Wlahibz` (Flat Minima) | 4.00 | Reject. Interesting framing but marginal gains over DropGaussian. D²GS has substantially larger and more consistent quantitative improvements, plus better ablations. |
-| `i3edCAhdEy` (Geometric Enhancement) | 3.50 | Reject. Limited novelty and narrow evaluation. D²GS has wider evaluation scope and more clearly differentiated components. |
-| `3dNKozB8U7` (F4DGS) | 3.00 | Reject. Poor presentation and questionable methodology. D²GS is clearly superior in both rigor and clarity. |
+- An analysis of how the depth threshold τ and DAFE weight λ_DAFE interact with scene properties (e.g., indoor vs. outdoor depth ranges).
+- A visualization of how the depth-stratified importance sampling works in practice for IMR computation — how are the 10,000 sampled Gaussians distributed across depth?
+- An adaptive or learned version of the hand-tuned hyperparameters (D_near, D_middle, λ_far, λ_middle), which the paper itself acknowledges as a limitation in Appendix D.
 
-D²GS lands between the 5.00-5.20 anchors. It has clear problem identification, well-motivated modules, thorough ablations, and consistent gains. The DropGaussian comparison caveat and under-validated IMR metric prevent it from reaching the 6.0+ tier, but it is clearly above the 4.0-4.67 reject tier. A score of 5.5 reflects a solid paper that would benefit from addressing the identified concerns.
+---
+
+## Removed Points
+
+- **"The IMR metric is not validated as a meaningful measure"** — This is weakened and moved to Minor. The paper does show IMR correlates with PSNR in Table 4 (lower IMR → higher PSNR as components are added), so the concern is better framed as "insufficiently validated" rather than "unvalidated." The critic's claim that "lower IMR could mean always converging to the same bad local minimum" is directly contradicted by Table 4.
+- **"The 1/4 resolution results are suspicious because the gap increases with resolution"** — The critic claims larger gap at higher resolution is "counterintuitive." This is incorrect: 1/4 resolution images are *larger* (more detail) than 1/8, and spatial imbalance problems scale with available detail. Larger gains at higher resolution are precisely what one would expect from a method that addresses spatial imbalance.
+- **"The analysis in Figure 1 compares 55-view vs 3-view — trivially different"** — The comparison is explicitly designed to characterize the failure mode. Dense-vs-sparse is the relevant comparison and the quantitative counts it produces are informative.
+- **Formatting/style nitpicks** (AVGE definition parsed twice, "training details mention 10k iterations but no batch size" — standard 3DGS practice is known).
+- **"Missing related works"** — Cannot verify without external sources; the paper cites relevant works including PixelSplat, MVSplat, HiSplat in its related work section.
+- **"DD-Drop has a fundamental design contradiction"** — Weakened to Minor. The design is functionally coherent; the exposition is what needs improvement.
+- **General reproducibility gripes** about undisclosed hyperparameters — the paper provides substantial implementation details in Appendix B.
+
+---
+
+## Novel Insights
+
+The most interesting observation across the reviews is the tension between the local (depth-penalizing) and global (depth-protecting) mechanisms in DD-Drop. While the reviewer interprets this as a contradiction, it actually reflects a genuine design challenge in sparse-view 3DGS: the same signal (depth) plays opposite roles depending on context — near-field depth correlates with overfitting (too many Gaussians), while far-field depth correlates with underfitting (too few Gaussians). A more carefully controlled experiment that isolates the contribution of each design choice (e.g., removing the depth term from the local score entirely) would not only clarify the paper's claims but would provide a principled understanding of how to design spatially adaptive regularization more broadly.
+
+---
+
+## Suggestions
+
+1. **Report means and standard deviations over 3–5 runs** for all quantitative results. This is essential given the acknowledged instability of sparse-view 3DGS training.
+
+2. **Move the DropGaussian reproducibility disclosure from Appendix E to the main paper**, alongside the quantitative tables where DropGaussian comparisons appear.
+
+3. **Expire the IMR validation** with at least one experiment showing that IMR tracks something not already captured by PSNR/SSIM — for instance, showing that two methods with matched PSNR but different IMR have different behavior (e.g., sensitivity to input perturbations, or quality under small camera pose jitter).
+
+4. **Clarify the DD-Drop design logic** in Section 3.2: explicitly state that the local score identifies *all* high-density Gaussians (regardless of depth), and the global modulation ensures only *near-field* high-density regions are aggressively regularized. Show an ablation removing the depth term from the local score to verify it is the interaction, not redundancy, that drives improvement.
+
+5. **Add a failure case analysis** showing scenes where D²GS does not improve (or degrades) relative to baselines.
+
+---
+
+## Score and Decision
+
+**Anchors consulted:**
+- **Path Matters** (avg 5.20, Accept Poster): Similar sparse-view 3DGS paper; our paper shows clearer and larger quantitative gains across more baselines, but lacks variance reporting which Path Matters also lacked. Comparable quality.
+- **A Step to Decouple Optimization in 3DGS** (avg 6.00, Accept Poster): Strong optimization-focused 3DGS paper. Our paper has a clearer practical contribution (addressing spatial imbalance) but less analytical depth.
+- **Layer-Based 3DGS for CT** (avg 5.50, Reject): Similar structure (problem analysis → method → evaluation). Our paper evaluates on standard NVS benchmarks and has clearer comparisons, making it stronger.
+- **Pi3DGS** (avg 5.00, Withdrawn/Reject): Our paper's contributions are more clearly delineated (specific dropout design, depth supervision) compared to Pi3DGS's more incremental combination of existing components.
+- **OGGSplat** (avg 3.00, Reject): Much weaker paper with limited evaluation. Our paper is substantially stronger.
+- **How to evaluate MDE** (avg 4.50, Reject): Different topic, but the severity of the reviewer concerns (unvalidated new metric) is comparable to concerns about IMR in our paper, though our core contributions do not depend on IMR.
+
+**Calibration**: This paper sits around the 5.0–6.0 range, comparable to "Path Matters" (5.20, accepted) and "Decouple Optimization in 3DGS" (6.00, accepted). The core methodological contributions (DD-Drop + DAFE) are sound and supported by consistent empirical results. The main weaknesses — missing error bars and the insufficiently surfaced DropGaussian reproducibility issue — are addressable but significant. The paper's contributions do not depend on the IMR metric, which is the most controversial element. Relative to the field, this is a solid incremental contribution that addresses a well-motivated problem with a reasonable solution and adequate empirical support, though the presentation and rigor need improvement.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

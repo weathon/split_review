@@ -1,92 +1,80 @@
-Now I have all the information needed. Let me write the final review.
-
----
+Now I have all the evidence needed. Let me synthesize the consolidated review.
 
 ## Summary
 
-BIRD-INTERACT reimagines text-to-SQL evaluation by introducing a dynamic, multi-turn benchmark with 900 tasks covering the full CRUD spectrum. Its core innovation is a two-stage function-driven user simulator (parser → constrained symbolic actions → response generator) that enables models to solicit clarifications, resolve ambiguities, and recover from errors without human supervision. The benchmark exposes a stark performance gap: even GPT-5 achieves only 8.67% success in the conversational setting and 17.00% in the agentic setting, demonstrating that current LLMs lack the strategic interaction skills required for realistic database querying.
+BIRD-INTERACT introduces a benchmark for evaluating LLMs on interactive text-to-SQL tasks that require multi-turn interaction, ambiguity resolution, and full CRUD operations. The key contributions are: (1) a function-driven user simulator with a two-stage parser-generator architecture that constrains the simulator's behavior to three symbolic actions (AMB/LOC/UNA), reducing ground-truth leakage compared to naive LLM-as-user baselines; (2) dual evaluation settings — c-Interact (protocol-guided conversation) and a-Interact (autonomous agentic mode) with budget-constrained awareness; and (3) a task suite of 600 tasks (300 lite) built by injecting ambiguities into LIVESQLBENCH, each with two sub-tasks and executable test cases. Empirical results show that even GPT-5 achieves only 8.67% (c-Interact) and 17.00% (a-Interact), establishing the benchmark as genuinely challenging.
 
 ## Strengths
 
-- **Compelling benchmark design addressing a real gap.** Existing multi-turn text-to-SQL benchmarks use static dialogue transcripts; BIRD-INTERACT is the first to combine dynamic user simulation, dynamic environment state, multiple ambiguity sources (user-query, knowledge-chain, environmental), and executable CRUD operations in a unified framework. The comparison in Table 4 (Appendix E) substantiates this distinctiveness.
+- **Function-driven user simulator design (§3.3, §6):** The two-stage parser-generator architecture with the AMB/LOC/UNA action space is a genuine methodological contribution. The empirical validation on USERSIM-GUARD (2,100 questions) is convincing: failure rates on unanswerable (UNA) questions drop from 67.4% (baseline LLM-as-user) to 2.7% (function-driven). The human alignment study (Table 3) reports a Pearson correlation of 0.84 (p=0.02) between simulator and human success rates across 7 models on 100 tasks, substantially higher than the baseline simulator (r=0.61, p=0.14). While the small n (7 models) limits the statistical strength, the direction is consistent and supports the design.
 
-- **Principled function-driven user simulator with strong validation.** The two-stage design (parser → AMB/LOC/UNA → generator) dramatically reduces ground-truth leakage: on USERSIM-GUARD, failure rates on unanswerable (UNA) questions drop from 67.4% (baseline) to 2.7% (Figure 6, Table 11). The simulator also correlates more strongly with human success rates (Pearson 0.84) than an unconstrained LLM baseline (0.61), though sample size caveats apply (see Weaknesses).
+- **Comprehensive task construction with principled ambiguity injection (§3.2, Appendix H):** The ambiguity injection methodology is carefully designed, with a clear taxonomy (intent-level, implementation-level, knowledge, environmental) and the knowledge-chain-breaking mechanism (Figure 2) that creates genuinely challenging multi-hop clarification scenarios. The requirement for strategic source selection (User→Environment→User transitions) goes beyond single-source ambiguity in prior benchmarks. The inter-annotator agreement of 93.33–93.50 and the human quality evaluation (97.3% acceptance rate on 300 sampled data points, Appendix Q) demonstrate rigorous construction.
 
-- **Rigorous annotation and quality control.** Twelve expert annotators were recruited through a multi-stage selection process (Appendix C); ambiguity annotations use double-blind checking with 93.33% inter-annotator agreement (Table 1); human evaluation of 300 randomly sampled data points yields 97.3% overall acceptance and 98.7% SQL correctness (Appendix Q). This level of quality control is uncommon in benchmark papers.
-
-- **Informative empirical findings.** The starkly low success rates (8.67%–17.00% for GPT-5) convincingly demonstrate that strong single-turn SQL performance does not translate to interactive settings. Memory grafting (Figure 5) shows that communication skill, not SQL-generation ability, is the bottleneck for GPT-5. The interaction test-time scaling analysis (Figure 4) reveals monotonic improvement with interaction budget for several models.
-
-- **Full CRUD coverage with state-dependent follow-ups.** Unlike read-only benchmarks, tasks span INSERT/UPDATE/DELETE/DDL operations, and follow-up sub-tasks depend on database state modified by preceding queries (Section 3.2, Table 1), mirroring real operational scenarios.
+- **Dual evaluation settings reveal non-trivial behavioral differences (§4, §5):** The distinction between c-Interact and a-Interact is well-motivated and reveals meaningful patterns — e.g., GPT-5 performs worst in c-Interact (14.50% SR) but best in a-Interact (29.17% SR on LITE), showing that interaction paradigm choice is an understudied variable. The action-distribution analysis (Figures 10–13) identifying that models overuse expensive trial-and-error (submit/execute) while underusing environment exploration, with a negative correlation between execute proportion and first-subtask success (Pearson r≈−0.52), provides actionable insight for future work.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **LOC action introduces structural ground-truth dependency.** The LOC() action handles clarification questions outside pre-annotated ambiguities by performing AST-based retrieval on the ground-truth SQL to locate the relevant fragment and generate a response (Section 3.3, Appendix N). When a model asks about implementation details (formatting, formula choice, join type), the simulator answers by inspecting the correct solution. While the paper frames this as a feature ("without leaking the entire query"), it injects information that a real user—who has a high-level intent but not the exact SQL—may not be able to provide with such precision. This is a genuine structural concern because it means interaction histories used in the memory-grafting experiment and elsewhere contain simulator answers derived from the oracle. The magnitude of this issue depends on how frequently LOC is triggered versus AMB (which uses pre-annotated clarification sources), but the paper does not report LOC invocation frequency. The USERSIM-GUARD evaluation shows that LOC accuracy is high (the function-driven approach does retrieve correctly), but it does not address the underlying concern that LOC is answering from the ground truth. Mitigating factors: (1) LOC is a fallback for questions outside pre-annotated ambiguities; the primary interaction mode is AMB. (2) Many LOC-type questions (e.g., "what precision should I use?") are things a domain-expert user *would* know, so the realism gap is not uniform across all LOC invocations. (3) The future work section explicitly plans a post-trained human-aligned simulator, acknowledging that the current design has room for improvement. Nonetheless, this structural feature means the benchmark's difficulty and the memory-grafting results should be interpreted with some caution about the realism of LOC-mediated answers.
+- **The user simulator's reliance on ground-truth SQL for LOC() actions is a structural limitation that the paper only partially addresses (§3.3, Appendix D).** The simulator is explicitly given the reference SQL (Appendix D: "the simulator is additionally provided with the reference SQL") and uses AST-based retrieval from the GT SQL to answer LOC()-type clarification questions. This means that when a model asks "should I use column X or Y?", the simulator can consult the correct answer — something a real user who lacks formalized intent cannot do. The paper acknowledges this as a "pragmatic design choice" and attempts to mitigate it through the human alignment study (Table 3, r=0.84), but the alignment evidence measures only aggregate success-rate correlation across 7 data points, not turn-level behavioral realism. The benchmark may partially measure a system's ability to extract information from an oracle rather than to collaborate with a user who has genuine uncertainty. This is an inherent tension in simulator-based evaluation, not a fixable bug, and future versions would benefit from turn-level validation (e.g., comparing individual simulator responses to human responses on the same clarification questions) to establish behavioral realism more convincingly.
+
+- **The memory grafting experiment (§5.2, Figure 5) is confounded and does not fully support the conclusion drawn from it.** The experiment gives GPT-5 the full interaction histories (including all clarifications obtained) from better-performing models and shows improved SQL generation. The paper concludes that "GPT-5 possesses robust SQL generation capabilities" and that "a more effective communication schema is required." However, the improvement could simply reflect information acquisition — GPT-5 now has the correct clarifications — rather than anything about communication patterns. The conclusion about "communication schema" requires a cleaner control: giving GPT-5 the *same clarifications* but allowing it to generate its own interaction path (or providing the clarifications as pre-answered facts rather than full dialogue histories). The basic finding (GPT-5 benefits from better interaction data) is valid, but the attribution to communication schema is unsupported.
 
 ### Minor
 
-- **Single-run evaluation without variance estimates.** All experiments use one run per model with temperature=0 and top_p=1 (Appendix I.3). While the paper cites cost constraints—which are reasonable for 600 tasks × 7 models × 2 settings—and deterministic decoding does reduce variance, API-based models can exhibit non-determinism even at temperature=0. With success rates in single digits, a shift of a few tasks can meaningfully change percentages. The main finding (models perform poorly) is robust, but model-to-model comparisons and rankings would benefit from even a second run or a discussion of expected variance.
+- **The "Interaction Test-Time Scaling (ITS)" framing overclaims what is a straightforward finding (§5.2, Figure 4).** The experiment shows that Claude-3.7-Sonnet's performance improves with a larger interaction budget (patience=0,3,5,7). This is expected — more clarification turns mean more opportunities to resolve ambiguities. Framing this as "Interaction Test-time Scaling" with a branded acronym (ITS) implies a parallel to test-time compute scaling in reasoning models (e.g., chain-of-thought), which this does not match. The finding is useful as a sanity check (the benchmark rewards interaction), but the scaling claim is not novel or informative. The dotted "Idealized Performance" line (ambiguity-free single-turn) sets an uninteresting ceiling — providing all context upfront is by definition not interactive.
 
-- **Underpowered correlation analyses.** The human-simulator alignment study (Table 3) computes Pearson correlations across n=7 models using 100 tasks. While a correlation of 0.84 (p=0.02) is nominally significant, n=7 provides limited statistical power, and the claim of "significantly stronger alignment" compares p-values (0.02 vs. 0.14) rather than directly testing the difference between correlations. Similarly, the action-distribution correlation analysis (Pearson r≈0.41, Spearman ρ≈0.54) in Appendix J is based on the same 7 data points—these coefficients should be treated as suggestive observations, not statistical evidence of causation.
+- **No specialized text-to-SQL methods are evaluated (§5).** The paper evaluates only 7 general-purpose LLMs. Existing interactive or agent-based text-to-SQL methods (MAC-SQL, DAIL-SQL, CodeS, CHASE-SQL) are discussed in related work but never benchmarked. While the paper is a benchmark contribution and cannot evaluate every method, the omission weakens the headline finding ("GPT-5 only achieves 8.67%") — it is unclear whether specialized methods would perform substantially better. Adding at least one representative agent-based method (e.g., MAC-SQL adapted to the interactive setting) would strengthen the paper's contribution to the text-to-SQL community.
 
-- **LOC retrieval accuracy not independently evaluated.** Appendix N describes the AST-based retrieval pipeline but provides no quantitative evaluation of retrieval accuracy: how often does the semantic search correctly identify the relevant AST node? The USERSIM-GUARD LOC accuracy numbers (Table 11) evaluate the full pipeline end-to-end but do not decompose retrieval errors from generation errors. A failure analysis would strengthen confidence in the LOC mechanism.
+- **The evaluation uses single runs per model (temperature=0).** While deterministic decoding is standard practice and cost constraints are acknowledged, the lack of multiple runs means variance across runs (which can be non-trivial even at temperature=0 due to API non-determinism) is not reported. This is standard practice for large-budget evaluations but should be noted.
 
 ### Trivial
 
-- **Reward weighting could be better motivated.** The 0.7/0.5 weighting for sub-task 1 and 0.3/0.2 for sub-task 2 (Appendix F.2) is reasonable—sub-task 1 is more important since failure terminates the session—but the specific values are not empirically justified. Since Success Rate is the primary metric and Normalized Reward is secondary, this is a minor presentation issue.
+- The "full CRUD spectrum" claim (§1, abstract) is not substantiated with a breakdown of task types — only BI vs. DM are reported in the main results.
+- The 70/30 reward weighting for sub-tasks (Appendix F) is presented without justification.
 
 ## Nice-to-Haves
 
-- Reporting LOC invocation frequency (how often LOC is triggered vs. AMB) would help readers assess the scope of the ground-truth dependency concern.
-- A controlled ablation replacing LOC responses with a "no information" baseline on a subset of tasks would quantify the performance impact of LOC-derived answers.
-- Error bars or a second run for the main results table would strengthen the quantitative claims.
+- **Free-mode experiments (§8 future work):** The current evaluation is exclusively "stress-mode" (tight budget). Free-mode experiments without budget pressure would distinguish budget effects from capability effects and are promised for future work but would strengthen the main paper.
+- **Per-ambiguity-type model × type heatmap:** Figure 14 aggregates across 7 models; a per-model breakdown would show which models handle which ambiguity types best.
+- **Ablation removing LOC() action** to measure how much the benchmark relies on unannotated clarifications versus pre-annotated ambiguities.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-1. **"DM test scripts insufficiently validated — if any script contains a bug, the metric would be biased" (Harsh Critic, Critical Issue 2).** The paper documents a thorough quality-control process: 12 expert annotators with multi-stage selection, double-blind annotation with 93.33% inter-annotator agreement, and human evaluation yielding 98.7% SQL correctness. While independent verification of test scripts would be ideal, the same criticism applies to virtually every benchmark with custom test cases. The rigor already demonstrated is above the field's standard. Removed as disproportionately demanding.
-
-2. **"User Simulator Relies on Ground-Truth SQL... this structural feature erodes the claim that the benchmark faithfully simulates real-world interactive text-to-SQL and weakens all subsequent quantitative conclusions" (Harsh Critic, Critical Issue 1, characterization that it invalidates all conclusions).** The core of this concern is retained as a Major weakness, but the harsh critic's characterization that this "erodes...all subsequent quantitative conclusions" is an overstatement. The primary interaction path (AMB) uses pre-annotated clarification sources, not ground-truth SQL. LOC is a fallback. Retained the substantive concern, removed the absolutist conclusion.
-
-3. **"Missing experiments: Simulator Leakage Audit, DM Test Script Verification, Multi-run Results" (Harsh Critic, Missing Parts).** These are suggestions for improvement, not weaknesses. The simulator leakage audit is captured under Nice-to-Haves. The DM test script verification demand is removed (see point 1). Multi-run results are captured as a Minor weakness.
-
-4. **"Action Distribution... the reported Pearson/Spearman coefficients are not meaningful statistics and should not be presented as evidence of causation" (Harsh Critic, Section-by-Section Notes).** Partially retained as a Minor weakness about underpowered statistics, but the harsh critic's claim that they should not be presented at all is too strong—correlations with small n can be suggestive if properly caveated.
-
-5. **Formatting/typo nitpicks:** Removed per hard rules.
+- **"No evaluation of specialized methods is a fatal omission"** — weakened from fatal to minor. The paper scopes itself as evaluating general LLMs and benchmarks are not required to evaluate every method; however, including one representative would strengthen the contribution.
+- **"Human alignment study has n=7, too small"** — the study is acknowledged as limited (the paper reports p-values), and the correlation is directionally convincing despite small n. The real concern is turn-level validation, not aggregate.
+- **"§5.2 BI vs. DM claim not supported by data"** — re-reading Table 2, the paper does show BI success rates are consistently lower than DM across models; the claim is supported.
+- **"The action costs may bias behavior"** — the cost structure is transparently reported and is a deliberate design choice, not a weakness.
+- **"CRUD breakdown not provided"** — moved to trivial; it's a presentation nicety, not a substantive gap.
+- Strength Finder #4 ("memory grafting isolates communication as a separate skill") — conflicts with the verified confound; removed.
+- Various formatting/parser-artifact criticisms removed per hard rules.
 
 ## Novel Insights
 
-The paper's most genuinely novel observation is that communication skill, not SQL-generation capability, is the binding constraint for flagship models in interactive settings. The memory-grafting experiment (Figure 5) cleanly isolates this: GPT-5, which underperforms in c-Interact despite strong single-turn SQL ability, recovers substantially when given interaction histories from better-communicating models. This suggests that future progress in text-to-SQL may depend as much on training models to ask good questions as on improving SQL generation—a non-obvious finding that the static-transcript benchmarks could never have revealed.
+None beyond the paper's own contributions. The insight that interaction mode (constrained conversation vs. autonomous agent) is a stronger determinant of success than model capability for some models (e.g., GPT-5's diametrically opposite performance across c-Interact and a-Interact) is the paper's most interesting finding and is already presented.
 
 ## Suggestions
 
-- Quantify LOC invocation frequency in the main results and discuss the ground-truth dependency more candidly in Section 3.3. This would preempt the most significant criticism readers will raise.
-- Add a brief caveat about the limited statistical power of the n=7 correlation analyses (Tables 2-3, action-distribution analysis). The correlations are suggestive and worth reporting, but the paper should not present them as confirmatory evidence.
-- Consider running even a single additional seed for the top two models (GPT-5, Gemini-2.5-Pro) to provide a rough estimate of run-to-run variance. This would substantially strengthen the quantitative claims at modest additional cost.
-- Report LOC retrieval accuracy separately from end-to-end LOC accuracy in the USERSIM-GUARD analysis to help readers understand whether failures stem from retrieval errors or generation errors.
-
----
+1. **Address the GT SQL concern more directly** by adding a turn-level behavioral comparison between simulator responses and human responses (even on a subset of 50 tasks), showing whether the simulator answers clarification questions in ways consistent with human users, not just whether final success rates correlate.
+2. **Clean up the memory grafting experiment** by adding a control condition where GPT-5 receives the same clarification answers without the interaction history, to isolate whether improvement comes from information content or interaction structure. Alternatively, reframe the conclusion to focus on the finding that GPT-5's failure is not due to SQL generation ability alone.
+3. **Downgrade the "ITS" branding** to a more measured description ("performance improves with interaction budget") and add the full set of models to Figure 4 (currently only Claude-3.7-Sonnet is labeled in the narrative).
+4. **Add at least one specialized method** (e.g., adapting MAC-SQL's agent framework to the interactive setting) to establish whether the benchmark's difficulty is specific to general LLMs.
+5. **Provide a breakdown of task types** (CREATE/READ/UPDATE/DELETE) to substantiate the full-CRUD claim.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors** (batch retrieval results, listed for comparison):
 
-| Anchor | Avg Score | Comparison |
+| Anchor Path | Avg Human Score | Comparison |
 |---|---|---|
-| MCPMark (`/home/wg25r/review_agent/human_reviews_2026/uobROwBsJm.md`) | 7.33 | Cleaner benchmark with fewer structural concerns, but narrower scope (127 tasks, tool-use focus). BIRD-INTERACT is more ambitious and has more validation but also more rough edges. |
-| EHR-ChatQA (`/home/wg25r/review_agent/human_reviews_2026/hLweUPBz7k.md`) | 4.00 | Similar interactive DB-QA ambition but uses an unstructured LLM-based simulator. BIRD-INTERACT's function-driven simulator with USERSIM-GUARD validation is a clear improvement. BIRD-INTERACT is substantially stronger. |
-| BIRD-Ent (`/home/wg25r/review_agent/human_reviews_2026/gXkIkSN2Ha.md`) | 3.60 | Enterprise text-to-SQL with static evaluation. BIRD-INTERACT's dynamic interaction design and simulator contribution are more novel and better validated. |
-| Squirrel Benchmark (`/home/wg25r/review_agent/human_reviews_2026/8Fm6OKFuRv.md`) | 5.00 | SQL debugging benchmark with good ideas but overclaimed enterprise realism. BIRD-INTERACT has more rigorous validation and a clearer contribution. |
-| ConDABench (`/home/wg25r/review_agent/human_reviews_2026/jOxfpsnDFo.md`) | 2.50 | AI-generated interactive data analysis benchmark with limited human validation. BIRD-INTERACT's human annotation rigor puts it far above this tier. |
-| Octopus (`/home/wg25r/review_agent/human_reviews_2026/BdlIQGetYv.md`) | 2.50 | Auto-generated text-to-SQL benchmark without human quality measurement. BIRD-INTERACT is clearly stronger. |
+| VKGTGGcwl6 (LLMs Get Lost In Multi-Turn Conversation) | 8.0 | Stronger paper — cleaner methodology, more models, deeper behavioral analysis, no GT SQL concern |
+| 9gw03JpKK4 (Gaia2) | 8.0 | Stronger benchmark — asynchronous environments, platform release, more comprehensive evaluation |
+| 8Fm6OKFuRv (Beyond Text-to-SQL: Enterprise SQL Debugging) | 5.0 | Weaker paper — overclaimed realism, LLM-generated data without human validation; BIRD-INTERACT has real human annotation and better validation |
+| hLweUPBz7k (EHR-ChatQA) | 4.0 | Comparable but weaker — smaller scale (64 AdaptQA tasks), less validated user simulator; BIRD-INTERACT is more comprehensive |
+| BdlIQGetYv (Octopus) | 2.5 | Much weaker — fully auto-generated, no human validation; BIRD-INTERACT has rigorous human annotation |
+| 762D8ndh2E (UI-Simulator) | 3.0 | Different domain, but weaker methodology — LLM-generated synthetic data with low downstream performance |
 
-BIRD-INTERACT sits between the 4.0-range papers (which it clearly surpasses on simulator design, validation rigor, and empirical depth) and the 7.33 MCPMark (which is cleaner but narrower). The LOC structural concern is real and prevents a score in the 7+ range, but the paper's strengths—principled simulator design, rigorous annotation, strong USERSIM-GUARD validation, compelling empirical findings—place it well above the 4.0-tier. A score of 6.0 reflects a solid benchmark paper with genuine contributions and addressable weaknesses.
+BIRD-INTERACT is clearly stronger than the rejected/low-scoring anchors (Octopus 2.5, UI-Simulator 3.0) and comparable to or stronger than EHR-ChatQA (4.0, accepted Poster). It is weaker than the top-tier papers (LLMs Get Lost 8.0, Gaia2 8.0) which have cleaner methodology and fewer unresolved concerns. The paper's function-driven simulator design and comprehensive task construction represent genuine contributions, but the GT SQL reliance in the simulator and the overclaimed analyses prevent it from reaching the top tier. This places it at the boundary between Accept and Reject — solid contributions with clear, non-fatal limitations that can inform future work.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,94 +1,91 @@
-Now I have a thorough understanding of the paper and its anchors. Let me synthesize the final review.
-
----
-
 ## Summary
 
-This paper proposes a compositional meta-learning framework that formalizes task acquisition as probabilistic inference in a learned generative model. The architecture separates within-module dynamics (module RNNs learning reusable computations) from between-module dynamics (a gating RNN learning transition statistics). Particle filtering unifies training (via marginal likelihood optimization) and test-time inference (via posterior module selection), enabling one-shot task acquisition without parameter updates. The approach is demonstrated on abstract rule learning and motor learning tasks.
+This paper proposes a compositional meta-learning framework in which a gating RNN selects among multiple module RNNs at each timestep, trained as a probabilistic generative model via particle-filter-based marginal likelihood maximization. New test tasks are solved purely through inference (particle filtering on the module sequence) without any parameter updates. On two synthetic domains—a rule-learning task with vector shift operations and a motor-learning task with curved trajectories—the model recovers ground-truth components and transitions, and infers solutions to held-out tasks from single episodes, including under sparse feedback.
 
 ## Strengths
 
-- **Principled conceptual framework**: The separation of "task syllables" (modules) from "task grammar" (gating transitions), cast explicitly as a probabilistic generative model (Equations 1–4, Figure 1b), is clean, well-motivated, and novel. The particle-filter formulation elegantly unifies training and inference.
+- **Principled formalization of meta-learning as inference in a learned generative model.** The paper cleanly separates between-module dynamics (gating RNN) and within-module dynamics (module RNNs), framing task solution as probabilistic inference in an augmented HMM (Section 2.1, Equations 1–8). This provides a well-motivated theoretical grounding that bridges the expressivity of RNNs with the data-efficiency of probabilistic inference.
 
-- **Validated recovery of ground-truth components**: The paper demonstrates quantitatively that the model recovers both module operations and transition statistics from training tasks (Figure 2a–c: MSE, module accuracy, and gating accuracy all plateau at 1 across 5 seeds). The data-model mismatch experiments (Figure A1) further strengthen confidence that the learning procedure works.
+- **Demonstrates zero-parameter-update task acquisition with compelling qualitative results.** The model solves held-out test tasks from a single episode *without any parameter updates*, and achieves qualitatively faster acquisition than gradient-based meta-learning methods (Figure 3e). Under sparse feedback (3/12 timesteps) and on tasks 4× longer than training, the model still infers correct module sequences via constrained hypothesis testing (Figures 2e,f, 4e)—a genuinely interesting capability enabled by the learned gating constraints.
 
-- **Convincing architecture ablation**: The comparison between the full model and a version with uniform transition matrix (Figure 3c vs. 3d) cleanly isolates the gating RNN's contribution to handling sparse feedback — the full model succeeds where the ablated version fails, directly supporting the claim that learned transition structure enables constrained hypothesis testing.
+- **Quantitative recovery of ground-truth components.** Module and gating accuracy plateau at 1.0 (Figure 2a), and the learned operations and transition matrices visually match ground truth (Figures 2b,c, 4b,c). The data-model mismatch experiments (Figure A1) provide additional validation that the model discovers interpretable structure.
 
-- **Insightful visualizations of inference dynamics**: The posterior tracking in Figures 2e and 4e — showing hypothesis branching during feedback gaps and posterior collapse upon feedback arrival — provides an interpretable window into how compositional inference operates under uncertainty.
+- **Systematic ablation controls.** The paper compares three control models (RNN without task identity, RNN with task identity, model without gating network) in Figures 3a–d, cleanly isolating which architectural components drive performance. The failure of the no-gating model under sparse feedback directly supports the claim that learned transition constraints are essential.
 
-- **Cross-domain application**: Demonstrating the same core architecture and inference procedure on both abstract rule learning and motor trajectory composition shows the framework's generality, not narrow domain-specificity.
-
-- **Honest self-assessment**: The paper explicitly frames results as "proof-of-principle" (line 527) and openly discusses limitations including fixed module count, training instability, and synthetic task scope.
+- **Domain generality.** The same framework is applied to two qualitatively different domains—symbolic rule learning and continuous motor trajectory generation—demonstrating the approach is not task-specific.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **No quantitative evaluation in the motor learning domain**: Section 2.4 provides zero quantitative metrics — no measured reconstruction error, no baseline comparison (e.g., a simple RNN, a motion primitive model), no statistics across tasks. The section presents only trajectory plots (Figures 4d–e) and a heatmap. The claim that "motor learning is well-explained" by this framework is therefore unsupported by the evidence presented. This is the most significant gap in the paper.
-
-- **One-shot inference is demonstrated through individual examples, not aggregate metrics**: Figures 2d–f and 4d–e show single test-task episodes. While the control-experiment bars (Figure 3a–d) provide aggregate comparison across tasks, and the learning curves (Figure 3e–f) quantify the sample-efficiency gap, there are no aggregate held-out test-set metrics (e.g., mean MSE, module-selection accuracy, success rate) reported anywhere. The central "one-shot inference" claim thus rests on qualitative, cherry-pickable examples.
-
-- **Gradient-based comparison confounds architecture with inference mechanism**: Figure 3e–f compares the modular particle-filter model against *monolithic* RNNs trained with MAML/MLDG. The advantage could stem from the modular architecture rather than from inference-based adaptation. A comparison using the *same* modular architecture adapted via gradient steps (MAML-style) would isolate the contribution of inference vs. gradient-based adaptation, but is absent.
+- **The headline comparison (inference vs. gradient-based learning) is confounded by architectural differences (Figures 3e,f).** The paper claims that "inference is qualitatively faster than learning" and attributes the speed advantage to avoiding parameter updates. However, the proposed model uses a modular architecture (gating + modules) designed to decompose tasks, whereas the gradient-based baselines (MAML, MLDG, fine-tuning) use a monolithic RNN with task-identity input. The speed advantage could arise partly or entirely from this architectural difference—the modular model amortizes the task structure while the monolithic model must discover it from scratch. To cleanly isolate the benefit of inference *within the same architecture*, the authors should have compared inference (particle filtering) to gradient-based fine-tuning of the gating and module parameters on the same modular model. Without this control, the central empirical claim that inference *per se* drives faster acquisition is not fully supported. This is the paper's most significant experimental shortcoming.
 
 ### Minor
 
-- **No failure cases presented**: The paper shows only successful inference examples. Examples where the posterior collapses to incorrect module sequences (e.g., under extreme sparsity, ambiguous feedback, or out-of-distribution task structure) would provide a more balanced picture and help readers understand the method's limitations.
+- **Evaluation is limited to two synthetic, low-dimensional domains.** The tasks (6 shift operations with fixed durations, motor skills with fixed curvature sequences) are carefully controlled for ground-truth verification, which is a strength for interpretability. However, the paper's framing in the abstract and introduction (e.g., "rapid acquisition of new tasks through compositional meta-learning") implies broader applicability that is not demonstrated. No standard few-shot learning or meta-RL benchmarks are touched. The paper acknowledges proof-of-principle status, but the gap between the claims' generality and the evidence's scope remains notable.
 
-- **No compute-cost comparison**: The particle filter uses 250 particles (line 927), each running the gating and module RNNs. A FLOPs or wall-clock comparison against gradient-based adaptation would contextualize the efficiency claim, though the paper's primary claim is about sample efficiency (1 episode vs. hundreds), not raw computational speed.
+- **The model requires the number of modules to be specified a priori.** The paper acknowledges this limitation and discusses continual learning as future work. However, in realistic settings the number of latent components is unknown and may grow with experience. The current model cannot discover or add modules autonomously—it can only leave extras unused or approximate a subset (Figure A1). This constrains applicability beyond carefully controlled settings.
+
+- **No quantitative performance curves for the motor learning domain (Section 2.4).** The motor learning results are presented qualitatively through trajectory visualizations (Figure 4), with no learning curves, error bars, or numerical metrics. This makes it difficult to assess the robustness or variability of the approach in the second domain.
+
+- **The learning curves for gradient-based baselines (Figures 3e,f) are averaged across test tasks without showing per-task variance.** It is unclear whether some tasks are learned much faster than others, which would be informative about the nature of the tasks and the baselines' behavior.
+
+- **Limited sensitivity analysis.** The number of modules is varied only qualitatively (Figure A1). The number of particles (K=250 throughout) is not systematically varied. The Gumbel-softmax temperature is not discussed despite its known impact on relaxation bias and gradient quality.
+
+- **The paper does not explain why MAML and MLDG do not outperform standard fine-tuning in Figure 3e.** All gradient-based methods perform similarly, which is unexpected given MAML's design for fast adaptation. The paper offers one sentence about frozen recurrent weights being sufficient, but a deeper explanation would strengthen the reader's understanding of the task difficulty.
 
 ### Trivial
 
-- The learning curves in Figure 3e–f could be more clearly labeled regarding what "performance" means (presumably MSE, consistent with Figure 2a, but not stated in the figure caption).
+- The motor learning task removes the input **x***_t_*, resets module hidden states on switch, and uses guided particle filtering during training. The paper presents these as practical changes, but they mean the motor learning experiment is not a direct application of the framework as described in Section 2.1; it requires non-trivial modifications.
+
+- Gumbel-softmax temperature tuning and relaxation bias are not discussed, though these are known challenges for training with discrete latent variables.
 
 ## Nice-to-Haves
 
-- Ablation of the particle count (K) to show how many particles are actually needed for reliable inference, and whether the guided filter (used in motor learning) reduces this requirement.
-- Ablation of the specific changes made for motor learning (no input, hidden-state reset, module-specific readout weights) to disentangle core contributions from domain-specific engineering choices.
-- Discussion of how inference degrades as the number of modules grows, since particle-filter complexity scales with the module count.
+- **Fair comparison on the same modular architecture**: Compare inference (particle filtering) vs. gradient-based fine-tuning (of gating only, or gating+modules) on the same modular model. This would directly test whether inference itself, rather than modularity, drives faster acquisition.
+
+- **Continual learning experiment**: The discussion highlights this as a promised benefit. A simple experiment where the model faces a sequence of test tasks (without retraining) would substantiate the claim of no catastrophic forgetting.
+
+- **Per-task variance for gradient-based learning curves**: Show variance across test tasks in Figures 3e,f to reveal whether some tasks are systematically harder or easier for each method.
+
+- **Wall-clock timing**: Provide wall-clock time comparison for one-shot inference vs. gradient-based adaptation to substantiate the speed claim beyond sample efficiency.
 
 ## Removed Points
 
-*These points were flagged in the input reviews but are not included above. Treat with caution.*
+*These points are flagged to be removed; treat them with caution.*
 
-1. **"No error bars in Figure 3"** — The paper caption explicitly states "grey dots: individual seeds, error bars s.e.m. across tasks; black bars: mean across seeds" (line 404–405). This claim is factually wrong. REMOVED.
-
-2. **"Unfair comparison" framing** — The hard rule states that criticisms about unfair comparisons should be removed if the asymmetry favors the baseline. Here, the monolithic RNN baseline in Figure 3b receives task identity input, which the proposed model does not — the asymmetry actually favors the baseline. The confounded-architecture concern (modular vs. monolithic) is retained in Major Weaknesses but reframed as a confound rather than unfairness. REMOVED (the "unfair" framing).
-
-3. **"Gumbel-softmax temperature schedule and effect on training"** — The appendix (A.1) describes the gumbel-softmax reparameterization. The temperature schedule is indeed not specified, but this is a minor implementation detail that does not threaten the core contribution and is typical to omit from the main text. REMOVED as a standalone criticism (the general point about missing details is subsumed by the fact that full code is provided).
-
-4. **"Whether accuracy/MSE curves in Figure 2a are on training or held-out tasks"** — The figure caption and surrounding text describe these as training-time metrics tracking recovery of ground truth. The paper distinguishes between this recovery analysis (§2.2) and test-task inference (§2.3). This is a misreading. REMOVED.
-
-5. **"Single trajectory for longer task generalization claim"** — Retained in Major Weaknesses under the broader point about individual examples rather than aggregate metrics. The specific wording about "single trajectory" is too narrow; the real concern is lack of aggregate data.
+- The critic's claim that the "control models are underpowered" is removed. The controls are standard and the paper shows mean performance with error bars, which is adequate for this type of work.
+- The critic's claim that learned transitions (Figure 2c) are "cherry-picked" is removed. The accuracy metric in Figure 2a reaches 1.0 across seeds, and the grey lines show individual-seed variance, indicating the shown transitions are representative.
+- The critic's claim that the motor learning domain-specific changes "suggest the framework is not as general as claimed" is removed. Practical accommodations for different domains are normal in ML research; the core framework remains the same.
+- The critic's request for "statistical tests" on the control model comparisons is removed. Reporting mean performance with error bars is the standard in this literature.
 
 ## Novel Insights
 
-The paper's most genuinely novel insight is the framing of compositional meta-learning as *inference in a learned generative model* rather than as *learning to learn parameters*. While modular architectures and probabilistic inference are individually well-studied, their integration here — where the gating RNN replaces an HMM's transition matrix and module RNNs replace its emission matrix, yielding a model that is both expressive (non-Markovian transitions, arbitrary emissions) and amenable to efficient particle-filter inference — creates a qualitatively different approach to rapid task acquisition. The demonstration that learned transition structure alone (without task identity input or parameter updates) can constrain hypothesis testing enough to handle sparse feedback is a finding that transcends the specific benchmarks used.
+The key synthesis that emerges from the reviews is that this paper presents a conceptually elegant approach—treating meta-learning as posterior inference over module sequences in a learned generative model—with genuine technical novelty (particle-filter training of modular RNNs, constrained hypothesis testing under sparse feedback). However, the experimental design contains a significant confound: by comparing a modular+inference system to monolithic+gradient systems, the paper cannot attribute its speed advantage to inference rather than architecture. This confound is compounded by the evaluation being confined to synthetic domains. The paper's strengths lie in its clean formalism and the qualitative demonstrations of sparse-feedback inference and extended-task generalization, but these are not yet backed by the controlled experiments needed to isolate *why* the method works. A revision that adds the controlled comparison (inference vs. gradient adaptation on the same modular architecture) and addresses the task generality gap would substantially strengthen the paper.
 
 ## Suggestions
 
-- Add aggregate test-set metrics (mean MSE ± SD and module-selection accuracy) across a fixed set of held-out tasks for both domains. This would transform the one-shot inference claim from anecdotal to well-supported without requiring additional experiments — the data can be collected from existing trained models.
-- For motor learning, add at minimum a simple baseline (e.g., an RNN with task identity) and report quantitative reconstruction error.
-- Include the modular-MAML baseline to disentangle architecture from inference mechanism. This is a straightforward experiment given the existing codebase.
-- Include 1–2 failure cases with analysis to provide a balanced picture.
+1. **Add the critical control experiment:** Train the modular model (gating + modules) on training tasks, then on held-out test tasks compare (a) inference via particle filtering vs. (b) fine-tuning the gating/module parameters via gradient descent vs. (c) fine-tuning just the gating network. This is the single most important experiment to validate the paper's central claim.
+2. **Add one standard benchmark:** Even a simplified version of a standard sequential meta-learning benchmark (e.g., a sequential variant of Omniglot or a Meta-World task) would dramatically strengthen claims of generality.
+3. **Provide quantitative curves for motor learning** (Figure 4) with error bars across seeds.
+4. **Add per-task variance** to the gradient-based learning curves (Figures 3e,f) and discuss why MAML/MLDG do not outperform fine-tuning.
+5. **Systematically vary the number of modules and particles** with quantitative performance metrics, not just qualitative plots.
 
----
+## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors (all retrieved, listed for comparison):**
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `h497VpgFKd` (Compositional-ARC) | 5.00 | Accept (Poster) | More thorough empirical evaluation but primarily a benchmark paper applying existing method; our paper proposes a more novel framework with weaker evaluation |
-| `KG6SSTz2GJ` (Amortising Inference) | 5.00 | Accept (Poster) | Comparable novelty level and similar gap pattern (promising results, missing details); our paper has better recovery validation but the motor gap is worse |
-| `RNTWTJe4x6` (Abduction Transformer) | 4.40 | Accept (Poster) | Similar pattern: novel architecture with missing baselines and inference-cost concerns; our paper's framework is cleaner but our empirical gaps are comparable |
-| `rLyEQeolUO` (Task representational dynamics) | 4.50 | Reject | Analysis paper without new method, narrower scope; our paper proposes a novel method with broader applicability |
-| `NWoHQbALl4` (Compositional HyperModules) | 2.00 | Reject | Severe issues (inconsistent naming, missing baselines, no code); our paper is substantially stronger |
-| `Eq6HyDO6bR` (Multi-level meta-RL) | 2.00 | Reject | Limited empirical comparison, poor presentation; our paper is substantially stronger |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/H0SqKi1zgU.md` (Neural Bayesian Filtering) | 4.00 | Similar: interesting probabilistic-inference + neural method, limited to toy/synthetic experiments. The current paper is slightly cleaner in presentation and has better ablations, but the current paper has a more significant confound in its central comparison. |
+| `/home/wg25r/review_agent/human_reviews_2026/An8l3CXqGJ.md` (High-Dim Particle Filters) | 5.00 | Somewhat similar methodology (particle filters + neural networks), but has theory + more experiments. The current paper has clearer contribution framing. |
+| `/home/wg25r/review_agent/human_reviews_2026/KG6SSTz2GJ.md` (Amortising Inference) | 5.00 | Stronger Bayesian meta-learning paper with solid theory and broader experiments. Current paper is weaker empirically. |
+| `/home/wg25r/review_agent/human_reviews_2026/WgMebSFTnE.md` (Automating Meta-learning) | 2.50 | Much weaker: disconnected motivation, only 2D Gaussian experiments. Current paper is substantially stronger in clarity, motivation, and experimental grounding. |
+| `/home/wg25r/review_agent/human_reviews_2026/h497VpgFKd.md` (Compositional-ARC) | 5.00 | Stronger: includes real LLM comparisons, new dataset. Current paper has less empirical depth. |
+| `/home/wg25r/review_agent/human_reviews_2026/dtQxzXILzW.md` (When Does Reward Drive Exploration) | 1.67 | Much weaker: flawed experimental setup, unconvincing results. Current paper is substantially stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/TjF9WLcu8o.md` (Contrastive-Online-Meta) | 0.00 | Not a serious paper. Current paper is incomparably stronger. |
 
-The paper under review is closest in profile to RNTWTJe4x6 (4.40) and KG6SSTz2GJ (5.00): a novel framework with promising results but significant empirical gaps. The motor learning section being entirely qualitative is a notable weakness, but the recovery validation and architecture ablations provide genuine evidence for the core claims. The paper's explicit proof-of-principle framing mitigates the severity of the gaps somewhat.
+**Calibrated score:** The paper sits between the "interesting idea but limited experiments" cluster (~4.0) and the stronger accepted posters (~5.0). It has a cleaner contribution framing than the 4.0 anchor, but the confound in its central comparison and the lack of any non-synthetic benchmark prevent it from reaching the 5.0 level of papers like Compositional-ARC or Amortising Inference. It is substantially stronger than the 2.5 and below papers.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

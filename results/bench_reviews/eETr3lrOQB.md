@@ -1,104 +1,83 @@
-Now I have all the information needed to write the consolidated review. Let me compose it.
-
----
+Now I have sufficient context from both the paper and the calibration anchors. Let me compile the final consolidated review.
 
 ## Summary
 
-This paper proposes VQ-Transplant, a framework that decouples VQ module development from the expensive end-to-end training of visual tokenizers. The approach replaces the native VQ module in a frozen pre-trained tokenizer (primarily VAR) with a new quantization algorithm, then performs lightweight decoder adaptation (5 epochs on ImageNet-1k) to resolve decoder-quantizer mismatch. The paper also introduces MMD-VQ, a distribution-aligned quantization method using maximum mean discrepancy. The framework is evaluated across multiple VQ algorithms, codebook sizes, and datasets.
+This paper proposes VQ-Transplant, a framework that enables replacing the VQ module in a pretrained visual tokenizer (e.g., VAR) with an arbitrary new VQ method without retraining the encoder-decoder, followed by lightweight decoder adaptation (5 epochs) to resolve decoder-quantization mismatch. The paper also introduces MMD-VQ, a distribution-aligned VQ method using maximum mean discrepancy. On ImageNet-1k, MMD-VAR with VQ-Transplant achieves rFID 0.81 (vs. VAR's 0.92) while reducing training time from 60 hours on 16× A100 to 22 hours on 2× A100, and shows strong cross-dataset generalization on FFHQ (rFID 1.21), CelebA-HQ, and LSUN-Churches.
 
 ## Strengths
 
-- **Genuine practical value**: The framework addresses a real bottleneck in VQ research—the prohibitive cost of end-to-end tokenizer retraining—with a pragmatic reuse strategy. Table 6 provides a clean comparison: on the same ImageNet-1k dataset, VQ-Transplant achieves rFID 0.81 in 22 GPU-hours versus from-scratch training's rFID 1.26 in 25–35 GPU-hours, confirming the efficiency advantage on equal footing.
+1. **Novel and practically motivated framework.** The two-stage VQ-Transplant idea—freeze the encoder-decoder, swap the VQ module, then lightly adapt the decoder—is a clean conceptual contribution that decouples VQ method development from expensive end-to-end retraining. This addresses a real bottleneck in visual tokenizer research.
 
-- **Comprehensive VQ algorithm evaluation**: Five distinct quantization algorithms (Vanilla, EMA, Online, Wasserstein, MMD) are evaluated across both multi-scale (Table 3) and fixed-scale (Table 7) configurations, with consistent results showing that distribution-aligned VQ methods (MMD, Wasserstein) outperform alternatives after adaptation.
+2. **Decoder adaptation is clearly shown to resolve the mismatch.** After VQ substitution, MMD-VAR achieves rFID 1.52 (worse than VAR's 0.92), but after only 5 epochs of decoder adaptation it improves to 0.91 (codebook 4096) and 0.81 (codebook 8192), surpassing the original VAR (0.92). Tables 3, 4, and 5 systematically quantify this.
 
-- **Well-motivated MMD-VQ with controlled synthetic validation**: Appendix B's controlled experiments on synthetic bimodal distributions clearly demonstrate MMD-VQ's advantage over Wasserstein VQ under non-Gaussianity. At ζ=4.0, MMD-VQ maintains 75.6% codebook utilization vs. Wasserstein VQ's 34.8% and lower quantization error (1.240 vs. 1.502). The paper honestly acknowledges that on standard benchmarks, where features are approximately Gaussian, the two methods perform similarly—this intellectual honesty strengthens the contribution.
+3. **Strong cross-dataset generalization.** On FFHQ, Wasserstein VQ with VQ-Transplant achieves rFID 1.21 after adaptation (Table 8), substantially outperforming fully-trained baselines like VQGAN-LC (3.81). Similar results on CelebA-HQ and LSUN-Churches (Tables 9-10) show the approach transfers beyond ImageNet-1k.
 
-- **Cross-dataset generalization demonstrated**: The framework generalizes to datasets structurally distinct from the VAR pre-training data, achieving rFID 1.21 on FFHQ and rFID 2.60 on CelebA-HQ (Tables 8–9), outperforming published baselines trained from scratch.
+4. **Systematic evaluation across five VQ methods.** The paper tests Vanilla, EMA, Online, Wasserstein, and MMD VQ under both multi-scale (VAR-style) and fixed-scale configurations, across multiple codebook sizes and adaptation durations (Tables 3, 5, 7, 14). This breadth within the chosen scope is a genuine strength.
 
-- **Thorough adaptation analysis**: Tables 4–5 track rFID improvement across individual adaptation epochs and extend to 20 epochs, with Figure 3 showing clear downward trends. The joint optimization alternative in Appendix C (Table 14) provides additional design-space exploration.
+5. **Controlled synthetic analysis of MMD vs. Wasserstein.** Appendix B provides a clean synthetic experiment (bimodal mixture distributions) demonstrating that MMD-VQ maintains codebook utilization (75.6% vs. 34.8% at ζ=4) and lower quantization error as non-Gaussianity increases, confirming the theoretical motivation.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-None that are fatal.
+1. **Generality unsubstantiated beyond one architecture.** The paper's "plug-and-play" framing is tested thoroughly on only one base tokenizer (VAR). An attempt on LDM-16 (Appendix D, Table 16) shows substantially worse results (rFID ~2.58-2.93 after adaptation vs. 0.83-0.91 on VAR), and the paper attributes this to model capacity and feature-type differences. Without demonstrating the framework works well on at least two tokenizer architectures (e.g., a VQGAN-based tokenizer or a different VAR-scale model), the generality claim remains aspirational rather than demonstrated. This is the single most consequential weakness: it limits the paper's contribution from "a general framework" to "a method that works well on VAR."
+
+2. **"Near state-of-the-art" claim is not supported by adequate baselines.** The paper benchmarks MMD-VAR (rFID 0.81) against VQGAN variants, RQVAE, Llama GEN, and VAR (all ≤2024). Contemporary tokenizers achieving sub-0.8 rFID (e.g., Infinity, UnTok, DiVAE) are cited in the paper's references but not included in Table 2. While the claim is qualified as "near" state-of-the-art, the omission of these methods from comparison tables makes the reader unable to assess how close the approach actually is to current best numbers. The paper's reconstruction fidelity on ImageNet should be contextualized against the full contemporary landscape.
 
 ### Minor
 
-- **Missing "original VQ + decoder adaptation" baseline**: The paper reports that after adaptation, transplanted VQ modules match or exceed the original VAR tokenizer's reconstruction fidelity (e.g., MMD VAR rFID 0.81 vs. VAR's 0.92). However, there is no control experiment where the original VAR's native VQ module is kept frozen and only the decoder undergoes the identical 5-epoch adaptation protocol. This makes it impossible to determine how much of the reported improvement stems from the new VQ algorithm versus simply from the additional adversarial fine-tuning of the decoder. The paper does show that substitution without adaptation degrades performance (Table 3: MMD VAR rFID 1.52 vs. VAR's 0.92), confirming that adaptation is necessary after transplant—but the missing baseline would clarify whether the VQ module itself contributes meaningful gains over the original. This weakens the paper's claim about the superiority of transplanted VQ modules specifically, though it does not undermine the framework's value proposition (cheap VQ experimentation).
+3. **The MMD-VQ secondary contribution is empirically indistinguishable from Wasserstein VQ on real data.** Tables 3, 7, 8, 9, and 10 consistently show MMD-VQ and Wasserstein VQ performing near-identically on ImageNet, FFHQ, CelebA-HQ, and LSUN-Churches. The paper acknowledges this (Appendix, lines 1338-1341: "encoder-produced latent features are typically approximately Gaussian... the advantage of MMD-VQ is less pronounced"), which is honest but undermines MMD-VQ as a claimed contribution—the advantage is only shown on synthetic bimodal data. If the two methods are practically equivalent on current benchmarks, MMD-VQ's status as a "secondary contribution" is weak.
 
-- **Efficiency comparison in Table 1 conflates dataset sizes**: The abstract and Table 1 claim a 21.8× speedup and 95% cost reduction by comparing VQ-Transplant on ImageNet-1k (1.2M images, 2×A100, 22h) against VAR from-scratch training on OpenImages (~9M images, 16×A100, 60h). This is not a like-for-like comparison since OpenImages is roughly 7.5× larger than ImageNet-1k. Table 6 provides the fair comparison (same dataset, comparable GPU-hours) and still shows a clear advantage, but the prominently featured 21.8× figure is misleading as stated.
+4. **The computational cost comparison (Table 1) mixes datasets and does not account for pretraining cost.** VAR is trained on OpenImages (60 hrs, 16× A100) while VQ-Transplant is trained on ImageNet-1k (22 hrs, 2× A100). The datasets differ, making the "21.8× speedup" not strictly apples-to-apples. Furthermore, the "95% cost reduction" framing treats the pretrained VAR encoder-decoder as free, which is valid for a user downloading a pretrained model but should be clearly separated from a total-cost accounting.
 
-- **"Plug-and-play" generality claim is supported only on VAR**: The abstract states the framework enables "plug-and-play integration of arbitrary VQ algorithms into pre-trained visual tokenizers," but the primary evaluation uses only the VAR tokenizer. The LDM-16 experiment in Appendix D (Table 16) achieves substantially worse results (rFID 2.68–2.93 after adaptation vs. 0.87 for the continuous original), which the paper attributes to the LDM decoder being pre-trained on continuous rather than quantized features. The paper does acknowledge this limitation in Appendix D, but the abstract's unqualified language overpromises relative to the evidence.
+5. **The from-scratch comparison (Table 6) is not informative.** Comparing VQ-Transplant (5 epochs of decoder adaptation) to full from-scratch training for 5-7 epochs is a strawman that the paper itself acknowledges is expected ("discrete tokenizers typically require hundreds of epochs"). A more informative baseline would train only the VQ module from scratch with the frozen encoder-decoder (no pretrained decoder initialization) to isolate the value of the pretrained decoder.
+
+6. **No downstream generation evaluation.** The paper evaluates only reconstruction metrics (rFID, PSNR, SSIM, LPIPS). To fully establish the value of VQ-Transplant, the community would benefit from seeing whether the improved reconstruction fidelity translates to better image generation quality when feeding the new tokens into a VAR-based generative model. This is noted as a clear next step.
 
 ### Trivial
-
-- No dedicated limitations section in the main paper body. Key limitations (LDM-16 performance gap) are discussed only in the appendix. A brief limitations paragraph in the main text would improve transparency and help readers calibrate expectations.
+None.
 
 ## Nice-to-Haves
 
-- **Downstream generation evaluation**: Testing the transplanted tokenizers in actual image generation pipelines (e.g., using VAR or LlamaGen generators) would significantly strengthen the practical message. Currently, only reconstruction quality is evaluated.
-
-- **Broader tokenizer architecture testing**: Beyond VAR and LDM-16, testing on VQGAN or other tokenizer families would better support the generality claim.
-
-- **Ablation isolating Stage I vs. Stage II contributions**: A clean 2×2 ablation (original VQ ± adaptation, new VQ ± adaptation) would clearly disentangle how much each stage contributes.
+- A companion ablation that trains only the VQ module from scratch with frozen encoder-decoder (no decoder initialization) would isolate the benefit of the pretrained decoder.
+- Testing on a second discrete tokenizer architecture beyond VAR (e.g., from ImageFolder or a VQGAN-based model) would significantly strengthen the generality claim.
+- A quantitative measure of the distribution shift between original and new quantized latent spaces (e.g., via MMD between the two distributions) would concretely support the "decoder-quantization mismatch" claim.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic claim that the missing baseline makes "the conclusion that the transplanted VQ modules improve reconstruction fidelity unsubstantiated" and that "the paper in its current form does not meet the bar for acceptance."** → **Downgraded from fatal to minor.** The paper's core contribution is the *framework* (transplant + adaptation), not the claim that any individual VQ module is inherently superior. The framework's value is demonstrated by Table 3: substitution alone degrades performance, adaptation recovers and often exceeds original quality. The missing baseline would strengthen the paper but does not invalidate the central contribution. Additionally, the harsh critic's claim that Table 6 is "not directly tied to the key claim" is incorrect—Table 6 directly supports the efficiency claim by showing from-scratch training on the same dataset yields far worse results for similar compute.
-
-- **Harsh Critic claim that the speedup comparison is "methodologically unsupported and potentially inflated" at a fatal level.** → **Downgraded to minor presentation issue.** Table 6 provides the fair comparison the critic demands, and it still shows a clear efficiency advantage (22h for VQ-Transplant achieving rFID 0.81 vs. 25–35h from-scratch achieving only rFID 1.26–1.40). The problem is that Table 1/abstract present a conflated number, not that the efficiency claim is false.
-
-- **Harsh Critic claim that the LDM results make the framework generality claim invalid.** → **Downgraded to minor.** The paper honestly reports and discusses the LDM-16 results in Appendix D, identifying specific reasons (decoder pre-trained on continuous features vs. quantized). The abstract language should be qualified, but this is an overclaim issue, not a methodological flaw.
-
-- **Strength Finder's "95% cost reduction" claim.** → **Removed from strengths.** As noted above, the 95% figure is based on a cross-dataset comparison. The genuine efficiency advantage is better represented by Table 6's same-dataset comparison.
-
-- **Harsh Critic claim that "the novelty relative to existing VQ-loss designs (e.g., Wasserstein VQ) is modest."** → **Removed.** This is a subjective assessment; MMD-VQ's synthetic experiments in Appendix B clearly demonstrate a concrete advantage over Wasserstein VQ under non-Gaussianity that is theoretically motivated and empirically validated.
+- **Criticism that VQ-Transplant was tested on only one tokenizer (with LDM-16 dismissed).** Not fully removed—kept as Major weakness #1 with softened framing. The paper does test LDM-16, and the critic's demand for "at least two or three" is partially met, but the LDM-16 results are substantially worse, so the generality concern remains valid.
+- **"The paper never discusses why the native VQ module of VAR needs to be replaced."** The paper's motivation is about enabling exploration of novel VQ methods in general, not about VAR being deficient. This is scope creep—the paper's stated goal is decoupling VQ development from retraining, not improving VAR specifically.
+- **"The joint optimization appendix shows marginal gains that do not justify the extra cost."** The paper itself presents this trade-off honestly, noting joint optimization offers "slightly stronger performance" at higher cost and choosing decoder-only for efficiency. This is a design choice, not a weakness.
+- **Strength Finder strengths that are generic** — none of the five listed strengths are generic; all are backed by specific tables/evidence. All retained.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the cross-dataset results (Section 5.3) reveal an interesting finding that the reviewers collectively highlight: a pre-trained encoder-decoder from a VAR tokenizer, combined only with a transplanted VQ module and minimal decoder adaptation, achieves state-of-the-art reconstruction on structurally distinct datasets like FFHQ and CelebA-HQ. This suggests that the VAR encoder's learned representations transfer surprisingly well across domains, and that the VQ module—rather than the encoder—may be the primary bottleneck in cross-domain generalization for discrete tokenizers. The paper could have made more of this observation.
+Beyond the paper's own contributions, the most interesting finding from the reviewer analysis is the tension between MMD-VQ's theoretical generality (demonstrated on synthetic data) and its practical redundancy with Wasserstein VQ on real benchmarks. This highlights an important pattern in visual tokenizer research: current encoder architectures produce approximately Gaussian latent features, so higher-order moment matching confers no practical benefit—but this may change as encoder architectures evolve. The paper's honest acknowledgment of this gap (Appendix) is commendable and itself a useful observation for the field.
 
 ## Suggestions
 
-1. **Add the original-VQ + decoder adaptation baseline.** Adapt the original VAR tokenizer's decoder for 5 epochs using the exact same recipe (DINO-S discriminator, DiffAug, CR, LeCAM) with the native VQ module frozen. Report rFID, r-IS, LPIPS, PSNR, SSIM. This is a straightforward experiment that would definitively answer whether the new VQ modules provide gains beyond fine-tuning alone.
-
-2. **Qualify the speedup claim.** Replace the 21.8× number in the abstract with the same-dataset comparison from Table 6, or clearly state that the comparison is against the reported cost of training VAR on OpenImages (a larger dataset) and provide the fair ImageNet-1k comparison alongside it.
-
-3. **Add a brief limitations paragraph to the main paper.** Move the key points from Appendix D (LDM-16 results, decoder pre-training requirement) into a short "Limitations" section before the conclusion.
-
-4. **Qualify "plug-and-play" language in the abstract.** Change to something like "plug-and-play integration of new VQ modules into pre-trained discrete visual tokenizers" to accurately reflect the demonstrated scope.
+1. **Widen the architecture scope.** The single most impactful revision would be demonstrating VQ-Transplant on at least one additional discrete tokenizer architecture with competitive results. This would transform the paper from "a method that works on VAR" to "a general framework."
+2. **Update the baseline comparison.** Add Infinity, UnTok, or other contemporary tokenizers to Table 2, or adjust the "near state-of-the-art" claim to be transparently specific to the VAR family.
+3. **Either strengthen MMD-VQ or demote it.** If MMD-VQ cannot be shown to outperform Wasserstein VQ on real (non-synthetic) data, it should be presented as a variant rather than a co-equal contribution.
+4. **Disclose the dataset mismatch in the cost framing explicitly.** Qualify the "95% reduction" to note that VAR trains on OpenImages while VQ-Transplant trains on ImageNet-1k.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors used:**
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| Quantize-then-Rectify (ReVQ) | 6193b311kq.md | 3.50 | Similar concept (pre-trained VAE → VQ-VAE). VQ-Transplant is more comprehensive: tests 5 VQ methods vs. 1, includes cross-dataset generalization, introduces a novel VQ method, and achieves better results. |
-| Image Tokenizer Needs Post-Training | RYHzkIqHI4.md | 4.00 | Focused on tokenizer post-training for generation. VQ-Transplant has stronger empirical validation and clearer practical value. |
-| WeTok | QteJJF57yG.md | 5.00 | New tokenizer with architectural innovations. Comparable contribution level. WeTok has breakthrough rFID (0.12) but more complex training; VQ-Transplant addresses a different problem (efficiency/reuse) with a simpler approach. |
-| VQBridge (FVQ) | juM14y0caI.md | 6.00 | Strong VQ training contribution with downstream generation results and scaling analysis. VQ-Transplant is slightly behind in thoroughness and downstream validation but addresses a complementary problem. |
-| Latent Denoising Tokenizer (L-DeTok) | 1jBsi98fVe.md | 6.50 | Well-polished, simple method with comprehensive experiments across 6 generative models. VQ-Transplant is below this level in terms of downstream validation and clarity of claims. |
-| CSVQ | b5oUWQ0ObU.md | 2.50 | VQ tokenizer with codebook innovations. VQ-Transplant is substantially stronger in empirical scope and results. |
-| HieraTok | zj9Mm4bCAo.md | 3.00 | Multi-scale tokenizer. VQ-Transplant's framework approach and cross-dataset results represent a clearer contribution. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/.../juM14y0caI.md` (VQBridge) | 6.00 | Stronger evaluation breadth (multiple architectures, downstream generation) but less novel core framing. VQ-Transplant is more novel but less thoroughly validated → score should be lower |
+| `/home/.../6193b311kq.md` (ReVQ) | 3.50 | Also leverages pretrained models for efficient VQ training; was rejected for limited novelty and cost-accounting issues. VQ-Transplant is better motivated and more novel → score should be significantly higher |
+| `/home/.../RYHzkIqHI4.md` (Image Tokenizer Post-Training) | 4.00 | Also uses a two-stage training scheme with post-training decoder adaptation. VQ-Transplant has clearer presentation and more systematic evaluation → score should be higher |
+| `/home/.../QteJJF57yG.md` (WeTok) | 5.00 | Stronger empirical SOTA results but similar novelty concerns. VQ-Transplant's framework contribution is more novel, but WeTok's empirical evaluation is stronger → comparable |
+| `/home/.../1jBsi98fVe.md` (Latent Denoising Tokenizer) | 6.50 | Comprehensive evaluation across 6 generative models with downstream generation results. VQ-Transplant's evaluation is substantially narrower → score should be lower |
+| `/home/.../3u5Ti1CfzE.md` (RLBenchNet) | 2.00 | Very low-scoring paper with different topic. Not directly comparable but establishes the low end of the distribution |
 
-VQ-Transplant sits between the ReVQ/Image-Tokenizer-Post-Training tier (~3.5–4.0) and the VQBridge/L-DeTok tier (~6.0–6.5). It is clearly stronger than the rejected papers in the 3.0–4.0 range but lacks the downstream validation and claim-discipline of the 6.0+ papers. It is most comparable to WeTok (5.00) in overall contribution quality, though the two papers make different types of contributions. The framework addresses a real practical need, the empirical results are solid, and the MMD-VQ synthetic experiments are well-executed. However, the missing baseline, inflated speedup claims, and overstated generality prevent a higher score.
-
-**Originality:** The framework concept of decoupling VQ from encoder-decoder training is a fresh angle on a known problem. MMD-VQ is a modest but well-motivated extension of distribution-aligned VQ.
-
-**Importance:** The problem—enabling VQ research under resource constraints—is real and practically important. The framework genuinely lowers the barrier to experimenting with new VQ algorithms.
-
-**Claim support:** Claims are mostly well-supported, but the speedup claim conflates datasets and the "plug-and-play" generality is not fully demonstrated. The missing baseline weakens confidence in the VQ-module-specific claims.
-
-**Soundness:** Experimental methodology is generally sound. The synthetic experiments in Appendix B are particularly well-designed. The LDM-16 results are honestly reported. Main weakness is the missing control experiment.
-
-**Clarity:** The paper is well-organized and well-written. Tables are informative and the two-stage framework is clearly diagrammed. A dedicated limitations section would improve clarity.
-
-**Value to community:** The framework has clear practical value for researchers who want to experiment with VQ algorithms but lack the resources to train full tokenizers. The code release further increases value.
+Relative to these anchors, the paper sits above the ReVQ/Post-Training cluster (3.5-4.0) due to a more novel core idea and cleaner execution. It sits below the VQBridge/Latent Denoising cluster (6.0-6.5) due to narrower evaluation scope and lack of downstream generation results. The closest comparator is WeTok (5.00), which also has a novel contribution with incomplete baseline comparisons. I place VQ-Transplant at the same tier: a solid paper with a good idea, clear experiments within scope, but limitations that prevent strong acceptance.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

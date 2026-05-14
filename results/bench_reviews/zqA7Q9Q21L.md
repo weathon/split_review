@@ -1,108 +1,86 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me write the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and the reviews. Let me write the final consolidated review.
 
 ## Summary
 
-This paper addresses real-time pursuit strategies in graph-based pursuit-evasion games (PEGs) under partial observability. It makes three contributions: (1) a theoretical proof that a dynamic programming (DP) algorithm yields strictly optimal strategies when the evader moves asynchronously (seeing the pursuer's action first), (2) a belief preservation mechanism that extends DP-based policies to the partially observable setting by maintaining a distribution over possible evader positions, and (3) integration of this belief mechanism into the EPG framework to train a GNN-based pursuer policy that achieves zero-shot generalization to unseen real-world graphs.
+This paper introduces R2PS (worst-case Robust Real-time Pursuit Strategies), which combines a dynamic programming (DP) algorithm for solving Markovian pursuit-evasion games with a belief preservation mechanism for partial observability and cross-graph reinforcement learning to produce a real-time GNN-based pursuer policy. The key contributions are: (1) proving that the DP algorithm's distance table can be used to construct optimal policies under asynchronous moves by the evader, (2) proposing a belief preservation mechanism to extend DP policies to partial observability, and (3) training a cross-graph RL policy against the asynchronous-move DP evader to achieve zero-shot generalization on unseen real-world graphs.
 
 ## Strengths
 
-- **Rigorous async-move theory**: Theorem 2 and Corollary 1 provide a clean proof that the DP-induced distance table yields strictly optimal strategies for both pursuer and evader under asynchronous moves. Lemma 1 establishes the minimax structure of the DP table, and Theorem 3 characterizes when capture is impossible. This is a non-trivial extension of prior DP analysis.
+- **Novel combination of ideas to address a practical problem**: The paper is the first to combine worst-case robustness (via DP-guided adversarial training), partial observability (via belief preservation), and real-time applicability (via GNN-based cross-graph RL) in graph-based pursuit-evasion games. The empirical results (Table 2) are striking — the R2PS policy consistently outperforms the PSRO baseline, often by 50–100 percentage points against the asynchronous-move DP evader on real-world graphs like Scotland-Yard (0.76 vs 0.00), Times Square (0.95 vs 0.04), and Sydney Opera House (0.95 vs 0.11).
 
-- **Belief preservation mechanism is principled and practical**: The belief update (Eq. 7) provides an efficient Õ(|V|) per-timestep method to track evader position uncertainty without the exponential blowup of full history tracking. Lemma 2 guarantees that when observability is unlimited, both the position-set policy and belief-averaged policy reduce to the provably optimal perfect-information policy. Empirically, belief averaging (DPbelief) consistently and substantially outperforms the naive position-set minimax policy (DPPos) across all test graphs (Table 1).
+- **Strong empirical evaluation**: The paper evaluates across 10 test graphs (including real-world locations), 4 evader types (including a best-responding evader), multiple observation ranges, and provides ablations on belief update frequency, pursuer numbers, and inference time. The training set of 300 graphs is reasonably large for a cross-graph generalization study.
 
-- **Effective zero-shot generalization**: The combination of belief preservation with cross-graph EPG training yields a GNN policy that, trained on synthetic and random graphs (never seeing test graphs), consistently outperforms PSRO trained directly on the test graphs against multiple evader strategies including the provably optimal DPasync evader (Table 2). Performance also scales well with more pursuers (Table 8) and larger observation ranges (Table 7).
+- **Practical real-time capability**: The GNN policy achieves inference times of <0.01 seconds on GPU vs 33–139 seconds for DP recomputation on large graphs (Table 3), which is a practically meaningful improvement for dynamic environments.
 
-- **Strong empirical efficiency**: The GNN policy runs in O(n²m) per timestep, achieving ~0.01s inference on graphs with ~2000 nodes versus >100s for DP recomputation (Table 3). This makes real-time pursuit feasible on dynamically changing graphs.
-
-- **Thorough ablations**: Table 4 demonstrates that belief updates are crucial (reducing update frequency sharply degrades performance), and that incorporating known opponent policy further improves success. Table 7 shows monotonic improvement with observation range, confirming the policy can leverage better sensing without retraining.
+- **Sound theoretical core for the synchronous/asynchronous DP connection**: The core theoretical claim — that the same DP distance table yields optimal policies under both synchronous and asynchronous moves — is correct. The proof of the pursuer side of Theorem 2 is rigorous, and the evader-side proof can be corrected with a simple inequality direction fix.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **"Worst-case robust" framing conflates theoretical and empirical contributions**: The theoretical guarantees (Theorem 2, Corollary 1) apply to the asynchronous-move, perfect-information setting. The extension to partial observability via belief preservation is empirically validated — the paper explicitly acknowledges the distance table becomes "an optimistic estimator" under partial observability (Section 5.1). However, the title, abstract, and conclusion repeatedly use "worst-case robust" language for the partially observable setting without clearly separating the proved (async-move) from the empirical (partial observability) claims. The empirical evidence against DPasync and BRasync is strong, but the framing should be more precise about where theoretical guarantees end and empirical validation begins.
+- **Overclaimed "worst-case robust" label for the partial observability setting**: The paper explicitly acknowledges (lines 609–612) that the DP distance table "becomes an optimistic one under partial observability" — i.e., it underestimates the true worst-case capture time. This directly contradicts the concept of worst-case robustness. The belief-averaged policy (6) and the uniform-belief default are heuristics with no theoretical guarantee. The paper should be upfront about this gap rather than claiming "worst-case robust pursuit strategies under partial observability" in the title and abstract. The empirical results are strong, but they support a well-engineered heuristic approach, not a worst-case guarantee.
+
+- **Missing evaluation against a partially observable optimal/approximate-optimal evader**: The evader tested against always has full observability. For a paper claiming "worst-case robust" strategies under partial observability, the absence of a partially observable optimal evader (or a reasonable approximation thereof) is a significant gap. The BRasync evader is the closest to a worst-case test, but it is trained against the specific RL pursuer, not optimal for the partially observable setting.
 
 ### Minor
 
-- **PSRO baseline details are sparse**: The PSRO comparison uses 10 iterations × 10k episodes on each test graph. While this serves the valid purpose of demonstrating that zero-shot cross-graph generalization beats per-graph training, the paper does not report PSRO hyperparameters, network architecture, or population size. PSRO is known to need careful tuning and more iterations can help. However, this does not threaten the core claim — the paper's contribution is zero-shot generalization, and PSRO's scaling limitations in large state spaces are well-documented.
+- **Inequality direction error in the evader-side proof of Theorem 2** (Appendix A.3, lines 1219–1224): The proof states that Lemma 1 implies D(sp, se) ≥ D(np, ν*(sp, se, np)) + 1 for all np. The correct inequality from Lemma 1 is D(sp, se) ≤ D(np, ν*(sp, se, np)) + 1 (since min_x f(x) ≤ f(x_0) for any x_0). The conclusion is still correct when the inequality is flipped, but the proof as written is invalid. This is a fixable typo-level error, not a structural flaw, but it does indicate the proof needs a correction.
 
-- **Belief update uses a uniform evader transition model**: When the evader's policy is unknown, the belief propagation (Eq. 7) assumes uniform movement to neighbors. The paper acknowledges this (line 440-441) and shows that knowing the true opponent policy improves results (Table 4, "Known Opponent" column). While the uniform assumption works well in practice, a brief analysis or empirical test of how the approximation error behaves under strategically evasive evaders (e.g., those that move to maximize pursuer uncertainty) would strengthen understanding of the mechanism's limits.
+- **Heuristic belief update lacks justification**: The uniform distribution over Neighbor(v) when ν(v) is unknown (line 441) is presented without justification, yet Table 4 shows that replacing it with the actual evader policy ("Known Opponent") significantly improves results (e.g., Scotland-Yard: 0.73→0.99, Downtown: 0.92→1.00). This undermines the claim that the uniform default is a principled choice.
+
+- **Claim about "exponential level" improvement from cross-graph training** (lines 518–526) is speculative. The spinning tops analogy from Czarnecki et al. (2020) is invoked without establishing that PEGs have the required transitivity structure. This should be presented as intuition/hypothesis, not as a claimed contribution.
+
+- **BRasync training convergence**: The paper claims BRasync is "converged" after 30,000 episodes but provides no empirical evidence (learning curve, exploitability measurement) to support this. Given that BRasync is used as a proxy for the worst-case evader, this evidence would be valuable.
 
 ### Trivial
 
-- The paper would benefit from a clearer separation in the introduction between which claims are theoretically proved (async-move optimality) and which are empirically demonstrated (partial observability robustness).
+- The "Shortest Path DP DP Pos belief" header in Table 1 is confusing — the columns are not clearly labeled which strategy corresponds to which column.
+- The comparison of DP compute time (2 minutes) vs RL inference (<1 second) is apples-to-oranges since DP computes a full solution while RL runs a single forward pass. This comparison is fine as a practical motivation but should not be presented as a direct competition.
 
 ## Nice-to-Haves
 
-- A small-scale comparison against a true POMDP/POSG solver (e.g., POMCP) on small graphs could help contextualize how close the belief-averaged DP policy is to optimal under partial observability, even if only on toy instances.
-- Visualizations of belief evolution during pursuit (how the belief distribution shrinks upon observation and expands when unobserved) would help readers build intuition for the mechanism.
-- A discussion of whether the uniform belief assumption could be replaced with a learned belief updater in future work.
+- Test against a partially observable optimal evader (or a strong approximate one) to make the "worst-case robust" claim more substantiated.
+- Provide exploitability or best-response value gap measurements rather than just success rates, to give a more rigorous measure of worst-case performance.
+- Ablate the belief mechanism for the RL policy (the paper only ablates it for DP policies in Table 1).
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
+- **"DP policies cannot be optimal under async moves because DP was designed for sync moves"**: This criticism misreads the paper's contribution. Theorem 2 correctly proves that the same D table induces optimal policies under async moves. The proof has a minor inequality direction error (documented above), but the claim is fundamentally sound. The harsh critic's argument about "different information structure" ignores that the proof directly accounts for the evader's information advantage (ν* takes np as input).
 
-- **Harsh Critic: "No proof that the resulting policy is robust against an evader that optimally exploits the pursuer's partial observability"** — REMOVED. The paper never claims theoretical optimality under partial observability. It explicitly states the distance table becomes an "optimistic estimator" (line 610). The empirical evaluation uses BRasync (best response directly trained against the RL policy) as a strong adversarial test.
+- **"The paper never clarifies how np is perceived/predicted by the evader"**: The paper explicitly states (lines 297–298) that np is "perceived or predicted by the evader in advance." This is sufficient for a game-theoretic model — the evader observes the pursuers' action before deciding.
 
-- **Harsh Critic: "PSRO severely undertrained / 10 iterations is insufficient to reflect true potential"** — REMOVED as a major criticism. PSRO's scaling limitations are well-known. The comparison serves a specific purpose: demonstrating that zero-shot cross-graph generalization outperforms direct per-graph training. The paper should include more PSRO configuration details (raised as minor), but the comparison is not fundamentally unfair.
+- **"No proof that asynchronous-move policies are actually optimal"**: Theorem 2 (with the corrected inequality) provides exactly this proof. The harsh critic's objection is based on misreading the proof.
 
-- **Harsh Critic: "Technical novelty beyond EPG is modest / belief update is simplistic"** — REMOVED as a standalone criticism. Building on prior work is standard practice, and simplicity that works efficiently is a feature. The async-move theoretical analysis is a genuine novel contribution, and the belief mechanism enables partial observability handling that EPG alone does not address.
+- **"Missing related work / first claim not substantiated"**: The paper cites existing works (Horak & Bošanský 2017, Lu et al. 2025a, etc.) and positions its contribution relative to them. I cannot verify whether other related works were missed.
 
-- **Harsh Critic: "No ablation showing the effect of cross-graph diversity"** — REMOVED. This is scope creep; the paper already has substantial ablations (belief update frequency, known opponent, observation range, pursuer count).
-
-- **Harsh Critic: "Missing comparisons with POMCP-style approaches on smaller graphs"** — MOVED to Nice-to-Haves. While such a comparison would be informative, it is not standard to require POMDP solver comparisons for a paper whose primary contribution is in graph-based PEGs with RL generalization.
-
-- **Strength Finder: "Comprehensive experiments across 10 real-world graphs"** — KEPT as part of "Effective zero-shot generalization" strength. This is well-supported.
-
-- **Harsh Critic: "The RL training pipeline (Section 4) is directly adopted from EPG"** — REMOVED as a criticism. The paper explicitly credits EPG and uses it as a framework. The contribution is extending EPG to handle partial observability via belief preservation, which EPG did not address.
-
-- **Harsh Critic: "No formal bound or analysis of belief-update approximation error"** — PARTIALLY KEPT (as minor). The paper acknowledges the uniform assumption and tests against known opponent policy. A formal analysis would be nice but is not essential for an empirical systems contribution. The harsh critic's framing of this as a fatal gap is removed.
+- **Formatting/style nitpicks, parser artifacts**: Removed per instructions.
 
 ## Novel Insights
 
-The paper's demonstration that a simple uniform belief-propagation mechanism, when combined with DP-derived distance tables and cross-graph adversarial RL, achieves strong zero-shot generalization under partial observability is genuinely interesting. It suggests that in graph-based PEGs, the perfect-information DP solution contains enough structural information that even a coarse belief approximation can effectively guide pursuit under limited observability — the distance table, though an "optimistic estimator" under partial observability, apparently provides a useful signal when averaged over likely evader positions.
+The harsh critic's most substantive observation — that the inequality direction in the evader-side proof of Theorem 2 is reversed — is a genuine finding. However, the conclusion that this "invalidates the paper's claim" overstates the issue; the proof is fixable with a simple direction flip and the theorem itself remains correct. This pattern (a real but non-fatal mathematical error being presented as a structural invalidation) runs through several of the critic's points: the paper undeniably overclaims on "worst-case robustness" under partial observability, but the actual method is a well-motivated heuristic with strong empirical support, not a fraudulent claim.
 
 ## Suggestions
 
-- Revise the title, abstract, and introduction to clearly delineate: (a) what is theoretically proved (async-move optimality under perfect information), and (b) what is empirically demonstrated (robustness under partial observability). Consider phrases like "empirically worst-case robust" for the partially observable setting.
-- Add PSRO configuration details (network architecture, population size, hyperparameters) to Appendix C, even if brief, so readers can assess the fairness of the comparison.
-- Consider adding a brief discussion (even one paragraph) about when the uniform belief assumption might fail — e.g., against an evader that deliberately exploits the pursuer's belief model to create uncertainty.
+1. Correct the inequality direction in the evader-side proof of Theorem 2 (change ≥ to ≤ throughout lines 1219–1224).
+2. Tonedown the "worst-case robust" framing for the partial observability setting. Either (a) title it more cautiously (e.g., "towards worst-case robust..." or "Empirically Robust..."), or (b) provide a formal discussion of why the optimistic D table can still yield empirically conservative policies.
+3. Add a best-response convergence curve or exploitability metric for BRasync to substantiate the "converged" claim.
+4. Remove or qualify the speculative "exponential level" improvement claim.
+5. Clearly separate the "heuristic" nature of the belief update from the provably optimal async-move DP result.
+6. Label Table 1 columns more clearly.
 
----
+## Score and Decision
 
-## Score Calibration
+**Calibration anchors** (from `calibration_search` batch):
 
-**Anchor papers considered:**
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/vRwuBOxbsJ.md` | 5.20 (Accept Poster) | Similar level: theory + experiments on game-theoretic problems with imperfect info. The football paper has cleaner theory but narrower experiments. R2PS has stronger experiments but a proof typo. Comparable quality overall. |
+| `/home/wg25r/review_agent/human_reviews_2026/qtjAiNYLBw.md` | 4.00 (Reject) | Distributional RL under partial observability. Had unclear writing, insufficient experiments. R2PS is clearer and more empirically thorough. |
+| `/home/wg25r/review_agent/human_reviews_2026/XXNexSaay2.md` | 5.50 (Accept Poster) | Strong theory paper on multi-player deviations. R2PS has less theoretical depth but significant practical contribution and experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/ddRfkfiMsf.md` | 4.00 (Reject) | Incremental theory on FLBR dynamics. R2PS has more novelty and practical relevance. |
+| `/home/wg25r/review_agent/human_reviews_2026/tpjCWgyE6j.md` | 6.00 (Withdrawn→Reject) | Policy regret in POMGs. Pure theory paper. R2PS is stronger on empirical validation but weaker on theory. |
 
-| Path | Avg Score | Comparison to paper under review |
-|------|-----------|----------------------------------|
-| QEcSLhfOoQ (Minimax Optimal Adversarial RL) | 6.50 | Stronger theory (matching bounds) but less practical; our paper has weaker theory but stronger empirical results — slightly below |
-| vRwuBOxbsJ (Solving Football, 2p0s Diff Games) | 5.20 | Similar pattern of theory + practical gains; our paper has clearer contributions and stronger empirical evidence — above |
-| tpjCWgyE6j (Policy Regret in POMGs) | 6.00 | Technically dense theory paper; our paper has complementary strengths (practical method vs. pure theory) — comparable |
-| SwWxnZvgF4 (RL for Saddle-Point Equilibria) | 3.00 | Limited setting and novelty concerns; our paper clearly above |
-| S0jIiiMtf4 (Infinite Horizon Markov Economies) | 6.00 | Theoretical framework with practical demonstration; our paper has more direct empirical validation — comparable |
-| 61jN0L0aoJ (Beyond Minimax Diff Games) | 3.50 | Single case study, limited contribution; our paper clearly above |
-| NtGE93iQXd (Robust Multi-Objective Optimization) | 2.50 | Flawed methodology; our paper clearly above |
+The paper sits between the 4.00 (reject) and 5.20–5.50 (accept) anchors. It has a clear practical contribution, novel problem framing, and strong experiments, but is held back by overclaiming ("worst-case robust" for a heuristic approach to partial observability) and a minor proof error. I place it at the lower end of the accept range.
 
-The paper under review has a solid theoretical result (async-move optimality), an effective practical mechanism (belief preservation), and strong empirical validation (zero-shot generalization across unseen graphs). The primary weakness — imprecise framing of "worst-case robust" across proved and empirical claims — is addressable. This positions the paper in the 6.0 range, comparable to accepted posters like QEcSLhfOoQ (6.50) and S0jIiiMtf4 (6.00), and clearly above the rejected papers in the 2.5–3.5 range.
-
-**Originality**: The async-move optimality proof and belief preservation for partial observability in graph-based PEGs are genuinely novel. The integration with EPG is a natural but non-trivial extension.
-
-**Importance**: Real-time pursuit under partial observability is a practically important problem for security applications. The paper addresses a clear gap: existing RL methods for PEGs assume perfect information or do not generalize across graphs.
-
-**Claims supported**: The theoretical claims are well-proved. The empirical claims are well-supported by experiments against strong adversaries (DPasync, BRasync) across diverse test graphs. The "worst-case robust" framing under partial observability is empirically supported but the paper could more precisely separate proved claims from empirical claims.
-
-**Soundness**: The theoretical analysis is rigorous. The experimental design is reasonable. The PSRO comparison could be strengthened with more configuration details.
-
-**Clarity**: The paper is generally well-written and organized. The main improvement needed is clearer separation of theoretical vs. empirical contributions in the framing.
-
-**Value to community**: The belief preservation mechanism provides a practical template for handling partial observability in graph-based adversarial settings. The async-move analysis closes a gap in the theoretical understanding of DP-based PEG solutions.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

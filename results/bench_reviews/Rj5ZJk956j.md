@@ -1,104 +1,92 @@
-Now I have enough information to produce the final consolidated review. Let me synthesize everything.
+Now I have everything I need. Here is my consolidated meta-review:
 
 ---
 
 ## Summary
 
-This paper introduces a weight-based method for classifying the read-write (RW) functionality of gated neurons in transformer MLPs, using cosine similarities between input, output, and gate weight vectors. The method yields a taxonomy of neuron types including *strengthening*, *weakening*, and *conditional strengthening* neurons. The authors discover a small class of weakening neurons (cos(w_in, w_out) ≈ −1) that activate frequently and have an outsize influence on model behavior. Across 12 LLMs, they find a universal layer-wise pattern: early-middle layers are dominated by conditional strengthening neurons, while late layers contain proportionally more weakening neurons. They also introduce *conditional ablation* to isolate the effect of specific activation-sign regimes, revealing that much of the weakening neurons' influence comes from cases with negative gate values — a previously unrecognized functional mechanism in Swish-activated transformers.
+This paper introduces a weight-based cosine-similarity method for analyzing gated neurons (SwiGLU/GEGLU) in transformers. By computing cosine similarities between the gate (w_gate), input (w_in), and output (w_out) weight vectors, the authors define a taxonomy of "read-write" (RW) functionalities—including "weakening" neurons (where w_in and w_out are negatively correlated) and "conditional strengthening" neurons. The key findings are: (1) median cos(w_in, w_out) follows a consistent positive-to-negative trajectory across layers in 12 LLMs, (2) a small class of ~243 weakening neurons (in OLMo-7B) has outsized influence on attribute rate and output entropy when ablated, and (3) part of this influence is driven by a mechanism involving negative gate values (x_gate < 0), which were previously assumed unimportant for model functionality. The paper also introduces conditional ablation as a methodological contribution.
 
 ## Strengths
 
-- **Novel taxonomy grounded in weight geometry.** The method of classifying neurons by cosine similarities between their weight vectors (w_in, w_out, w_gate) is simple, principled, and yields a clean, reproducible classification scheme (Table 1, Figure 2). It fills a gap in the literature, where most neuron analysis has focused on either input contexts or output weights in isolation, not the relationship between them.
+- **Cross-model consistency of the strengthening-then-weakening pattern.** The median cos(w_in, w_out) across layers follows the same trajectory in all 12 models studied (Figure 1a, Figure 40)—positive in early-middle layers, crossing to negative in late layers. This is a novel, clean empirical finding obtained with a simple weight-only method, demonstrated across OLMo, Llama, Gemma, Mistral, Qwen, and Yi families.
 
-- **Discovery of weakening neurons with validated outsize influence.** Zero-ablating all 243 weakening neurons in OLMo-7B substantially affects attribute rate and next-token entropy, while ablating an equal number of random neurons from the same layers has negligible effect (Figure 3). The mean ablation results (Section F.4) provide convergent evidence. This is a genuinely surprising and well-demonstrated finding.
+- **Ablation evidence that a small neuron class has outsized influence.** Zero-ablating only 243 weakening neurons (out of tens of thousands) produces large, asymmetric effects on attribute rate and output entropy, while ablating the same number of random neurons from the same layers has negligible effect (Figure 3a,b). Other RW classes (conditional strengthening, conditional weakening, proportional change) show no comparable impact, establishing that this class is functionally distinct.
 
-- **Conditional ablation technique and negative-gate mechanism.** The conditional ablation method (Section 6.2) is an elegant technical contribution that isolates the effect of specific activation-sign patterns. The finding that negative gate values drive much of the sharpening effect of weakening neurons (Figure 3b, bottom-left subplot) is novel and challenges the common assumption that negative gate values are merely useful for training dynamics. The case study of neuron 31.9634 (Section 8) corroborates this finding at the individual neuron level.
+- **Conditional ablation as a methodological contribution.** The paper introduces a technique to ablate only activations satisfying specific sign conditions on x_gate and x_in, enabling attribution of neuron effects to particular activation regimes. This goes beyond standard ablation and is reusable by other interpretability work.
 
-- **Cross-model universality of layer-wise patterns.** Figure 1(a) convincingly demonstrates that the median cos(w_in, w_out) transitions from positive to negative across layers in nine different LLMs of varying architectures and scales. This is a robust empirical regularity that any theory of MLP computation must account for.
+- **First evidence of a mechanism involving negative gate values.** Using conditional ablation, the paper shows that the entropy-sharpening effect of weakening neurons is largely driven by the case x_gate < 0 and x_in < 0 (leading to x_post > 0). This is surprising because negative gate values were widely assumed to be negligible for model functionality beyond training dynamics. The finding is corroborated by a concrete case study (Section 8) and the concurrent citation of Kong et al. (2025) supports the timeliness of this observation.
 
-- **Strong negative correlation between cos(w_in, w_out) and activation frequency.** Section 7 shows near-linear negative correlations (e.g., r = −0.97 at layer 15) between a neuron's weight geometry and how often it activates, extending prior findings from GELU models to gated activation functions. This provides an elegant link between static weight structure and dynamic behavior.
+- **Honest reporting of limitations.** The paper explicitly acknowledges that many neurons are not prototypical (Section 4.2), that the weakening neuron is hard to interpret in its positive-gate regime (Section 8), and that mean ablation produces different results (Appendix F.4).
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Ablation experiments do not fully control for activation frequency as a confound.** Table 5 shows that weakening neurons activate much more frequently (mean 0.691) than random neurons (0.384) or conditional strengthening neurons (0.132). Any frequently activating neuron will have a larger effect when zero-ablated, so the observed difference in attribute rate and entropy could be partially attributable to frequency rather than the weakening class *per se*. The paper acknowledges this in Section 7 ("activation frequencies do not fully explain their effect") and the conditional ablation results (showing effects from rare negative-gate activations) partially mitigate the concern, but a direct control — e.g., ablating a set of high-frequency non-weakening neurons — would substantially strengthen the claim. This does not invalidate the core contribution but leaves an alternative explanation partially open.
+- **Behavioral (causal) experiments performed on only one model (OLMo-7B).** The weight-based analysis (Section 5) convincingly covers 12 models. However, all ablation experiments (Section 6), entropy analysis, conditional ablation findings, the case study (Section 8), and activation frequency results (Section 7) come from OLMo-7B on its training distribution (Dolma). The paper explicitly acknowledges this ("to save resources, we focus on a single model"), but its central causal claims—that weakening neurons have "outsized influence" and that negative gate values encode functionality—are supported only by single-model evidence. Without replication on at least one additional model (e.g., Llama-3.2-3B, which has similar weight patterns), it is unclear whether these behavioral properties are general or idiosyncratic to OLMo. This substantially limits the generality of the paper's headline claims.
+
+- **Absolute entropy values not reported, making effect magnitudes uninterpretable.** The y-axis of Figure 3(b) shows entropy differences (clean minus ablated) of up to ~10 nats. Without reporting the absolute entropy of the clean model's output distribution, the reader cannot assess whether a 10-nat difference represents a meaningful sharpening or a catastrophic collapse into a degenerate regime. This is a significant evidential gap for a central quantitative claim.
 
 ### Minor
 
-- **The mapping from weight cosine similarity to functional "read-write" behavior has an interpretive gap.** The paper classifies neurons based on static weight geometry and then uses functional-sounding labels (strengthening, weakening). The authors are appropriately careful: they explicitly state that the semantic interpretation is "not a necessary assumption" and is "helpful for building intuition" (Section 4.1). The ablation experiments provide causal evidence that the weakening *class* matters, but they do not directly demonstrate that individual strengthening neurons actually strengthen their detected directions during inference, nor that weakening neurons weaken them. This gap between geometric classification and operational function is acknowledged but not fully bridged. The case studies (Section 8) are helpful but qualitative and limited to two neurons.
+- **The "weakening" label is potentially misleading.** The paper's own key finding (Section 6.2) is that the most important behavioral effect of weakening neurons—sharpening the output distribution—is driven by case (iii) where x_gate < 0, in which the neuron "takes on a strengthening behavior" (the negative gate flips the effective sign). The paper concedes that in the positive-gate regime (which is more frequent), weakening neurons are "much harder to interpret" (Section 8). While the naming is geometrically motivated (cos(w_in, w_out) < 0), it creates a persistent dissonance between the label and the mechanism driving the paper's most striking result. A more descriptive geometric term (e.g., "negatively collinear neurons") would better serve clarity.
 
-- **The cosine-similarity threshold τ = 0.5 is arbitrary and its robustness is not explored.** The classification into prototypical categories depends on a hard cutoff at ±0.5. No sensitivity analysis is provided to show whether the main findings (late-layer weakening dominance, class distribution) are stable under different thresholds, or whether a continuous treatment would be more appropriate. Given that the paper also presents continuous analyses (Figures 1a, 2, 4), this is not a fatal issue, but the claimed class sizes and distributions should be interpreted with appropriate caution.
+- **Conditional ablation definitions depend on the preprocessing convention.** The four cases in Section 6.2 (e.g., "gate+_post+") are defined relative to the preprocessed weights (multiplying w_in and w_out by sign(cos(w_gate, w_in))). As the paper notes in Appendix C, without this preprocessing the equivalent conditions would need to reference the sign of cos(w_gate, w_in). While the symmetry argument is valid and the preprocessing does not change model behavior, this dependence means the ablation conditions are not uniquely determined by model parameters alone—they are a joint property of the model and the convention. This is not a fatal flaw but should be more prominently acknowledged.
 
-- **Functional ablation is limited to a single model (OLMo-7B).** The universality claims are geometric (cross-model consistency of weight cosine patterns), and these are well-supported by Figure 1. The functional claims about weakening neuron influence are demonstrated only on OLMo-7B. Extending ablation experiments to one or two additional models would strengthen the generality of the functional findings, though the paper's main contribution does not rest on cross-model functional claims.
+- **Threshold τ = ±0.5 for classification is arbitrary.** The paper acknowledges that "many cosines will not be close to 0 or ±1" but does not analyze sensitivity of the main conclusions to this threshold. The "atypical" subcategories partially address this, but the core classification into weakening vs. strengthening depends on a single hyperparameter without principled justification. Given the small absolute count of weakening neurons (243 in OLMo-7B), small threshold changes could materially affect the set.
+
+- **Activation frequency finding does not control for confounds.** The strong negative correlation between cos(w_in, w_out) and activation frequency (Table 5, Figure 4) replicates Gurnee et al. (2024)'s finding on gated architectures. However, the paper does not control for layer depth, which independently correlates with both variables (weakening neurons concentrate in late layers, and activation patterns differ by layer). The claim that this "explains" weakening neurons' influence is therefore speculative.
 
 ### Trivial
 
-- The paper could benefit from reporting statistical tests or confidence intervals for the ablation results, though single-run evaluation is standard in this subfield and the effects shown are substantial enough to be convincing without formal tests.
+None that survive filtering.
 
 ## Nice-to-Haves
 
-- An ablation control matching on activation frequency (e.g., selecting the top-N most frequently activating neurons that are *not* weakening neurons, and ablating those) would elegantly rule out the frequency confound.
-
-- Sensitivity analysis varying τ from, say, 0.3 to 0.7 to assess the stability of the weakening-neuron count and layer distribution.
-
-- Extending the conditional ablation analysis to other neuron classes (e.g., conditional strengthening) to see whether negative-gate effects are unique to weakening neurons or a more general phenomenon.
-
-- A systematic rather than case-study-based check of whether weight-based classifications correspond to activation-level behavior across a larger sample of neurons.
+- Report absolute entropy values for the clean model alongside ablation differences to make effect magnitudes interpretable.
+- Replicate the core ablation experiments (at least for entropy and conditional ablation) on one additional model (e.g., Llama-3.2-3B) to establish generality.
+- Consider renaming "weakening" to a geometrically descriptive term (e.g., "negatively collinear") and treating the sign-dependent functional interpretation separately.
+- Analyze sensitivity of the neuron taxonomy to the classification threshold τ.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+- **Criticism that the taxonomy depends on an arbitrary sign convention and is not invariant.** REMOVED as factually wrong regarding the primary classification: the weakening/strengthening distinction is based on cos(w_in, w_out), which is invariant under the simultaneous flip of w_in and w_out. The preprocessing only affects scatter plot positioning and the conditional ablation case definitions, which the paper transparently documents. The taxonomy itself (based on cos(w_in, w_out) < -0.5) is unaffected.
 
-**1. Preprocessing sign-flip concerns (from Harsh Critic):** The critic claimed the preprocessing step (multiplying w_in and w_out by sign of cos(w_gate, w_in)) disrupts classification because it can flip cos(w_gate, w_out). This is directly addressed in Section C of the paper. The preprocessing is a symmetry property that does not change model behavior (the two sign flips cancel in the product). The paper explicitly shows (Figure 5 vs. Figure 2) that without preprocessing, weakening neurons split into two equivalent clusters. The preprocessing unifies functionally equivalent representations. The classification is performed on preprocessed weights by design, and the justification is clearly provided. **Removed because the paper already addresses this concern thoroughly.**
+- **Criticism that the paper should not be accepted in its current form due to structural issues with taxonomy.** REMOVED as it overstates the severity of the preprocessing concern, which is a transparent convention with a valid symmetry argument.
 
-**2. Case study "cherry-picking" and contradiction criticism (from Harsh Critic):** The critic claimed that the weakening neuron case study is cherry-picked and that the neuron's activations "contradict the simple weakening hypothesis." In fact, the paper itself states that the weakening neuron "is much harder to interpret" and that the most interpretable activations occur specifically in the negative-gate regime. The paper is honestly reporting complexity, not hiding it. The case study corroborates the conditional ablation findings rather than undermining them. **Removed because the critic's characterization misrepresents what the paper actually says.**
+- **Various formatting and style nitpicks.** Removed per instructions (parser artifacts).
 
-**3. Demand for functional validation of the semantic interpretation:** The critic demanded that the paper demonstrate that strengthening neurons actually "increase the targeted direction in the residual stream during inference." The paper explicitly states in Section 4.1 that the semantic/concept interpretation "is not a necessary assumption for our neuron classification" — the classification describes mathematical RW functionality (what direction gets added/subtracted), which follows directly from the weight geometry. The ablation experiments validate that the classification captures functionally meaningful groupings. **Removed because the paper is appropriately scoped and does not overclaim semantic interpretability.**
+- **Criticism about missing appendix content.** Removed per instructions (parser strips appendix content; it exists in the original submission).
 
-**4. "Universality claims without functional validation" (Harsh Critic):** The critic claimed the paper asserts functional universality without evidence. The paper's universality claim is about the geometric pattern (cosine similarity distributions), which is demonstrated across 9 models in Figure 1(a). The paper does not claim functional universality across all models — functional claims are tied to OLMo-7B ablation experiments. **Removed because the criticism conflates geometric and functional claims.**
-
-**5. Strength Finder - "publicly available models and data" as a strength:** While true, this is a generic characteristic of most modern ML papers and does not constitute a distinctive strength. **Dropped as superficial.**
-
-**6. Strength Finder - "methodological contribution of conditional ablation beyond this paper":** While the conditional ablation method is nice and useful, calling it a standalone methodological contribution is somewhat generous — it is a straightforward conditioning on activation signs. **Weakened and folded into the associated strength about the negative-gate finding.**
+- **Strength Finder's generic/conflicting strengths.** Filtered: strengths that were purely generic ("this paper addressed an important problem") or that conflict with verified weaknesses have been removed or merged into the main strengths above.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an interesting tension: weight-geometric regularities that are clearly non-random (Figures 1, 2) and correlate with functional importance (Figure 3) but whose precise mapping to neuron-level operational semantics remains partially opaque. This mirrors a broader challenge in mechanistic interpretability — the gap between structure (weights/geometry) and function (causal role) — and the paper's honest treatment of this gap (acknowledging complexity in the weakening neuron case study, not overclaiming semantic content) is a methodological strength. The finding that negative gate values carry functional signal in trained models also independently corroborates and extends concurrent work (Kong et al., 2025; the "Negative Pre-activations Differentiate Syntax" paper from the anchors), suggesting that smooth activation functions are not merely training-dynamics conveniences but are actively exploited for computation.
+The reviews surface an interesting tension in the paper between its two contributions. The weight-based cross-model analysis (Section 5) is clean, well-evidenced, and stands independently: the observation that median cos(w_in, w_out) transitions from positive to negative across layers in every model studied is a genuinely robust finding. However, the paper's more ambitious claims about "discovering" weakening neurons as a distinct functional class with a "newly observed mechanism" involving negative gate values rest on a much narrower evidential base (one model, ablation-sensitive, naming-convention-dependent). This creates an asymmetry where the strongest contribution (the geometric cross-model pattern) is underemphasized relative to the weaker one (the functional interpretation). The reviews collectively suggest that the paper would be strengthened by promoting the cross-model geometric finding as its primary contribution and treating the functional claims about weakening neurons as promising but preliminary.
 
 ## Suggestions
 
-- The most impactful single addition would be an activation-frequency-matched baseline for the ablation experiments. This would definitively rule out frequency as the primary driver of the weakening-neuron effect and would fit naturally into the existing experimental framework.
-
-- Varying τ and reporting the stability of key findings (e.g., number of weakening neurons, layer distribution) would address concerns about the arbitrary threshold without requiring new experiments — it is a simple re-analysis of existing data.
-
-- Consider reframing some of the functional language to more precisely reflect what is demonstrated: the classification captures the *direction of residual stream updates* (which is mathematically established) rather than *concept manipulation* (which requires additional semantic validation).
+1. **Run the key ablation experiment (conditional ablation on entropy) on at least one additional model** (e.g., Llama-3.2-3B). This single addition would transform the paper's main limitation into a strength.
+2. **Report absolute entropy of the clean model** alongside the ablation differences to make effect sizes interpretable.
+3. **Consider re-labeling the taxonomy** with geometrically descriptive terms (e.g., "negatively collinear" for weakening, "positively collinear" for strengthening) and presenting the gate-sign-dependent behavior as a separate finding rather than conflating it with the name.
+4. **Analyze sensitivity of the weakening neuron count to the τ = 0.5 threshold** and report how many neurons change class under modest threshold variations.
+5. **Control for layer depth** when reporting activation-frequency correlations with cos(w_in, w_out).
 
 ---
 
-**Anchor calibration:**
+**Calibration anchors used for scoring:**
 
-- `/home/wg25r/review_agent/human_reviews_2026/RzcCrU0tXP.md` (avg 5.50, "Negative Pre-activations Differentiate Syntax"): Most directly comparable — also finds functional roles for negative activation regions in smooth-activation LLMs. Current paper has broader scope (full taxonomy, cross-model analysis, conditional ablation technique) and comparably strong evidence. Current paper rates slightly higher.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/pJoSE7Cvj0.md` | 5.00 | Achilles' Heel paper — similar genre (identifying important neuron subsets). That paper had much broader model coverage (21 models) but weaker novelty. Current paper has narrower behavioral validation but cleaner method and more surprising findings. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/JenMBia97B.md` | 5.50 | Unified neuron interpretation/control — rejected despite good motivation, due to methodological issues with the core framework. Current paper has a cleaner, more defensible method. |
+| `/home/wg25r/review_agent/human_reviews_2026/6fmQJGaA8p.md` | 5.00 | MoE MUI paper — rejected despite thorough multi-model analysis, criticized for overclaimed novelty. Current paper is comparably thorough on weight analysis but similarly limited on causal validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/0OxJ4mzaHB.md` | 4.00 | Interpretability prediction paper — weaker empirical contribution. Current paper is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/EbSkBZQF9g.md` | 0.50 | Single-layer knapsack MI — very weak evidence for strong claims. Current paper is substantially stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/tAiQpjAZ0Z.md` | 5.50 | Value-State Gated Attention — withdrawn/rejected. Comparable score range. |
+| `/home/wg25r/review_agent/human_reviews_2026/UJ2UUjT2ko.md` | 8.00 | Mixing Mechanisms — strong, well-evidenced mechanistic interpretability. Current paper is weaker on causal generalization. |
 
-- `/home/wg25r/review_agent/human_reviews_2026/v6HPsCu2R8.md` (avg 5.33, "Hedonic Neurons"): Novel MLP interpretability method with ablation validation. Current paper is similarly innovative in methodology, with stronger cross-model evidence. Comparable quality.
-
-- `/home/wg25r/review_agent/human_reviews_2026/pJoSE7Cvj0.md` (avg 5.00, "Achilles Heel of LLMs"): Finds sparse critical neurons via perturbation. Current paper provides more mechanistic depth (taxonomy, conditional ablation, negative-gate mechanism) and is more novel methodologically.
-
-- `/home/wg25r/review_agent/human_reviews_2026/mRLnS8jQWt.md` (avg 4.50, "Rethinking Layer Relevance"): Critiques cosine similarity as an interpretability metric. Current paper uses cosine similarity productively to discover new structure; substantially more novel contribution.
-
-- `/home/wg25r/review_agent/human_reviews_2026/lnTX3GoeTY.md` (avg 4.50, "Feature segregation by signed weights"): Related method using signed weights. Current paper is broader in scope and model coverage, with stronger causal evidence.
-
-- `/home/wg25r/review_agent/human_reviews_2026/Z1m2tXaH2G.md` (avg 2.50, "Revisiting LLM Pruning using NSA"): Rejected for heuristic methodology and weak validation. Current paper is substantially stronger in both methodology and validation.
-
-- `/home/wg25r/review_agent/human_reviews_2026/QCB0HN61TU.md` (avg 7.00, "Map the Flow"): Higher-scoring mechanistic interpretability work on VideoLLMs. Current paper is narrower in task scope (no downstream task evaluation) but comparably rigorous in methodology.
-
-- `/home/wg25r/review_agent/human_reviews_2026/UJ2UUjT2ko.md` (avg 8.00, "Mixing Mechanisms"): Top-tier mechanistic interpretability with clean experimental design and definitive findings. Current paper is less polished and has more open questions, but makes comparably novel discoveries.
-
-The current paper has genuine, well-supported contributions (novel taxonomy, discovery of weakening neurons, conditional ablation, universal geometric patterns, negative-gate mechanism). The main limitations — activation frequency control, threshold sensitivity, single-model ablation — are addressable and do not undermine the core claims. This places the paper solidly above the 4.0-5.0 range and comparable to the stronger 5.0-6.0 anchors. It does not reach the polish and definitiveness of the 7.0-8.0 anchors due to the remaining methodological gaps.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

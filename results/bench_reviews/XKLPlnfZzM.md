@@ -1,22 +1,20 @@
-Now I have good coverage of the paper and anchors. Let me compile the review.
+I have a thorough understanding of the paper and all reviewer claims. Here is my consolidated review.
 
 ---
 
 ## Summary
 
-The paper proposes the Temporal Deaggregation Diffusion Model (TDDM), a hierarchical diffusion framework that factorizes trajectory generation into spatial occupancy priors (where people move) and temporal dynamics (how they move). It canonicalizes geographic regions via similarity transforms, enabling a single model to generate trajectories across diverse locations. The authors evaluate on three cities across three continents, comparing against GAN-, VAE-, and diffusion-based baselines, and demonstrate strong improvements in distributional coverage metrics as well as cross-city generalization.
+This paper introduces TDDM (Temporal Deaggregation Diffusion Model), a hierarchical framework for trajectory generation that separates spatial occupancy priors ("where people go") from temporal dynamics ("how they move in time"). By conditioning a diffusion model on aggregate spatial marginals (heatmaps) rather than individual trajectory statistics, TDDM enables transfer to new geographic regions without gradient updates. The method is evaluated across three cities (Beijing, Porto, San Francisco) on six metrics, and shows improvements on distributional metrics compared to GAN-, VAE-, and diffusion-based baselines.
 
 ## Strengths
 
-- **Novel spatial-temporal factorization with explicit regional canonicalization**: The idea of decoupling spatial occupancy from temporal dynamics, combined with region-wise similarity transforms for coordinate normalization, is conceptually clean and well-motivated. Section 3 provides clear architectural and algorithmic details, and the factorization is the key driver of TDDM's empirical gains.
+- **Novel spatial-temporal factorization for controllability and transfer.** TDDM's core idea — conditioning trajectory generation on aggregate spatial marginals (heatmaps) rather than sample-specific statistics — is a genuine conceptual contribution. This decoupling means the model can generate trajectories for a new region by receiving only its occupancy heatmap, without needing individual trajectory samples for gradient-based adaptation. The city-to-city generalization results (e.g., Porto→Geolife with Pattern 0.930, TSTR 0.011) demonstrate that temporal dynamics learned in one city do transfer.
 
-- **Comprehensive evaluation across multiple quality dimensions and datasets**: The benchmark spans three cities (Beijing, Porto, San Francisco) with metrics covering fidelity (TSTR, Length Error), diversity/proportionality (KL divergences, JS, Density/Trip Error), and generalization (intra-city and city-to-city transfer). This is broader than typical trajectory-generation evaluations and reveals consistent patterns across datasets.
+- **Empirically better or competitive on non-confounded metrics.** On metrics not directly measuring spatial marginal similarity (TSTR: 0.011 vs 0.013 for DiffTraj; Pattern Score: 0.917 vs 0.893; Length Error: 0.004 vs 0.003 for Diffusion-TS), TDDM shows clear or competitive advantages over baselines. The ablation study cleanly attributes the spatial prior's contribution (removing it degrades KLsym from 0.277 to 1.334 while TSTR stays nearly unchanged).
 
-- **Strong empirical results**: TDDM achieves substantial improvements over baselines on distributional metrics (e.g., KLsym 0.277 vs. 1.153 for Diffusion-TS; JS 0.059 vs. 0.198) while maintaining competitive fidelity (TSTR 0.011 vs. 0.013–0.014). The ablation study (Table 2) cleanly isolates the contribution of spatial priors, showing KLsym degrades by nearly 5× when priors are removed.
+- **Thorough evaluation framework across diverse cities and metrics.** The paper establishes a standardized benchmark across three cities on three continents with six complementary metrics covering fidelity, coverage, proportionality, usefulness, and generalization. The preprocessing pipeline (map matching, resampling, canonicalization) is applied uniformly to all methods.
 
-- **Cross-city generalization**: TDDM transfers to new cities without retraining or fine-tuning, maintaining Pattern scores above 0.915 across all source-target pairs. The finding that Porto acts as a surprisingly strong universal source dataset is interesting and practically useful.
-
-- **Robustness to preprocessing choices**: The map-matching ablation (Table 9) confirms that TDDM's gains stem from the deaggregation framework rather than preprocessing artifacts.
+- **Canonicalization via similarity transform is a practical design choice.** Normalizing regions to a canonical frame before modeling achieves translation/rotation invariance without complex equivariant architectures, and the ablation on region size (3×3 km vs 1×1 km) explores the tradeoff between local and global structure.
 
 ## Weaknesses
 
@@ -25,68 +23,56 @@ None.
 
 ### Major
 
-- **Terminology: the generation task is not truly "unconditional."** The paper frames its task as "unconditional trajectory generation" (Section 2, Section 4.1), but TDDM explicitly conditions on spatial prior *H* computed from the training data. Section 3 acknowledges this conditioning, and the method's contribution is precisely this factorization. However, presenting results as "unconditional" when the model receives a pre-computed marginal occupancy distribution creates a subtle mismatch: TDDM is explicitly given the answer to *where* density should be, while baseline models must learn this implicitly from the same training data. This does not invalidate the comparison — both models see the same training data, and the factorization *is* the contribution — but the terminology should be corrected throughout (e.g., "distribution-conditioned" or "prior-guided" generation). The abstract, title framing, and Section 4.1 heading should reflect this.
+1. **Confounded comparison on distributional metrics undermines headline KL/JS claims.** The paper's primary evaluation compares TDDM against baselines (DiffTraj, Diffusion-TS, TimeVAE, etc.) on KL divergence and JS divergence computed from spatial heatmaps (256×256 grid). TDDM receives the real spatial marginal *H* as conditioning input — which is exactly the same information these metrics measure. Baselines receive no such information. The reported 4× improvements (KLsym 0.277 vs 1.153 for Diffusion-TS; JS 0.059 vs 0.198) are therefore largely attributable to the model being given the target marginal as input, not to superior generative modeling. This is acknowledged nowhere in the paper. The effect is visible: when *H* is removed (ablation), TDDM's KLsym degrades to 1.334 — comparable to baselines. On non-confounded metrics (TSTR, Length Error), TDDM's advantage is modest. **This does not invalidate the paper's other contributions (generalization, architecture), but it drastically weakens the unconditional generation claims.**
 
-- **"Zero-shot" generalization requires target-domain aggregate data.** Algorithm 2, line 3 unambiguously shows that *H* is computed from target-city trajectories (*f*(*rc*, Xtarget)). The paper acknowledges this in the text ("the model ϵθ never receives individual target trajectories, only their aggregate spatial distribution") but continues to use "zero-shot" and "without retraining or finetuning" as the primary framing. For city-to-city transfer, this means one must possess real trajectories from the target city to construct *H*. While aggregate occupancy is arguably easier to obtain than individual trajectories, this is not zero-shot in the standard ML sense (no access to the target domain). The paper should more precisely characterize what is required — aggregate distributional information — and calibrate the "zero-shot" language accordingly.
+2. **"Zero-shot" terminology overclaims the generalization capability.** The paper repeatedly describes the method as "zero-shot" transfer to unseen cities. However, Algorithm 2 (line 3) explicitly computes the spatial prior *H* from target trajectories (Xtarget). The model does not need individual target trajectories or gradient updates, which is a genuine advantage, but it does need aggregate target data (the marginal heatmap). Standard definitions of zero-shot learning require no data from the target distribution. The paper is *transparent* about computing *H* from Xtarget (lines 327–334), but the terminology "zero-shot" throughout the abstract, introduction, and conclusion (e.g., "zero-shot generalization," "strong out-of-distribution zero-shot performance") creates a misleading impression that the target provides no information at all. This should be renamed to something like "conditional generation from target marginals" or "few-statistic transfer."
+
+3. **Missing sensitivity analysis for the spatial prior estimation.** The generalization experiments compute *H* from the full target dataset. A critical practical question — how much target data is needed to estimate a useful *H*? — is not addressed. If *H* requires dense trajectory coverage, the claimed advantage over methods needing sample-level data is weaker. The paper's own framing (that *H* could come from independent sources like census data) makes this gap more significant: no experiment tests whether a coarsely estimated or externally-sourced *H* suffices.
 
 ### Minor
 
-- **No comparison against baselines augmented with the same spatial prior.** The paper argues that the factorization drives the gains, but it does not test whether existing diffusion-based trajectory models (e.g., DiffTraj, Diffusion-TS) would also benefit if supplied with *H* as an additional conditioning channel. Such an experiment would more cleanly isolate whether the architectural factorization or simply the availability of the spatial prior is responsible for the improvements. The current ablation (Table 2, removing *H* from TDDM) demonstrates that the prior is essential for TDDM but does not show that the factorization is superior to simply appending *H* to a baseline. This does not threaten the core contribution but would strengthen the paper.
+- **The evaluation of the unconditional generation task is partially circular.** The paper claims TDDM is "unconditional" (Section 4.1) but then uses *H* computed from the target distribution during sampling. The "unconditional" label is inconsistent with the experimental procedure.
 
-- **Intra-city 25% vs. Porto comparison is confounded.** Section 4.3 notes that training on Porto generalizes better than training on 25% of the target city. However, the 25% case uses a spatial prior derived from only the training quadrant while the Porto case uses the full target-city prior. These are not comparable in terms of the spatial information available to the model. The paper should either equalize the prior quality or discuss this asymmetry explicitly.
+- **Per-city results show substantial variation not discussed in the main text.** Table 12 in the appendix shows that city-to-city transfer performance varies widely (e.g., KLsym ranges from 0.263 to 0.982 depending on source-target pair). The main text aggregates these and claims "robust" generalization, but some individual transfer directions (e.g., Cabspotting→Geolife: KLsym 0.286, which is closer to the baselines' range) are substantially weaker than others.
+
+- **The ablation (Table 2) shows the "w/o spatial prior" variant matching or exceeding TDDM on TSTR for some cities**, suggesting the architecture without priors already captures sample-level fidelity. The paper acknowledges this but could better contextualize what the spatial prior actually contributes beyond distributional metric improvement.
 
 ### Trivial
-
-- The phrase "unconditional part" in the Figure 3 caption is misleading given the conditioning on *H*.
-- Variance/repeatability for metrics beyond TSTR (e.g., KL divergences, Density Error) is not reported; reporting these would strengthen confidence in the margins.
+- None (formatting artifacts are parser issues, not author errors).
 
 ## Nice-to-Haves
-
-- A sensitivity analysis showing how performance degrades as spatial prior quality is reduced (e.g., coarser grids, noisy occupancy estimates) would demonstrate practical robustness for settings where only approximate priors are available.
-- Extending *H* with temporal marginals (e.g., time-of-day priors, length distributions) as suggested in the Future Work section would be a natural next step that could address the Length Error weakness in cross-city transfer.
-- Testing whether the factorization approach works at different spatial scales beyond the 3×3 km default would help establish generality.
+- A fair comparison where baselines also receive *H* (e.g., as an additional input channel) would isolate whether TDDM's architecture adds value beyond the conditioning itself.
+- Testing with *H* estimated from an independent source (e.g., kernel density estimate, census-derived heatmap) would demonstrate true zero-shot usability.
+- Varying the fraction of target data used to compute *H* would reveal how much aggregate information is needed.
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-
-- **"Invalid comparison to unconditional baselines — TDDM has an unfair advantage"**: REMOVED as a fatal claim. TDDM and baselines both access the same training data. TDDM explicitly computes *H* from that data as part of its factorization; baselines must learn the spatial distribution implicitly. This is a fair test of whether explicit factorization outperforms implicit learning — exactly the contribution being evaluated. The concern is downgraded to a terminology issue (see Major weakness 1).
-
-- **"Generalization claims are entirely invalid because target-city data is needed"**: REMOVED as a fatal claim. The paper does disclose the *H* requirement in both Algorithm 2 and the surrounding text. The concern is valid but properly downgraded to a terminology/precision issue (see Major weakness 2). The capability itself — generating trajectories for new cities using only aggregate occupancy without fine-tuning — is genuine and valuable.
-
-- **Various formatting/style nitpicks**: REMOVED per hard rules. These are parser artifacts, not author errors.
-
-- **Missing related works**: REMOVED per hard rules. Cannot confirm existence of uncited works.
-
-- **Reproducibility concerns about code/model availability**: REMOVED per hard rules. The paper provides an anonymous repository link and the models/tools cited are assumed to exist.
+- **Criticism about garbled/missing table entries (Tables 1–3):** These are PDF parser artifacts, not author errors. REMOVED per hard rules.
+- **Criticism about missing appendix content:** The parser strips appendix sections. REMOVED per hard rules.
+- **"The core factorization does not actually separate spatial allocation from temporal realization":** The paper is transparent about *H* being computed from target data. The separation is conceptual (aggregate occupancy vs. individual temporal dynamics), and the paper explicitly states *H* "can be estimated (even in unseen cities)" (line 214). The factorization is meaningful even if *H* comes from target data, as (a) individual trajectories are not needed, (b) temporal dynamics transfer, and (c) *H* could come from independent sources. This criticism overstates the problem and is moved here as the paper's claim is reasonable given their stated setup.
+- **Generic strength from Strength Finder ("Spatial-temporal factorization achieves zero-shot cross-city generalization"):** This conflicts with verified weaknesses about the "zero-shot" terminology being overclaimed. Moved here per rules (when strength and weakness disagree, weakness wins).
+- **"Missing experiments" and "obvious next steps" from the harsh critic:** These are suggestions, not weaknesses of the current paper. Moved here.
 
 ## Novel Insights
-
-The paper makes a genuinely interesting observation that spatial occupancy priors act as a surprisingly powerful bridge for cross-city transfer, to the point where a model trained entirely on Porto can outperform a model trained on 25% of the target city's data for distributional coverage. While this comparison has a confounding factor (prior quality differs, as noted above), the broader finding that temporal dynamics transfer well across cities while spatial distributions do not is a useful empirical insight for the trajectory generation community. It suggests that future work on transferable trajectory models should focus on learning universal motion patterns while accepting that spatial occupancy will typically need to be supplied per-target-region.
+None beyond the paper's own contributions. The core tension revealed by the reviews — that conditioning on aggregate statistics is a genuine methodological contribution for controllability and generalization, but evaluating on metrics that measure exactly what you condition on creates a fundamentally unfair comparison — is an important point for the field to consider when designing evaluation protocols for conditional generative models.
 
 ## Suggestions
+1. Rename "zero-shot" to "conditional generation on target marginals" throughout. The model's true contribution — generating trajectories from aggregate spatial statistics without individual samples or gradient updates — is impressive enough without misleading terminology.
+2. Add a controlled experiment where baselines receive the same spatial prior *H* (or an equivalent heatmap conditioning). Report both confounded (KL/JS) and non-confounded (TSTR, Length Error) metrics separately, with explicit discussion of what each comparison shows.
+3. Show how the quality of generated trajectories varies with the amount of target data used to estimate *H*, to establish the practical data requirements.
+4. Report per-city results more prominently in the main text rather than aggregating, especially for generalization experiments.
 
-- Replace "unconditional" throughout with a more precise term such as "distribution-conditioned" or "prior-guided." The abstract and Section 4.1 heading should be updated.
-- Qualify "zero-shot" language: clarify that city-to-city transfer requires aggregate occupancy data from the target but no individual trajectories or model updates. Consider "prior-guided transfer" or "aggregate-conditioned generation."
-- Add a brief discussion in Section 4.1 acknowledging that TDDM's explicit access to spatial marginals from training data gives it a structural advantage on KL-based metrics, and that this is by design — the factorization is the contribution.
-- If feasible, include a sensitivity analysis on prior quality (e.g., coarser grids) to show robustness.
-- Report variance for non-TSTR metrics across multiple seeds.
+## Score and Calibration
 
-## Score and Decision
+**Calibration anchors considered (batched search):**
 
-**Anchor comparison:**
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `BDOldEjwCE.md` (TrajFlow) | 6.50 | Similar GPS trajectory generation paper, accepted. TDDM has a more interesting factorization idea but also has an evaluation fairness concern that TrajFlow doesn't. |
+| `w7xpNeFIbb.md` (GeoDiffusion) | 4.00 | Similar spatio-temporal trajectory paper, rejected. Overclaimed "foundation model" claim is analogous to TDDM's "zero-shot" terminology issue, but TDDM's evaluation is more thorough. |
+| `cRQHnoDaa2.md` (MoveFM-R) | 3.50 | Rejected mobility paper. TDDM is stronger: clearer contribution, better evaluation design, code released. |
+| `ZokiZYcEsg.md` (RL Trajectories) | 2.00 | Very weak paper, withdrawn. TDDM is substantially stronger in every dimension. |
 
-| Anchor | Score | Comparison to TDDM |
-|--------|-------|---------------------|
-| TrajFlow (`BDOldEjwCE`) | 6.50 | Most comparable: GPS trajectory generation at scale with flow matching. Similar empirical strength and evaluation breadth. TDDM has cleaner conceptual contribution (factorization) but terminology issues TrajFlow avoids. |
-| What Happens Next (`t1vMYl1yhe`) | 6.67 | High-scoring trajectory forecasting paper with novel task formulation. Strong evaluation. TDDM has similarly strong empirical results and broader generalization experiments but imprecise terminology. |
-| Unconditional Human Motion (`OHZRUCa1HW`) | 5.00 | Below-SOTA results and limited baselines led to rejection. TDDM is demonstrably stronger: clear SOTA improvements, comprehensive baselines, generalization experiments. |
-| GeoDiffusion (`w7xpNeFIbb`) | 4.00 | Trajectory diffusion model rejected for limited novelty, missing implementation details, unsubstantiated claims. TDDM has substantially clearer contributions, better ablation, and more transparent methods. |
-| DDM-TS (`jBNGp43uUd`) | 3.50 | Decoupled diffusion for time series (trend-seasonality). Rejected for oversimplification, limited novelty, narrow evaluation. TDDM's factorization is better motivated and more thoroughly evaluated. |
-| DiTraj (`zWRmev5IQ4`) | 4.50 | Training-free trajectory control for video generation. Rejected. Different domain but similar mid-range score pattern. |
-| Fine-Grained Traffic (`khNIU4Lzn5`) | 4.00 | Traffic forecasting benchmark paper. Rejected. TDDM is more complete. |
+Positioned relative to these anchors: TDDM's core idea (spatial-marginal conditioning) is novel and the architecture is clean. However, the confounded evaluation is a significant weakness that TrajFlow (6.50) does not share. The paper is clearly better than GeoDiffusion (4.00) and MoveFM-R (3.50), but the evaluation fairness gap prevents it from reaching the TrajFlow tier without substantial revisions.
 
-TDDM sits above the 4.0–5.0 reject band (GeoDiffusion, DDM-TS, Unconditional Human Motion) and is comparable to or slightly below the 6.5–6.67 accept-poster band (TrajFlow, What Happens Next). The principal differentiator from the high-scoring anchors is terminology precision — TDDM's "unconditional" and "zero-shot" framing overstates what the method actually requires. However, the underlying contributions (spatial-temporal factorization, canonicalization, strong empirical results, cross-city generalization) are genuine and well-supported. The paper advances trajectory generation methodology and provides a useful new tool for the community.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

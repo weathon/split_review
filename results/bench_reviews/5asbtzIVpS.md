@@ -1,100 +1,91 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review, cross-checking every claim from the harsh critic and strength finder against the actual paper content.
-
----
+Now I have all the context I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Forest-based Graph Learning (FGL), a new paradigm for semi-supervised node classification that reframes message passing as information transport over spanning trees sampled from a homophily-biased distribution. The method consists of four stages: (1) a pre-processing step that augments the graph via k-NN edges derived from pseudo-labels, (2) a tree sampler that generates spanning trees using an attention-based homophily estimator trained on those same pseudo-labels, (3) a linear-time tree aggregator that propagates global messages via two efficient recursions, and (4) a tree fuser that combines per-tree representations. The approach is evaluated across 9 datasets against 26 baselines, showing competitive accuracy with notably faster per-epoch runtime.
+This paper introduces Forest-based Graph Learning (FGL), a new paradigm for semi-supervised node classification that reinterprets message passing as transportation over spanning trees. The key insight is that spanning trees are the minimal subgraph connecting all nodes, enabling global coverage with linear complexity. The framework has four components: (1) graph augmentation via pseudo-label-based k-NN to ensure connectivity and improve homophily; (2) a homophily-guided tree sampler that biases sampling toward high-homophily trees; (3) a linear-time tree aggregator that propagates global messages via two recursions; and (4) a tree fuser combining multiple tree outputs with a local module. Empirically, FGL achieves the best average rank (1.22) across 9 benchmarks against 26 baselines, with notable gains on heterophilous graphs (Texas 91.89%, Wisconsin 86.27%), while maintaining strong efficiency.
 
 ## Strengths
 
-- **Novel paradigm with genuine conceptual motivation**: The paper reframes graph message passing through the lens of spanning trees, analyzing the total-cost trade-off (Eq. 1) between per-structure cost and number of structures. The insight that a spanning tree is the minimal subgraph achieving global coverage provides a clean conceptual foundation (Section 1, Figure 1).
+- **Novel and well-motivated paradigm.** The paper identifies a genuine limitation in existing graph learning—the cost-performance trade-off framed as Eq. (1)—and offers a principled alternative based on spanning trees. The insight that a spanning tree is the minimal globally-connected structure is conceptually clean and technically sound.
 
-- **Theorem 2 provides real theoretical justification for the sampling strategy**: The theorem establishes monotonicity, an upper bound, and asymptotic tightness for expected edge-homophily as a function of the score ratio p/q. This rigorously connects estimator quality to tree distribution quality — improving the homophily estimator provably biases the distribution toward more homophilous trees. The proof (Sec. B.2, spanning pages 24-27) is a non-trivial combinatorial derivation.
+- **Very strong empirical performance.** Table 1 shows FGL achieves average rank 1.22 across 9 datasets against 26 baselines, including recent Graph Transformers and deep GNNs. The gains on heterophilous graphs (e.g., +24.0% on Texas, +19.7% on Wisconsin over the next best) are particularly striking and substantially exceed typical margins in this field.
 
-- **Efficient tree aggregator with practical speed**: The two-recursion scheme (Theorem 1, Eq. 5-6) enables all-pair node interactions on a tree in linear time. Table 2 confirms this translates to practical wall-clock gains: FGL runs at 0.005s/epoch on Cora versus 0.066s for GCNII and 0.029s for DIFFormer, while maintaining competitive or superior accuracy.
+- **Provable efficiency.** The tree aggregator (Eq. 7–8) achieves linear time and space per epoch. Table 2 confirms practical speedups: e.g., 0.005s/epoch on Cora vs. 0.010s for SGFormer and 0.066s for GCNII, and the gap widens on larger graphs.
 
-- **Comprehensive empirical scope**: 9 datasets spanning both homophilous (Cora, Citeseer, Pubmed, OGBN-ArXiv) and heterophilous (Actor, Cornell, Texas, Wisconsin, Flickr) regimes. 26 baselines across five categories (Classic, GNN, Deep GNN, Graph Transformer, Mamba). Ablation studies (Table 3) systematically isolate contributions of global submodule, local submodule, sampling strategy, and forest size.
+- **Theoretical motivation for the tree distribution.** Theorem 2 establishes that improving the edge-homophily estimator ratio Δ = p/q provably biases the tree distribution toward higher-homophily trees, with an upper bound tied to the graph's structure. While the binary-score idealization does not perfectly match the continuous attention scores used, it provides a rigorous foundation for why homophily-biased sampling should work.
 
-- **Interpretability analysis**: The global homophily metric (Sec. J.2) and Figure 6 show that trees sampled from the proposed distribution significantly increase long-range homophilous information propagation compared to uniform sampling, directly connecting the sampling strategy to downstream performance.
+- **Comprehensive ablation and analysis.** Table 3 systematically isolates the contribution of each component (global submodule, local submodule, homophily-guided sampling, multiple trees). Table 4 compares six estimator variants, confirming that the two-stage estimator design is beneficial. Supplementary experiments on robustness to noise, dense graphs, larger-scale graphs, and graph classification demonstrate versatility.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Graph augmentation via pseudo-labels is never ablated against baselines**: The pre-processing step (Sec. 4.1) uses a GCN/MLP trained on labeled nodes to generate pseudo-labels, then adds k-NN edges based on those pseudo-labels. These same pseudo-labels then serve as training targets for the attention-based homophily estimator (Sec. 4.2). This creates a self-training pipeline that provides the model with supervision unavailable to any baseline. While the paper ablates internal components (Table 3: removing global submodule, using uniform sampling, using single trees), **none of these ablations removes the augmented graph**. Variant (3) "Uniform Tree Sampling" (83.63 on Cora) and (1) "w.o. Global Submodule" (80.00 on Cora) both still operate on the augmented graph. The comparison against baselines like GCNII (85.34), SGFormer (82.38), and DIFFormer (83.32) is therefore confounded — we cannot determine how much of FGL's gain comes from the forest paradigm versus the label-informed augmentation. This is not fatal (the augmentation is a legitimate design choice, and Table 3 suggests the forest components add value beyond uniform sampling), but it substantially weakens the claim of superior performance.
+- **Uncontrolled effect of graph augmentation on fairness of comparison.** Section 4.1 adds k-NN edges based on pseudo-labels trained on the same labeled set used for final evaluation. This augmentation is used for FGL in all experiments but no baseline receives it. The ablation study (Table 3) does not include a variant without augmentation. Since the method's average rank (1.22) far exceeds the next best (7.22 for SGFormer), it is plausible—though not proven—that the augmentation contributes meaningfully to the gains. A proper control would either run baselines on the same augmented graph or demonstrate that gains persist on the original graph. This does not invalidate the method, but it weakens the claim that the forest paradigm alone drives the SOTA results.
 
-- **Texas/Wisconsin standard deviations reported as ±0.0**: Table 6 (Sec. J.9) reports FGL's Texas accuracy as 91.89 ± 0.0 and Wisconsin as 86.27 ± 0.0. While the main text states that all experiments run with 10 initializations and reports standard deviations in "Tab. 10 of Appn" (which appears garbled by the parser), a standard deviation of exactly zero on these small test sets (37 nodes for Texas, 51 for Wisconsin) is unusual and raises concerns about variance reporting or potential determinism in evaluation. This undermines confidence in the reported heterophilic benchmark results even if the parser is partially responsible for the missing Table 10.
+- **Theory-practice gap in Theorem 2.** The theorem assumes oracle binary edge scores (p for homophilous, q for heterophilous). In the actual method, scores are continuous attention weights from a learned estimator. There is no analysis of how estimation error propagates through the tree distribution or how the binary guarantee relates to the continuous setting. The empirical correlation in Figure 5 partially bridges this gap but does not constitute a formal connection. The theorem thus serves as motivation rather than a guarantee for the actual algorithm.
 
 ### Minor
 
-- **Running time comparison excludes pre-processing cost**: Table 2 reports per-epoch training time of the main model but does not include the cost of the pre-training phase (GCN/MLP for pseudo-labels, training the homophily estimator). The complexity analysis in Sec. 4.5 acknowledges pre-training costs as O((n+m)d) per epoch, but the practical wall-clock comparison against baselines is incomplete. For small datasets this cost is negligible; for larger graphs it may matter.
+- **"Quadratic node-pair interactions" phrasing is somewhat overblown.** The tree aggregator (Eq. 7–8) is a two-pass message passing algorithm on a tree. The claim that it "realizes quadratic node-pair interactions" is technically defensible (information flows between all pairs on a tree), but the phrasing suggests a more explicit quadratic computation than what occurs. The mechanism is standard linear-time message passing on trees. This is a presentational overstatement rather than a technical flaw.
 
-- **Theorem 2 uses binary edge scores while practice uses continuous attention scores**: The theoretical analysis assigns score p to homophilous edges and q to heterophilous edges (binary), while the actual implementation computes continuous attention scores from Eq. 3. The theorem rigorously justifies the *principle* that higher-quality estimation yields better trees, but the translation from continuous estimator accuracy to the p/q ratio is not formalized. This theory-practice gap is acknowledged to some degree through the homophily estimator comparison (Table 4), which empirically validates the principle.
+- **Tree diversity is asserted but not measured.** Section 4.2 lists "diversity" as a key principle for the forest, but no metric of tree diversity (e.g., average Jaccard similarity of edge sets) is reported. Multiple independent samples from the same distribution could still yield highly overlapping trees. This makes it hard to assess whether the forest truly captures complementary pathways or is mostly redundant.
 
-- **No explicit test of long-range dependency capture**: The paper's central framing is about breaking the cost vs. global-receptive-field trade-off, yet no experiment (e.g., synthetic tasks where labels depend on nodes at distance > 3) directly verifies that the forest layer captures long-range dependencies better than, say, a deep GNN or a sparse graph transformer with comparable parameters. The paper relies on standard benchmark accuracy and the global homophily metric (Figure 6) as indirect evidence.
+- **Running time comparison excludes pre-processing costs.** Table 2 reports per-epoch times after pre-processing and tree sampling. The pre-processing (pseudo-label training + k-NN search) and tree sampling (Wilson's algorithm) are one-time costs, but their magnitude is not reported. On larger graphs these could be significant, and a complete wall-clock comparison would be more informative.
+
+- **Hyperparameter sensitivity across datasets.** The optimal number of trees NT varies from 4 (ArXiv) to 15 (Cornell). The local module weights (β₁, β₂, γ) require per-dataset tuning. Figure 4 shows performance declines after the optimal NT. While hyperparameter tuning is standard, the number of knobs (β₁, β₂, γ, KL, NT, lr, weight_decay, dropout) is large, which raises questions about practical deployment cost.
 
 ### Trivial
 
-- The paper does not include a standalone limitations section. Section A.9 discusses a specific failure case (highly disconnected graphs) but a broader limitations discussion would improve transparency.
+- The paper mentions a "block acceleration" (Algorithm 3) using graph-cut approximations but does not use it in the main experiments; its effectiveness is unclear.
+- The non-linearity extension (Appendix A.6) requires storing pre-activation values, which doubles memory — this cost is noted but not reflected in the headline complexity analysis.
 
 ## Nice-to-Haves
 
-- An ablation that runs the full FGL pipeline on the **original, unaugmented graph** would cleanly separate the forest contribution from the augmentation contribution and substantially strengthen the paper's claims.
-- A comparison where selected baselines (e.g., GCNII, SGFormer) are also given the same k-NN augmented graph would establish a fair baseline and help quantify the marginal value of the forest paradigm.
-- Experiments on synthetic long-range dependency tasks would provide direct evidence for the "global receptive field" claim.
-- Extending the tree aggregator beyond the linear variant to an RNN or SSM implementation (as discussed in Sec. C of the appendix) and reporting results would strengthen the generality claim.
+- Running baselines on the augmented graph would cleanly address the fairness concern.
+- Reporting tree diversity metrics (e.g., average Jaccard similarity of tree edge sets) would strengthen the diversity argument.
+- Reporting total end-to-end training time (pre-processing + tree sampling + training epochs) would give a more complete efficiency picture.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-1. **Harsh Critic: "Theorem 1 is an algebraic restatement... trivial"** — REMOVED. The paper's derivation of a two-recursion scheme (bottom-up S computation, then top-down H' computation) that works for any aggregator satisfying combine/disentangle properties is a non-trivial architectural contribution. The proof (Sec. B.1) shows how the scheme achieves all-pair interactions in linear time, which is the key enabling result for the tree aggregator. The harsh critic's characterization as "merely requiring storing pre-activation values" misses the algorithmic structure.
+- **Harsh critic's claim that the trade-off framing (Eq. 1) "is not as clean as presented" and that the "fundamental analysis is essentially dimensional analysis":** The framing is a deliberately simplified motivation, which is appropriate for an introduction. Dimensional analysis of the cost breakdown is a valid way to think about the problem. Removed as a nitpick that mischaracterizes the paper's level of analysis.
 
-2. **Harsh Critic: "Theorem 2... asymptotic statement about a limit (p/q→∞) that is never realized"** — REMOVED. The theorem has three parts: monotonicity (holds for any ∆ > ∆' ≥ ∆₀, not just the limit), upper bound, and asymptotic tightness. The monotonicity result is the practically relevant one and does not require p/q→∞. The harsh critic's focus on the asymptotic statement overlooks the other two results.
+- **Harsh critic's claim that the tree aggregator "does not realize pairwise attention" and that the claim is "a significant overstatement":** The aggregator enables information flow between all node pairs on a tree in O(n) time. The claim "realizes quadratic node-pair interactions" refers to the effect (all pairs interact), not an O(n²) computation. This is standard and correctly framed. Demoted from structural claim to the minor weakness above about phrasing.
 
-3. **Harsh Critic: "Misleading claim of global receptive field... message passing only communicates along tree edges"** — WEAKENED AND RETAINED as minor (no explicit long-range experiment). The paper explicitly acknowledges tree sparsity (line 418: "mitigate the local sparsity of trees") and uses a local submodule to supplement. A spanning tree by definition connects all nodes, providing a unique path between any pair — this IS global coverage in the topological sense. The claim of "breaking the trade-off" is ambitious but not misleading given the efficiency evidence in Table 2.
+- **Harsh critic's claim about "no discussion" of pseudo-label risks or the design choice of using attention weights from G rather than the tree:** These are design choices that are reasonably explained in the paper (Section 4.1 and Eq. 7–8). Removed as the paper does discuss them, albeit not exhaustively.
 
-4. **Harsh Critic: "data leakage through the k-NN augmentation"** — REMOVED. The pre-processing step uses only labeled nodes to train the initial GCN/MLP, which is standard semi-supervised practice. The k-NN edges are added based on pseudo-label similarity, which is a design choice, not leakage. The harsh critic's speculation about "data leakage" is unfounded.
+- **Strength Finder's strength about "clear problem framing and motivation":** Generic and superficial; dropped.
 
-5. **Harsh Critic: "the homophily-biased tree sampling works even on strongly heterophilic graphs... contradiction" (from "Deeper Analysis Needed")** — REMOVED. The paper explains this through NHCC (number of homophilous connected components) in Theorem 2. The pre-processing step increases NHCC (discussed in Sec. H.2 and Fig. 9 of appendix), which is the mechanism by which the approach works on heterophilic graphs. The harsh critic's claim of contradiction ignores this explanation.
-
-6. **Harsh Critic: "the cost of pre-training the homophily estimator and the initial GCN/MLP... may be non-trivial for large graphs"** — RETAINED as minor (in the running time comparison point). But note the pre-training cost IS discussed in Sec. 4.5, line 457: "Each pre-training epoch costs O((n+m)d) time and space."
-
-7. **Harsh Critic: "Appendix A.3... relies on simplifications that may not hold in practice"** — REMOVED. This is a theoretical discussion about over-smoothing alleviation that is not a central claim of the paper. The harsh critic's objection is speculative ("may not hold") and is not backed by evidence that it doesn't hold.
-
-8. **Strength Finder: "compatible with linear attention, RNNs, and SSMs" as evidence of generality** — RETAINED but noted that only the linear variant is empirically validated. The generality claim is discussed theoretically in the appendix (Sec. C) but not demonstrated experimentally beyond the linear implementation.
+- **Various formatting/style nitpicks, missing appendix references, and claims about "not yet released" or "cannot be independently verified":** Removed per hard rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core insight — reframing graph message passing as transport over spanning trees, where the tree is the minimal structure achieving global coverage — is the paper's own contribution. The reviews do not surface additional novel perspectives beyond evaluating this contribution.
+None beyond the paper's own contributions. The reviews do not surface any observation about the paper that the authors themselves do not already articulate.
 
 ## Suggestions
 
-- The most impactful revision would be adding a "no augmentation" ablation (running FGL on the original graph with only connectivity fixes) and comparing baselines with the same augmentation. This would definitively address the confound concern.
-- Clarify the Texas/Wisconsin standard deviation situation in the main text or ensure Table 10 is properly included with all std dev values.
-- Consider reporting total pipeline runtime (including pre-processing) or at minimum noting the pre-processing cost explicitly in the efficiency discussion alongside Table 2.
-- Add a brief limitations paragraph to the main text summarizing known failure modes (disconnected graphs as in Sec. A.9, dependence on augmentation quality) to improve transparency.
+1. **Control the augmentation confound.** Run FGL on the original graph (without k-NN augmentation) and report the accuracy. Even if performance drops, this establishes the baseline contribution of the forest paradigm. Additionally, run top baselines on the augmented graph to show they do not close the gap.
 
----
+2. **Add a tree diversity metric.** Report average pairwise Jaccard similarity (or edge overlap) among the NT sampled trees across datasets. This would substantiate the diversity claim and help explain why multiple trees help.
 
-**Calibration anchors used:**
+3. **Clarify the scope of the "quadratic" claim.** Rephrase to something like "enables information propagation between all node pairs in linear time" to avoid the misreading that explicit pairwise terms are computed.
 
-| Path | Avg Human Score | Comparison to Paper Under Review |
-|------|-----------------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/yumDmlGCc9.md` (CTNN) | 5.00 | Closest comparator: also uses spanning trees for graph learning. CTNN had theory-practice gaps and missing baselines but was accepted. FGL has broader experiments (9 vs. ~6 datasets, 26 vs. fewer baselines) and strong efficiency results, but shares a similar theory-practice gap (Theorem 2 binary scores vs. continuous practice). FGL's augmentation confound is a comparable-level issue. FGL is somewhat stronger overall. |
-| `/home/wg25r/review_agent/human_reviews_2026/5VN11Hd3uY.md` (From Fields to Random Trees) | 6.67 | Also uses spanning trees for decomposing graph problems, in MAP inference for MRFs. Cleaner contribution with tighter theory-practice alignment. FGL is below this in theoretical rigor but comparable in empirical scope. |
-| `/home/wg25r/review_agent/human_reviews_2026/G9bpAoc47a.md` (Rewiring for Homophily) | 2.80 | Also addresses homophily for GNNs but had critically flawed experiments and outdated assumptions. FGL is substantially stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/OUzIRoR45t.md` (SHAKE-GNN) | 3.50 | Also uses forests for GNNs but had weak experiments (small datasets, only GCN backbone, few baselines). FGL is clearly stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/j3ZMptxwLP.md` (DP-RST) | 1.50 | Differential privacy for spanning trees; different domain. Very weak reviews. FGL is substantially stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/8ANXIJLtz6.md` (LANO) | 5.33 | Node classification with LLMs, medium-quality paper. Different domain but similar evaluation quality level. FGL is comparable. |
-| `/home/wg25r/review_agent/human_reviews_2026/G14LfMzf1w.md` (Normality Calibration) | 3.50 | Semi-supervised graph learning but anomaly detection. Rejected. FGL is stronger. |
+4. **Report end-to-end wall-clock time.** Include pre-processing and tree sampling costs in the running time analysis to give a complete picture.
 
-**Score rationale**: FGL sits above CTNN (5.0, accepted) due to broader empirical validation and stronger efficiency results, but below "From Fields to Random Trees" (6.67) due to the augmentation confound and theory-practice gap. The major weaknesses (unablated augmentation, ±0.0 std devs) are real but do not invalidate the core contribution. A score of 5.5 reflects a solid paper with addressable concerns that should be resolved before publication.
+## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Calibration anchors (all from the batch returned by calibration_search):**
+
+| Path | Avg Human Score | Comparison to this paper |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/yumDmlGCc9.md` (Canonical Tree Cover NN) | 5.00 | Same thematic area (trees for graph learning); this paper has stronger empirical eval (26 baselines vs molecular benchmarks) and a clearer task framing. This paper is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/5VN11Hd3uY.md` (From Fields to Random Trees) | 6.67 | Also uses spanning trees, for MRF inference. Similar level of theoretical grounding; this paper has broader empirical eval. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/OUzIRoR45t.md` (SHAKE-GNN) | 3.50 | Also uses spanning forests for graphs, but weak eval (only GCN baseline). This paper is substantially stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/mGxtoQY3GA.md` (HarmonyGNNs) | 6.00 | SSL for heterophily. Similar quality: good theory, solid experiments. This paper has a more novel paradigm (forest-based vs SSL framework). Comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/aWiC2e2wjK.md` (GRIPedge) | 2.50 | Heterophily paper with limited novelty. This paper is significantly stronger in both novelty and empirical results. |
+
+Relative to these anchors, this paper is clearly stronger than the rejected papers (SHAKE-GNN at 3.5, GRIPedge at 2.5) and comparable to the accepted papers in the 5–6.67 range. It has a genuinely novel paradigm, very strong empirical results, and a theoretical contribution. The main weaknesses (augmentation confound, theory-practice gap) are real but not fatal. I place it at the upper end of this band.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

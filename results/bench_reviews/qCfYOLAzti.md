@@ -1,94 +1,105 @@
-Now I have enough context to write the final review. Let me verify one more detail from the paper — the strength finder's claim about MUSE-Books VerbMem/KnowMem going to zero.
+**Calibration search complete.** Let me now read a few anchor reviews in full to compare against.
 
-I've now verified the key claims. Let me compile the final review.
+I've already read the key anchors. Now let me synthesize the final review.
+
+Here's my analysis of the paper against the reviewers' claims, verified against the actual paper text:
+
+**Structural Issue 1 (Theory doesn't support claims):** The paper's theory (Thm. 5.2) does concretely show that BS-T adds an extra `λq^i[v]` term to the gradient residual for non-target tokens compared to GA. This is a genuine mathematical demonstration of different gradient structure. The paper's claim is "shows how BS reshapes gradient dynamics and mitigates the squeezing effect" — accurate. The remark about "generalizable unlearning" in Fig. 3 is interpretive, not derived. The on-policy limitation is explicitly acknowledged in §D.4 (lines 2000-2157). **KEEP as minor weakness — theory is descriptive rather than providing guarantees.**
+
+**Structural Issue 2 (Evaluation inconsistency):** The paper never claims standard metrics are *universally unreliable*. It shows specific failure cases where metrics miss rephrasing (Case 1 & 2 in §3.1). Using standard metrics for main evaluation with LaaJ as supplementary is standard practice. **WEAKEN significantly — this is not a structural flaw. The LaaJ evaluation being limited is a reasonable minor point.**
+
+**High/mid/low likelihood groups definition:** Paper clearly states (lines 353-355): "group them by conditional probability into high-, mid-, and low-likelihood regions (top 20%, 20–60%, and 60–100%)." **REMOVE — reviewer missed this.**
+
+**Missing comparison to GRU/SatImp:** Valid. The paper cites both GRU and SatImp in related work but doesn't include them as empirical baselines. **KEEP as minor weakness.**
+
+**BS-S with N=10 vs N≤5:** The paper acknowledges this limitation transparently. Valid observation but the paper addresses it. **KEEP as minor point.**
+
+Now, the final review.
 
 ---
 
 ## Summary
 
-This paper identifies a failure mode in LLM unlearning called the "squeezing effect": gradient-ascent-based methods redistribute probability mass into high-likelihood alternatives (paraphrases), producing spurious unlearning where models appear to forget but still leak sensitive knowledge through semantically rephrased outputs. To address this, the authors propose a bootstrapping (BS) framework that jointly suppresses target responses and the model's own high-confidence predictions (model beliefs). BS-T operates at the token level by forming soft targets that interpolate between one-hot labels and top-k model predictions; BS-S augments the forget set with full high-confidence sequences sampled from the model. Theoretical analysis under the AKG learning dynamics framework shows how BS reshapes gradient residuals to spread forgetting pressure across belief neighborhoods. Experiments on TOFU, WMDP, and MUSE across multiple model families demonstrate consistent improvements over baselines.
+This paper identifies a genuine and under-explored failure mode in LLM unlearning — the "squeezing effect," where gradient-ascent-based methods shift probability mass into semantically related rephrasings of target responses, yielding only superficial forgetting that standard metrics miss. To address this, the authors propose a bootstrapping framework (BS-T at token level and BS-S at sequence level) that additionally suppresses the model's own high-confidence predictions, and provide both theoretical analysis and empirical evaluation across TOFU, WMDP, and MUSE benchmarks.
 
 ## Strengths
 
-- **Well-motivated problem identification with empirical diagnostics**: The paper demonstrates the squeezing effect through two complementary analyses — LaaJ-based semantic similarity across likelihood bands (Fig. 2a) and log-probability dynamics tracking during unlearning (Fig. 2b,c) — providing concrete evidence that NPO-based methods produce only superficial forgetting. This is a genuinely under-explored failure mode in the unlearning literature.
+- **Well-motivated problem identification with mechanistic analysis.** The paper convincingly demonstrates that NPO produces spurious unlearning where models generate semantically similar rephrasings (e.g., "Kitty makes a meow sound" instead of "Cat says meow"). The squeezing effect — probability mass redistribution into high-likelihood semantic neighborhoods — is verified through both LaaJ similarity scoring (Fig. 2a) and log-probability dynamics (Fig. 2b–2c), going beyond anecdotal observations.
 
-- **Simple, principled, and compatible method**: BS-T and BS-S are straightforward to implement on top of existing unlearning pipelines. The ablation in Table 6 (Appendix F.5) shows that BS-S improves aggregate scores when combined with GA, NPO, or WGA losses, demonstrating framework generality rather than coupling to a specific base loss.
+- **Clean and principled methodological response.** The bootstrapping framework directly follows from the problem analysis: if mass squeezes into the model's own high-confidence predictions, then unlearning should target those predictions too. Both instantiations are natural — BS-T penalizes top-*k* tokens (Eq. 5–6), BS-S augments the forget set with high-confidence continuations (Eq. 7) — and are compatible with existing losses (GA, NPO, WGA), as shown in Appendix F.5.2.
 
-- **Comprehensive experimental coverage**: The paper evaluates on three standard benchmarks (TOFU, MUSE, WMDP), three model families (Llama 3.2 1B/3B, Llama 3.1 8B, Llama 2 7B-Chat, Zephyr-7B-β), and multiple forget ratios (1%/5%/10% on TOFU). BS-S consistently achieves best aggregate memorization–utility balance across settings.
+- **Consistent empirical gains across diverse benchmarks and model scales.** On TOFU (Tab. 1) across 1B/3B/8B models and 1%/5%/10% forget splits, BS-S achieves the best aggregate score in 8 out of 9 settings. On WMDP (Tab. 2), BS-S reaches near-random forget accuracy (Bio 0.26, Cyber 0.27) while retaining MMLU 0.54. On MUSE-News (Tab. 4), BS-S obtains the lowest VerbMem (0.27) and KnowMem (0.33). These results are directionally consistent, which is more important than the size of any single improvement.
 
-- **Correct theoretical analysis connecting method to mechanism**: Theorem 5.2 shows that BS-T's residual (`π - ((1-λ)e + λq)`) spreads the forgetting signal across the target token and its high-likelihood neighborhood, in contrast to GA's residual (`π - e`) which concentrates on a single token. Theorem 5.3 extends this to off-policy BS-S as kernel-weighted BS-T residual aggregation. The analysis is mathematically consistent with the defined objectives.
-
-- **Code released and integrated into OpenUnlearning**, facilitating standardized benchmarking and reproduction.
+- **Theoretical analysis of gradient structure.** Theorem 5.2 concretely shows that BS-T's gradient residual adds `λq^i[v]` for non-target tokens compared to GA — formally demonstrating that BS-T distributes suppression across the belief neighborhood rather than just the target token. While the theory is descriptive rather than providing generalization guarantees, it does clearly differentiate the gradient dynamics.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-None. The harsh critic's claim of a sign error in the theoretical analysis is incorrect. The paper defines GA's objective as `min_θ -E[log π]` (Eq. 1), i.e., minimizing negative log-likelihood. Under this loss, the residual `G = ∇_z L` is indeed `π - e` (standard softmax gradient), which is consistent with the derivation in Appendix D.2. The BS-T residual `π - ((1-λ)e + λq)` follows identically from the BS-T loss (Eq. 6). There is no sign mismatch between the algorithm and the analysis.
+None. The paper's core contributions are sound and the evidence, while imperfect, is directionally consistent. The weaknesses below are significant but do not invalidate the central claims.
 
 ### Minor
 
-- **Modest improvements in many cells without statistical testing**: On TOFU 10% with Llama 3.1 8B, the aggregate improvement of BS-S over NPO is 0.63 → 0.64; on TOFU 5% 1B it's 0.54 → 0.55. These 1–2 percentage-point gains appear consistently but are small in absolute terms. No standard deviations, confidence intervals, or multi-seed variance is reported, making it difficult to assess whether observed differences are reliable. This is a common practice in LLM unlearning benchmarks but still worth noting.
+- **Limited scope of the LaaJ evaluation that directly tests the paper's central claim.** The paper argues that standard metrics miss spurious unlearning and proposes LaaJ as a remedy, but LaaJ evaluation is conducted on only one setting (TOFU 10%, Llama 3.1 8B, Gemini 2.5 Flash as judge) without error bars, significance tests, or human agreement calibration. To fully support the claim that BS methods achieve *more thorough* forgetting (vs. merely scoring better on metrics the paper critiques), a more extensive LaaJ evaluation across multiple settings, methods, and judge models would be needed.
 
-- **LaaJ evaluation is uncalibrated**: The semantic similarity and naturalness judgments (Figs. 2a, 4c) use a single proprietary model (Gemini 2.5 Flash) with no human calibration, inter-annotator agreement analysis, or multi-judge comparison. The paper appropriately uses LaaJ as an auxiliary probe rather than the primary evaluation (Tables 1–2 use standard metrics), but the strength of conclusions drawn from the LaaJ analysis (e.g., "BS-T and BS-S achieve higher naturalness and lower similarity than baselines") would benefit from validation.
+- **Theoretical analysis is descriptive rather than providing guarantees.** Theorem 5.2 computes residual differences but does not bound generalization of forgetting, prove that BS-T prevents rephrasing, or model why the squeezed mass is semantically related. The remark about "generalizable unlearning" in Fig. 3 is interpretive. Additionally, the theory applies strictly to the off-policy variant, while the on-policy BS-S (used in experiments, per Algorithm 2) is explicitly excluded (Appendix D.4). The theory clarifies *what* the gradient does differently but not *why* that yields better generalization.
 
-- **Theoretical analysis applies a known framework rather than developing new theory**: The AKG decomposition is imported from Ren & Sutherland (2025). The paper's contribution is applying this framework to compare GA vs. BS-T residuals, which is valuable but incremental as theory. The on-policy BS-S variant used in practice falls outside the theoretical framework (acknowledged in Appx. D.4).
+- **No variance or confidence intervals reported.** Across Tables 1, 2, 4, and 5, no standard deviations, confidence intervals, or significance tests are provided. Given that hyperparameters are tuned per-method and gains are modest in some settings (e.g., TOFU 1%: BS-S 0.57 vs. NPO 0.53), it is unclear whether observed differences are statistically meaningful or within noise. This is common in the field but limits the strength of the empirical claims.
+
+- **Missing empirical comparisons to cited related methods.** The paper cites GRU (Wang et al., 2025d) and SatImp (Yang et al., 2025) as addressing the forget-retain trade-off but does not include them as baselines. While the comparison set is already large (5 baselines), these omissions weaken the characterization of BS methods relative to the state of the art.
+
+- **BS-S memory constraint limits practical performance.** The best hyperparameter configuration identified in ablation (N=10, λ=0.6, achieving Agg. 0.65) cannot be used due to GPU memory constraints (Appendix F.5.1), so main results use N≤5. The reported BS-S performance may therefore be suboptimal. The paper acknowledges this transparently, but it remains a practical limitation.
+
+- **No ablation of the stop-gradient operator.** The stop-gradient in Eq. 5 is used without discussion of what happens without it. Given that self-distillation without stop-gradient can lead to representational collapse, this is a non-trivial design choice that merits analysis.
 
 ### Trivial
 
-- The term "bootstrapping" is somewhat overclaimed — the mechanism is essentially unlikelihood-style suppression using the model's own predictions as soft targets. This is a presentation issue, not a technical flaw.
+- The paper would benefit from additional model diversity beyond the Llama/Zephyr family. Testing on Mistral or Gemma would strengthen generality claims.
+- The qualitative examples in Appendix F.4 are helpful but could be more systematically tabulated.
 
 ## Nice-to-Haves
 
-- A comparison of BS-S against an equally-sized dataset of external human-written paraphrases would help disentangle whether the gains come from "model beliefs" specifically or simply from having more forget examples.
-
-- Reproducing the squeezing-effect log-probability analysis (Fig. 2) on MUSE or WMDP in addition to TOFU would strengthen the generality claim.
-
-- The LaaJ evaluation could be strengthened with a small human validation study or at minimum multi-judge agreement analysis.
+- A breakdown of the individual sub-metrics within the TOFU Memorization score (Extraction Strength, Exact Memorization, Paraphrased Probability, Truth Ratio) would help assess whether BS improvements are driven by metrics that genuinely reflect forgetting vs. those that may still miss rephrasing.
+- A distribution of LaaJ similarity scores (or embedding cosine similarity) between generations and target responses for each method would directly visualize whether BS methods shift the distribution toward lower similarity.
+- Testing jailbreak robustness (following Lynch et al., 2024) would probe whether BS methods' more thorough forgetting translates to resistance to adversarial re-elicitations.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
-
-1. **Harsh critic's sign-error claim ("Theoretical analysis is mathematically inconsistent...")**: Removed. The paper's Eq. (1) defines GA as `min_θ -E[log π]`, i.e., minimizing NLL. The gradient of this loss w.r.t. logits is `π - e`, which is exactly the residual in Theorem 5.2. Appendix D.2 (lines 1820-1825, 1853-1859) derives both residuals correctly from the respective loss functions. The harsh critic appears to have misread the sign convention.
-
-2. **Harsh critic's loss-formulation-mismatch claim**: Removed. Same issue as above — the pseudocode (Alg. 1) performs gradient descent on `L_BST` (Eq. 6), and the residual `G_BST` is computed as `∇_z L_BST`. These are consistent.
-
-3. **Strength Finder's claim about MUSE-Books VerbMem/KnowMem "driven to zero"**: Kept but contextualized. The zero scores are indeed achieved (Table 5), but GradDiff and WGA also achieve zero scores, so this is not unique to BS. The BS advantage is in higher UtilPres at zero forget scores.
-
-4. **Harsh critic's demand for human evaluation**: Moved to Nice-to-Haves. The paper uses LaaJ as an auxiliary probe, not the primary evaluation. Human calibration would strengthen but is not a standard requirement in this subfield.
-
-5. **Harsh critic's demand for squeezing analysis on multiple datasets**: Moved to Nice-to-Haves. The TOFU analysis is sufficient to establish the phenomenon; extending to other benchmarks would add value but is not a weakness of the current analysis.
+- **"Paper does not specify how high/mid/low likelihood groups are defined":** The paper explicitly states at lines 353–355: "group them by conditional probability into high-, mid-, and low-likelihood regions (top 20%, 20–60%, and 60–100%)." Reviewer missed this.
+- **"Evaluation inconsistency is structural":** The paper uses standard metrics for main evaluation and LaaJ as a supplementary probe. It never claims standard metrics are universally unreliable — it shows specific failure cases. This is standard practice, not a structural flaw. WEAKENED to minor point above.
+- **Stylistic/formatting nitpicks:** Removed per instructions.
+- **Missing related works mentioned by the reviewer:** Removed per instructions (no external verification possible).
+- **Criticism about theory not applying to on-policy BS-S as a fatal flaw:** The paper explicitly acknowledges this limitation in §D.4. The theory applies to off-policy BS-S, which is a valid variant described in the paper. The remark about Algorithm 2 showing on-policy is correct, but the paper discusses both variants.
 
 ## Novel Insights
 
-The paper's central insight — that the softmax normalization constraint causes GA-based unlearning to redistribute rather than eliminate probability mass, and that incorporating model beliefs as auxiliary suppression targets directly counteracts this — is genuinely novel in the LLM unlearning literature. While the AKG framework itself is borrowed, the application to diagnose and address the squeezing effect in unlearning is original. The empirical characterization through log-probability band tracking (Fig. 2) provides an intuitive diagnostic tool for future work.
+Beyond the paper's own contributions, the most interesting observation emerging from the reviews is the fundamental tension between the paper's critique of existing metrics and its reliance on them for main results. This tension is not unique to this paper — it reflects a broader challenge in the LLM unlearning field where benchmark standardization and metric critique are in conflict. The paper's resolution (using standard metrics for comparison + LaaJ for diagnosis) is pragmatic but undersells its own insight: that if standard metrics truly miss spurious unlearning, then a method's improvement on those metrics is necessary but not sufficient evidence of better forgetting. The paper would be stronger by embracing this implication and making LaaJ-style evaluation central rather than auxiliary.
 
 ## Suggestions
 
-- Report variance estimates across at least 3 random seeds for the main TOFU results to help readers assess the reliability of the modest gains.
-- Clarify the distinction between the auxiliary LaaJ evaluation (used for diagnosing spurious unlearning) and the primary benchmark evaluations to avoid overclaiming the robustness of LaaJ-based conclusions.
-- Consider tempering the "bootstrapping" terminology, as the method is more precisely described as self-distillation-style suppression.
+1. **Expand the LaaJ evaluation.** Run LaaJ evaluation across all methods on at least one setting (e.g., TOFU 10% with two model sizes), report multiple LLM judges, and include agreement statistics. This would directly test the paper's central claim that BS methods achieve more thorough forgetting.
+2. **Report confidence intervals or error bars** for all main results. Even standard deviations over 3 seeds would significantly strengthen the empirical contribution.
+3. **Include GRU and SatImp as baselines** in a follow-up version, or clearly justify why they are excluded from the comparison set given they are cited in related work.
+4. **Ablate the stop-gradient** in Eq. 5 to demonstrate its necessity.
+5. **Break down the TOFU Memorization score** into its four components to show which sub-metrics drive the BS improvements.
 
----
+## Score and Decision
 
-**Anchor comparison for calibration:**
+**Calibration anchors** (from the human review corpus):
 
-| Anchor | Avg Score | How it compares |
-|--------|-----------|-----------------|
-| `/home/wg25r/review_agent/human_reviews_2026/r6Z3BXDrzO.md` (Impossibility of Retrain Equivalence) | 4.50 | Similar theoretical+empirical scope but diagnostic only; current paper adds a constructive method, making it stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/qd9fA4LzVN.md` (Label Smoothing Improves GA) | 4.50 | Simpler method contribution with less theoretical analysis; current paper is more comprehensive. |
-| `/home/wg25r/review_agent/human_reviews_2026/7cEMkTu7Lf.md` (Unlearning Isn't Deletion) | 4.00 | Identifies problem (reversibility) but offers no method; current paper is stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/Sswng2ToR4.md` (Downgrade to Upgrade) | 4.50 | Accept Poster with similar strength profile; current paper has better theoretical grounding and broader experiments. |
-| `/home/wg25r/review_agent/human_reviews_2026/rzi77zNngG.md` (Leak@k) | 4.00 | Metric contribution only; current paper also provides a method and theory. |
-| `/home/wg25r/review_agent/human_reviews_2026/nxMR2NGFik.md` (Full-Stack View) | 3.50 | Taxonomy/survey; current paper is a primary research contribution. |
-| `/home/wg25r/review_agent/human_reviews_2026/odMc2ZRGcw.md` (BLUR) | 2.50 | Benchmark paper; current paper is substantially stronger. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/qd9fA4LzVN.md` (Label Smoothing GA) | 4.50 | Similar structure (problem → fix → evaluation), but this paper has deeper problem analysis (squeezing effect mechanism) and more consistent gains across benchmarks. This paper is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/lAa9nhwLdu.md` (Stable Forgetting) | 4.67 | Comparable scope. This paper has stronger problem motivation but weaker theory. Roughly comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/7cEMkTu7Lf.md` (Unlearning Isn't Deletion) | 4.00 | Purely analytical paper without a method. This paper proposes a method, making it a more complete contribution. |
+| `/home/wg25r/review_agent/human_reviews_2026/rzi77zNngG.md` (Leak@k) | 4.00 | Evaluation-only paper. This paper contributes both diagnosis and treatment. |
+| `/home/wg25r/review_agent/human_reviews_2026/nxMR2NGFik.md` (LLM Unlearning Under Microscope) | 3.50 | Survey/analysis paper. This paper has a novel method and is clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/wec4qy2XIF.md` (Explainable LLM Unlearning) | 4.00 | Similar structure. This paper has cleaner problem-solution alignment though weaker on robustness evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/IPqUBL4R9x.md` (Distributional Unlearning) | 6.00 | Stronger theory and formal guarantees. This paper tackles a more practical LLM setting but lacks comparable theoretical rigor. |
 
-The paper under review is clearly above the 3.50–4.00 tier and compares favorably to the 4.50 anchors, offering both problem identification and a constructive solution with theoretical grounding. The modest gains and lack of statistical testing prevent a higher score but do not undermine the core contribution.
+Positioned relative to these anchors: this paper is clearly above the 3.5–4.0 cluster (purely analytical or evaluation-only papers) and comparable to the 4.5–4.7 cluster (method papers with theory + experiments). However, it has genuinely novel problem identification (squeezing effect) and consistent empirical support across diverse settings, which pushes it slightly above the mid-range cluster. The theoretical analysis is weaker than the 6.0 anchor but the paper compensates with practical contribution and breadth.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

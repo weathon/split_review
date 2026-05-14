@@ -1,18 +1,18 @@
+Now I have all the information I need. Let me synthesize the final review.
+
 ## Summary
 
-This paper demonstrates that aggregate auto-interpretability metrics (fuzzing/detection AUROC) for sparse autoencoders (SAEs) do not reliably distinguish between SAEs trained on real vs. randomly initialized transformers. Across five Pythia model sizes (70M–6.9B) and four randomization strategies, the authors find that randomized models often achieve AUROC scores comparable to trained models, while a Gaussian-noise control remains at chance. The key insight is that randomized models produce simpler, single-token features that are easy to explain, and the paper uses token-distribution entropy to reveal this difference in feature abstractness that aggregate scores miss.
+The paper applies sparse autoencoders (SAEs) to trained and randomly initialized Pythia transformers (70M–6.9B) and evaluates them using auto-interpretability metrics (fuzzing/detection AUROC) alongside reconstruction metrics. The central finding is that aggregate auto-interpretability scores for SAEs on trained and randomly initialized transformers can be surprisingly similar — especially for larger models — while a Gaussian-input control performs at chance. The paper introduces token distribution entropy as a complementary metric that reveals qualitative differences (low-entropy single-token features in random models vs. higher-entropy abstract features in trained models) that aggregate scores miss, and provides toy-model analysis suggesting random networks preserve or amplify input superposition.
 
 ## Strengths
 
-- **Comprehensive empirical sweep across model scales and randomization schemes**: The paper evaluates SAEs on five Pythia model sizes (70M–6.9B) with four distinct randomization strategies (re-randomized incl./excl. embeddings, step-0, and a Gaussian-noise control). The consistency of results across scales and the clear separation from the control baseline provide robust evidence for the central claim (Figures 1, 2; Appendices B, C).
+- **Important and timely sanity check.** The core idea — testing whether commonly used SAE interpretability metrics pass a random-weight baseline — is methodologically sound and addresses a gap in the literature. This directly parallels the Adebayo et al. sanity-check paradigm for saliency maps and applies it rigorously to SAE evaluation.
 
-- **Token-distribution entropy analysis provides genuine insight**: The entropy metric cleanly separates trained and randomized models: trained models show increasing entropy (more abstract features) with layer depth, while randomized models remain at low entropy (token-specific features). This directly demonstrates *what* aggregate AUROC misses, going beyond mere phenomenology (Figure 2, last row; Appendix H, Figure 20).
+- **Systematic ablation of randomization schemes.** Testing step-0, re-randomized with/without embeddings, and a Gaussian control isolates different sources of structure (parameter norms, embedding consistency, architectural inductive biases). The design cleanly separates "structure from data" from "structure from training." This is well-executed and informative.
 
-- **Well-constructed Gaussian-noise control validates metric sensitivity**: Replacing token embeddings with i.i.d. Gaussian noise at inference time yields near-chance AUROC (~0.5), proving the auto-interpretability pipeline can detect the absence of structure. This rules out the concern that the metrics are simply insensitive to everything (Figures 1, 2).
+- **Token distribution entropy as a constructive finding.** The entropy analysis (Figures 2, 20) provides a concrete demonstration that a simple complementary metric *can* capture differences that aggregate auto-interpretability misses — trained-model features show increasing entropy with layer depth while randomized-model features remain low-entropy. This gives practitioners a practical diagnostic tool.
 
-- **Robustness to training scale and SAE hyperparameters**: Results hold when SAEs are trained on 1B tokens instead of 100M (Appendix C) and across varying expansion factors (16–128) and sparsity levels (16, 32) (Appendices F, G), ruling out under-training or hyperparameter artifacts.
-
-- **Calibrated, honest claims**: The paper carefully avoids overstatement. It explicitly notes that results "do not imply that SAEs trained on real models fail to learn meaningful computational features" (Section 6) and acknowledges limitations transparently (Section 5). The recommended practice of routine randomized baselines is actionable and sensible.
+- **Scale and robustness.** Training SAEs across five Pythia model sizes (70M–6.9B) with multiple randomization types, plus hyperparameter ablations (expansion factor 16–128, sparsity 16–32), data-size checks (100M vs 1B tokens), and uncertainty quantification via 5 seeds for Pythia-70m (Appendix E) represents a substantial empirical effort.
 
 ## Weaknesses
 
@@ -20,66 +20,70 @@ This paper demonstrates that aggregate auto-interpretability metrics (fuzzing/de
 None.
 
 ### Major
-- **The core finding, while correct and well-documented, is partially self-explanatory given the paper's own analysis**: The paper shows that randomized features have lower token-distribution entropy (are simpler) and that simpler features are easier to explain (Appendix H). It is therefore not surprising that aggregate AUROC fails to separate trained from random — the metric is measuring something close to "explainability of activation patterns," and random models' simpler patterns are indeed explainable. The paper's contribution is effectively demonstrating *that* the metric fails and *why*, which is useful but not deeply surprising. The framing as a "sanity check" is appropriate but the result is more of a cautionary confirmation than a revelation.
+
+- **The title is broader than the evidence supports.** The paper claims "Automated Interpretability Metrics Do Not Distinguish Trained and Random Transformers," but its own results show that for smaller models (Pythia-70m, fuzzing AUROC: trained 0.63 vs. randomized 0.49–0.50) the metrics *do* distinguish meaningfully. For reconstruction metrics like CE loss, the paper explicitly states it "only makes sense for the trained variant." The paper's actual contribution — that aggregate auto-interpretability scores can fail to distinguish for *larger* models in certain settings, and that token distribution entropy reveals differences they miss — is narrower and more nuanced than the title suggests. The paper's own conclusion (lines 707–711) appropriately uses "under certain conditions" and "particularly aggregate auto-interpretability scores," but the title and opening framing have not been updated to match.
 
 ### Minor
 
-- **Uncertainty quantification limited to the smallest model**: Only Pythia-70m has multi-seed error bars (Appendix E, 5 seeds). For larger models (Pythia-1b, 6.9b) we have single-point estimates with 100 latents sampled per SAE. While the consistency across model sizes and randomization schemes suggests the trends are robust, reporting uncertainty for at least one larger model would strengthen confidence.
+- **No confidence intervals for the most striking results.** For Pythia-6.9b (where trained AUROC is *lower* than randomized at layer 1, Figure 1), there are no error bars or bootstrap estimates across latents or seeds. Uncertainty quantification is only provided for Pythia-70m (Appendix E). The claim that trained and randomized "overlap" relies on visual inspection of single-run ROC curves, which is not statistically rigorous. This does not invalidate the qualitative pattern but weakens the precision of the claim.
 
-- **Toy model section (Section 4) is loosely connected to the main empirical findings**: The paper acknowledges this explicitly — "we leave the question of which predominates in the case of randomized transformers … to future work" (Section 4). The toy models demonstrate plausibility of two mechanisms (preservation and amplification of superposition) but do not directly test which mechanism explains the transformer results. This section reads as a sensible but incomplete hypothesis exploration. The main empirical contribution does not depend on it.
+- **Toy model analysis is loosely connected to the main results.** Section 4 uses a two-layer MLP on synthetic data and GloVe vectors to argue that random NNs preserve/amplify superposition. The paper candidly acknowledges (lines 525–526) that it "leaves the question of which predominates in the case of randomized transformers…to future work." This section reads as a plausibility argument rather than a mechanistic explanation, and its connection to the transformer SAE results is speculative rather than demonstrated. It could be shortened or moved to the appendix.
 
-- **No concrete alternative metric proposed**: The paper identifies what aggregate AUROC misses and recommends "targeted measures of feature abstractness," but stops short of proposing or validating a specific alternative. The entropy metric is presented as a proof-of-concept diagnostic but not developed into a calibrated evaluation tool. This limits the paper's constructive contribution relative to its critical one.
+- **Only one explanation model is tested.** All auto-interpretability scores use Llama-3.1-70B as the evaluator. The robustness of the findings across different explanation models (e.g., smaller LLMs, different families) is not assessed. This is acknowledged in the Limitations section (lines 695–696).
 
 ### Trivial
 
-- The per-latent entropy–AUROC scatter plots (Appendix H, Figure 20) contain some of the paper's most informative analysis showing how trained models uniquely produce high-entropy, high-AUROC latents. Elevating this visualization or its key insight to the main text would strengthen the narrative.
+- Figure 2 uses different y-axis ranges across metrics, which can make visual comparisons between metrics harder to interpret at a glance.
+- The token distribution entropy metric is presented as a proxy for feature "abstractness" but is not validated against human judgment or downstream task performance.
 
 ## Nice-to-Haves
 
-- Testing whether the findings hold with an alternative explanation-generation LLM (beyond Llama-3.1-70B) would probe the robustness of the explanation pipeline itself, though the paper acknowledges this limitation.
-- Extending the entropy analysis into a formal metric (e.g., entropy-weighted AUROC) would move the paper from critique to constructive proposal, though this is beyond the stated scope.
+- Formal statistical tests (e.g., whether trained AUROC falls within the 95% CI of randomized AUROC) for the larger models would strengthen the similarity claim.
+- Testing whether the result holds for other SAE architectures (Gated SAEs, JumpReLU SAEs, crosscoders) beyond TopK SAEs.
+- Causal evaluation (e.g., activation steering or patching on SAE features from random vs. trained models) to directly test whether features are "computationally relevant."
+- An analysis of why trained AUROC *decreases* relative to randomized for larger models (lines 326–327 speculate about SAE size but do not test it).
 
 ## Removed Points
 
-**These points are flagged to be removed, treat them with caution.**
+**These points are flagged to be removed, treat them with caution:**
 
-1. **"The paper's central framing misconstrues what auto-interpretability metrics are designed to do" (Harsh Critic, Point 1)**: This criticism is factually wrong. The paper explicitly frames its contribution as a sanity check (following Adebayo et al., 2020) — applying a test that the metric was not originally designed for, to see if it nonetheless passes. This is standard and valid methodology. The paper does not claim the metric was designed for this purpose; it claims the metric is *used* as evidence of meaningful feature discovery, and the sanity check reveals this evidence is insufficient. The section explicitly states the paper's scope: "High aggregate auto-interpretability scores do not, by themselves, guarantee that learned, computationally relevant features have been recovered" — which is precisely what the experiments support.
+- **Criticism that "CE loss score" contradicts the title:** Removed because CE loss is a reconstruction metric, not an "automated interpretability metric." The paper's title refers to interpretability metrics and CE loss is presented as a separate evaluation. The paper does not claim CE loss fails to distinguish — it explicitly says the opposite.
+  
+- **Criticism that "explained variance and cosine similarity show large differences":** Removed because inspection of Figure 2 shows that trained and randomized variants have nearly identical values for these metrics (cosine similarity ~0.95–1.0 for all non-control variants), while the control is far lower. This supports, not contradicts, the paper's claim.
 
-2. **"The AUROC comparison is critically confounded by feature complexity" (Harsh Critic, Point 2)**: This criticism misunderstands the paper's argument. The paper's main point is *exactly* that aggregate AUROC fails to account for feature complexity/abstractness differences. The entropy analysis (Section 3, Appendix H) is not an overlooked confound — it is the paper's central explanatory mechanism. The paper explicitly states: "this suggests that standard SAE quality and auto-interpretability metrics are missing an important aspect of SAE features: their 'abstractness'" (Section 3). The claim that "without controlling for feature difficulty, the AUROC comparison is uninterpretable" inverts the paper's logic: the paper argues that the comparison *reveals* the need for such control.
+- **Criticism about "Pythia-70m trained is closer to control than randomized":** Removed because it is factually wrong. Trained AUROC = 0.63, randomized = 0.49–0.50, control = 0.44. Trained (0.63) is closer to randomized (0.49–0.50) than to control (0.44) by 0.05–0.06. The paper acknowledges the gap for small models (lines 181–183) and this is consistent with its nuanced framing.
 
-3. **"The analogy to saliency map sanity checks is inappropriate" (Harsh Critic, Section-by-Section)**: The Adebayo et al. (2020) analogy is directly appropriate. Both cases involve: (a) an interpretability method that produces apparently meaningful outputs, (b) a sanity check comparing outputs on trained vs. randomized models, and (c) a finding that the outputs are similar, casting doubt on whether the method captures learned computation. The fact that "random projections preserve geometry" does not invalidate the analogy — it is part of *why* the result is interesting and worth documenting.
-
-4. **"Figure 1/2 interpretation: randomized variants outperform trained — the paper does not discuss why this does not constitute distinguishing" (Harsh Critic)**: The paper does discuss this. Section 3 explains that randomized models produce simpler (lower-entropy) features, which are easier to explain. The fact that randomized models sometimes score higher is consistent with the paper's explanation and is not contradictory to the claim.
-
-5. **"CE loss score is fine but does not add evidence" (Harsh Critic)**: Not a weakness — the paper itself notes CE loss only makes sense for trained models (line 332-335) and includes it for completeness.
-
-6. **Strength Finder claim about "plausible mechanistic toy-model analysis" deepening the contribution "beyond pure phenomenology"**: While the toy models are interesting, the paper itself is cautious about their connection to the main results. This strength is overstated — the toy models demonstrate plausibility but do not provide mechanistic confirmation.
+- **Strength about "Toy model providing mechanistic explanation":** Weakened from core strength to a minor/speculative analysis. The paper itself acknowledges the toy model does not definitively explain the transformer results, making this claim of a "mechanistic explanation" too strong.
 
 ## Novel Insights
 
-The paper's most novel insight is the use of token-distribution entropy to decompose what aggregate AUROC obscures: trained transformers produce a *mixture* of simple token-specific features and complex abstract features, while random transformers produce almost exclusively simple features. The entropy–AUROC scatter plots (Appendix H, Figure 20) reveal that trained models uniquely exhibit latents with *both* high entropy and high AUROC — features that are spread across many tokens yet whose activation patterns are consistently explained. This suggests that the "interesting" features we care about are precisely those in the upper-right quadrant of the entropy–AUROC space, providing a concrete target for future metric development.
+The most interesting pattern to emerge from this review, beyond the paper's own contributions, is the tension between how interpretability research evaluates SAEs and what those evaluations actually measure. The harsh critic correctly notes that the paper's evidence is stronger for auto-interpretability specifically (fuzzing AUROC) than for "automated interpretability metrics" broadly—yet the paper's own entropy analysis shows the most promising path forward is precisely *not* aggregate metrics but distributional ones that capture feature abstractness. This suggests the field may need a fundamental rethinking: instead of asking "is this feature interpretable?," the more productive question may be "does this feature's behavior change systematically with model depth or with training?" The paper's entropy finding is a proof-of-concept for this paradigm shift, but it is buried under the more provocative framing.
 
 ## Suggestions
 
-- Move the key insight from Appendix H Figure 20 into the main text: trained models uniquely produce high-entropy, high-AUROC latents, while randomized models' high AUROC is confined to low-entropy features. This single observation crystallizes the paper's message.
-- Report multi-seed uncertainty for at least one larger model (e.g., Pythia-1b) to demonstrate that the trends are not an artifact of the 100-latent sample.
-- Consider binned AUROC-by-entropy analysis as a bridge toward a difficulty-aware composite metric, even if only as a sketch for future work.
+1. **Retitle the paper** to more accurately reflect the findings. For example: "Aggregate Auto-Interpretability Scores Can Fail to Distinguish Trained from Random Transformers, but Token Distribution Entropy Reveals Underlying Differences" or similar. The current title invites a level of generality the evidence does not fully support.
+
+2. **Add bootstrap confidence intervals** for the AUROC values of the larger models (Pythia-1b, Pythia-6.9b) — either by resampling latents or by training multiple SAE seeds. This would put the similarity claim on firmer statistical ground.
+
+3. **Reorganize the toy model section** to make clear it is a plausibility argument / intuition-building exercise, not a mechanistic explanation of the transformer results. Consider moving it to the appendix or drastically shortening it in the main text.
+
+4. **Elevate the token distribution entropy finding** — this is the paper's most constructive and original contribution. Consider framing the paper's narrative around "what aggregate metrics miss" rather than "what metrics fail to do."
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors (all from the human review corpus):**
 
-| Path | Avg Score | How it compares |
-|------|-----------|-----------------|
-| `mqNKv0brqk` (CE-Bench) | 1.00 | Far weaker — fundamental execution quality issues, no proper baselines, withdrawn. Our paper is substantially stronger. |
-| `119qowYLUX` (SAE Feature Sensitivity) | 3.50 | Similar domain (SAE evaluation critique). That paper had more limited scope and a mixed reception. Our paper has broader experimental coverage and a clearer explanatory mechanism (entropy). Our paper is stronger. |
-| `Q4ooLNOFeR` (Interpretability vs Utility) | 4.50 | Most similar in spirit — demonstrates a limitation of interpretability metrics. That paper trained 90 SAEs and proposed a concrete solution (Δ Token Confidence). Our paper has comparable breadth (5 model sizes, 4 randomization schemes) and offers an explanatory mechanism (entropy) but does not propose a solution. Comparable — accepted as poster. |
-| `EjInprGpk9` (SAEs Learn Different Features) | 5.50 | Similar empirical critique of SAE assumptions. That paper's finding (seed-dependent features) was more surprising and it proposed a novel matching methodology. Our paper's finding is somewhat more expected given the entropy analysis. Our paper is slightly weaker in novelty but comparable in execution quality. |
-| `9lycwRxAOI` (Interpretive Equivalence) | 6.00 | Significantly stronger — formal theoretical framework with algorithms and proofs. Our paper is purely empirical. |
-| `kHhMs642rR` (Evaluating SAE without explanations) | 3.50 | Related domain but different focus. Our paper has broader experimental coverage. |
-| `XPm8t1J1g7` (Random Noise vs Saliency) | 4.00 | Different domain (CV attribution). Similar sanity-check spirit but different quality. Our paper is better executed. |
+| Anchor Path | Avg Score | Comparison to this paper |
+|---|---|---|
+| `/home/.../DSOTgzeH3w.md` | 6.00 | Stronger: provides closed-form theoretical analysis of SAE limits. This paper is more empirical and has an overstated title. |
+| `/home/.../EjInprGpk9.md` | 5.50 | Stronger: clean empirical study with well-scoped claims. This paper has similar scope but the claim/evidence mismatch is a real weakness. |
+| `/home/.../119qowYLUX.md` | 3.50 | Weaker: had a major methodological confound (selective filtering). This paper's methodology is cleaner. |
+| `/home/.../kHhMs642rR.md` | 3.50 | Comparable breadth: different SAE evaluation method with narrower empirical validation. This paper's empirical scope is broader. |
+| `/home/.../YD1P4DVtdk.md` | 3.00 | Weaker: niche variance analysis with limited actionable findings. This paper addresses a broader, more timely question. |
+| `/home/.../Ds8IunNp2a.md` | 2.50 | Much weaker: flawed theoretical framing. This paper's empirical work is substantially sounder. |
+| `/home/.../UJ2UUjT2ko.md` | 8.00 | Much stronger: deep mechanistic analysis with clean causal evidence. This paper does not aim for that level of mechanistic depth. |
 
-The paper sits between Q4ooLNOFeR (4.50) and EjInprGpk9 (5.50). It has comparable experimental breadth to both, a useful explanatory mechanism (entropy), honest scoping, and a clear message. The core finding, while well-documented, is partially self-explanatory (simpler features from random models are easier to explain). The paper would be stronger with a concrete proposed metric, but its contribution as a cautionary empirical study with actionable recommendations is solid and warrants acceptance.
+The paper makes a real contribution: the random-baseline sanity check is important, the systematic comparison across randomization schemes is well-designed, and token distribution entropy is a genuinely useful discovery. The experiments are substantial and the core finding — that aggregate auto-interpretability scores for larger models can be similar between trained and random transformers — is meaningful. However, the title overclaims relative to the evidence, the lack of confidence intervals for the most striking results weakens the central similarity claim, and the toy model analysis is loosely connected. On balance, this is a solid empirical paper with a framing problem that can be fixed.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

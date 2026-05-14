@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compile the final review.
+Now I have all the information I need. Let me synthesize the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces Count Bridges, a stochastic bridge process on $\mathbb{Z}^d$ built from independent Poisson birth–death processes that yields closed-form conditional transitions (Binomial/Hypergeometric). The framework provides an exact discrete analogue of diffusion/flow models for count data. The authors extend Count Bridges to deconvolution of aggregated observations via an EM-style algorithm that treats unit-level counts as latent variables, using a projection-guided sampler to approximate the aggregate-conditional distribution. The method is demonstrated on synthetic benchmarks (low-rank Gaussian mixtures scaling to $d=512$, deconvolution of Gaussian mixtures) and two large-scale biological applications: nucleotide-resolution bulk RNA-seq deconvolution and reference-free spatial transcriptomic deconvolution.
+This paper introduces Count Bridges, a stochastic bridge process on the integers using Poisson birth-death dynamics that yields closed-form conditionals (binomial-hypergeometric kernels with Bessel slack posteriors) for generative modeling of count data. The framework is extended to deconvolution from aggregated observations via an EM-style algorithm with projection-guided diffusion. The method is validated on synthetic benchmarks (showing scaling advantages over continuous and discrete flow matching), nucleotide-resolution single-cell RNA-seq modeling with bulk deconvolution, and spatial transcriptomic deconvolution.
 
 ## Strengths
 
-- **Novel and elegant integer bridge construction**: The Poisson birth–death bridge with Binomial/Hypergeometric conditional sampling (Proposition 3.1) is original and mathematically sound. The composition property (Theorem A.9) and the connection to entropy-regularized optimal transport (Section 3) provide a clean theoretical foundation that naturally parallels the Gaussian case.
+- **Novel mathematical framework with closed-form conditionals:** The Poisson birth-death bridge with binomial-hypergeometric kernels and Bessel slack posteriors (Proposition 3.1) is a genuine technical contribution. Unlike Blackout Diffusion (pure-death, cannot transport between arbitrary distributions), Count Bridges provides exact, tractable bridge kernels that satisfy compositionality (bridge consistency identity 1) and admit closed-form sampling. The connection to entropic optimal transport via the κ parameter (Section 3.1, Appendix A.2) provides principled grounding.
 
-- **Natural use of distributional scoring rules**: Employing the energy score instead of cross-entropy for the denoiser is well-motivated for count data — it respects lattice geometry and enables joint modeling across dimensions, unlike the per-coordinate factorization required by cross-entropy. The ablation in Table 6 confirms its benefit.
+- **Demonstrated scaling advantage over flow matching baselines:** The low-rank Gaussian mixture experiments (Figure 3, Table 9) convincingly show Count Bridges maintaining low MMD, W₂, and EMD as ambient dimension scales from 4 to 512, while CFM and DFM degrade substantially. At dimension 512 with NFE=128, Count Bridge achieves MMD=0.113±0.029 vs DFM 0.319±0.112 and CFM 0.438±0.034 — roughly a 3-4x improvement.
 
-- **Ambitious and relevant biological applications**: The paper tackles two real, large-scale problems — nucleotide-resolution sequence-to-expression modeling and spatial transcriptomic deconvolution — using architectures of genuine scale (Enformer embeddings, UViT). The CB outperforms a fine-tuned Enformer on sequence-to-expression prediction (Table 1) and surpasses STDeconvolve on reference-free spatial deconvolution (Table 4). These are non-trivial domains where count-valued modeling matters.
+- **Principled deconvolution framework with honest limitations analysis:** The EM-style approach (Algorithms 3-4) treating unit-level counts as latent variables with projection-guided diffusion is creative. The paper stands out for its rigorous theoretical analysis of when deconvolution is and is not possible: Appendix B.2-B.3 provides an honest treatment of identifiability (factorial cumulant framework), the CLT collapse of aggregate information for large groups, and the conditions under which recovery succeeds. The limitations section (Section 7) candidly acknowledges that "the projection step we use is a first-order surrogate and lacks serious theoretical support."
 
-- **Transparent about limitations**: The paper explicitly acknowledges in Section 7 that the projection step "lacks serious theoretical support" and that identifiability degrades with large group sizes. This honesty strengthens the contribution.
+- **Real-world biological validation across two modalities:** The nucleotide-level bulk RNA-seq deconvolution (Table 3) shows Count Bridges outperforming CIBERSORTx and MuSiC on JSD (0.113 vs 0.194, 0.313), RMSE (0.073 vs 0.109, 0.140), and Spearman correlation (0.267 vs 0.079, 0.186). The spatial transcriptomics application (Table 5) reduces MMD from 0.409 (spot mean) to 0.203 and energy score from 41.717 to 8.903. The model also shows competitive performance against the reference-based method RCTD (Appendix F.3) despite being reference-free.
 
 ## Weaknesses
 
@@ -24,71 +24,72 @@ None.
 
 ### Major
 
-- **The EM deconvolution scheme is not ablated against simpler alternatives**: The paper never compares its EM procedure (Algorithm 4) against a straightforward baseline: training a conditional CB that takes the aggregate as input directly, or using post-hoc optimization on a pretrained CB. Without this ablation, it is impossible to assess whether the projection-guided EM machinery actually improves deconvolution over much simpler approaches. This is a significant methodological gap for a paper whose central application is deconvolution.
+- **The nucleotide-level resolution advantage is not empirically demonstrated.** The paper trains at "nucleotide resolution" (L=896 positions per example) but evaluates after aggregating to gene-level counts. The comparison against CIBERSORTx and MuSiC is on cell-type proportion recovery — a gene-level task where these baselines are designed to operate. The paper never shows that nucleotide-resolution training provides any benefit over training directly on gene-level counts, nor does it validate that the nucleotide-level predictions themselves are accurate. The claim of "nucleotide-level deconvolution" is thus a property of the input representation, not a demonstrated capability of the output. An ablation comparing nucleotide-level training against gene-level training (or against simply decoding at each nucleotide independently) is needed to substantiate this claim.
+
+- **The EM training procedure lacks theoretical grounding and the projection module is not ablated.** The paper calls the procedure "EM-style" and "generalized EM" (citing Rozet et al., 2024), but the E-step does not compute or approximate the true posterior — it uses the model's own sampling process with projection guidance. The M-step optimizes an aggregate-level score rather than a proper expected complete-data log-likelihood. While the paper honestly acknowledges this limitation (Section 7: "lacks serious theoretical support"), the deconvolution results rest entirely on this heuristic. Furthermore, the learned projection module Π_ψ (Section 6.2) is trained on only 10% of examples, and there is no ablation comparing against (a) the simple rescaling from Proposition 4.1 or (b) no projection at all. Without this, it is unclear whether the complex learned projection adds value over a trivial baseline.
+
+- **Missing critical baselines for deconvolution.** The bulk deconvolution comparison (Table 3) includes only CIBERSORTx and MuSiC. Neither simple baselines (e.g., non-negative least squares, Poisson likelihood deconvolution, or mean assignment) nor additional reference-free spatial methods (beyond STDeconvolve) are compared. In the spatial setting, the model is evaluated on synthetic aggregates (MERFISH cells aggregated to simulate Visium spots) rather than real Visium data with ground truth cell-type proportions. A proper validation would deconvolve real Visium spots where a matched single-cell reference exists, enabling direct comparison of predicted vs. true profiles.
 
 ### Minor
 
-- **The DFM baseline uses a per-dimension categorical representation that is suboptimal for count data**: The paper's discrete flow matching (DFM) baseline represents each of $d$ dimensions as an independent categorical variable over 256 tokens (line 2964). While this is a natural way to apply DFM to integer-valued data, it makes DFM's poor scaling somewhat predictable — the model must output $d \times 256$ logits and cannot exploit ordinal structure. A count-aware baseline (e.g., CFM with rounding, or a probability-based discretization of CFM predictions) would make the synthetic scaling comparisons more informative. The claim of "state-of-the-art performance on integer distribution matching benchmarks" should therefore be qualified by noting the limited baseline coverage.
+- **No sensitivity analysis for key hyperparameters in real applications.** The model requires choosing λ₊, λ₋ (or equivalently κ), number of reverse steps K, noise dimension, and batch size. The synthetic ablation (Table 7) shows performance varies with κ, yet no guidance or sensitivity analysis is provided for the real biological applications. The paper reports using K=3 function evaluations for the nucleotide application (Appendix E.2.6) but does not justify this choice or show its effect.
 
-- **Comparison to STDeconvolve relies on nearest-neighbor cell-type assignment**: To compare CB (which outputs full count profiles) against STDeconvolve (which outputs cell-type proportions), the paper assigns each predicted count profile to its nearest-neighbor cell type. While this is a reasonable approach, hard nearest-neighbor assignment can produce cleaner proportion estimates than methods that must directly predict soft proportions — potentially inflating CB's advantage on JSD/RMSE. This caveat should be acknowledged.
+- **The deconvolution evaluation on synthetic bulk data does not substitute for real bulk validation.** Section 6.2 holds out 10% of patients and synthetically bulks their data. While this provides ground truth, it is still a synthetic setting — the method's performance on real bulk RNA-seq (where ground truth is unknown) is unvalidated. The evaluation would be strengthened by comparison to benchmarks from the CIBERSORTx literature where ground truth proportions from flow cytometry or computational gold standards are available.
+
+- **The spatial transcriptomics application uses a simplified domain transfer.** The MERFISH-to-Visium transfer (Appendix F.3) uses moment-matching to align feature spaces, and the main evaluation in Section 6.3 uses MERFISH data synthetically aggregated to simulate Visium. The real Visium deconvolution (Appendix F.3) is evaluated only through consistency checks (cell type abundance) rather than quantitative comparison to ground truth.
 
 ### Trivial
 
-- The "RCTD comparison (Appendix F) shows CB trailing in JSD and Spearman" — while the appendix discussion reasonably notes RCTD has access to single-cell reference data (an unfair advantage), the main text's presentation of CB as uniformly outperforming could be slightly more nuanced. That said, the paper explicitly directs readers to Appendix F for reference-based comparisons, so this is minor.
-
-- The "state-of-the-art" language in the abstract and introduction is somewhat broad given the limited baseline coverage on the synthetic benchmarks.
+- The paper could benefit from a table summarizing all hyperparameter choices and NFE settings for each experiment in one place.
+- Figure 4 could be more informative with per-cell-type error breakdowns rather than aggregate metrics alone.
 
 ## Nice-to-Haves
 
-- Deriving concrete error bounds for the first-order projection approximation at the group sizes used in the biological applications would substantially strengthen the deconvolution contribution.
-- A simulation study with known ground truth assessing whether the projection-guided sampler actually recovers the correct posterior over unit-level variables would be valuable.
-- Comparison with a continuous-diffusion-plus-rounding baseline on the synthetic integer distribution matching benchmarks.
+- Comparison against simple deconvolution baselines (NNLS, Poisson NMF) would establish what the generative approach adds beyond optimization-based methods.
+- Visualizing the deconvolution trajectories (how predicted count profiles evolve through the reverse sampling process) for real data would build intuition for the method's behavior.
+- An ablation of the number of reverse steps K in the real applications would help practitioners understand the cost-quality tradeoff.
 
 ## Removed Points
 
 These points are flagged to be removed, treat them with caution:
 
-- **"The deconvolution method lacks a rigorous foundation... the paper itself states that this step 'lacks serious theoretical support'"** — This is the paper's own acknowledged limitation (Section 7), not a hidden flaw. The paper is transparent about it, and in the biological applications a learned projection Π_ψ is used instead of the simple rescaling. The criticism is valid as a limitation but does not need to be restated as if it were an undisclosed problem.
-
-- **"The conversion of nucleotide-level CB predictions to gene-level proportions introduces an unquantified mapping that favors CB"** — The nucleotide-to-gene aggregation is a natural operation (summing counts across nucleotides within a gene) and is unlikely to introduce systematic bias favoring CB. The claim that it "favors CB" is speculative without evidence.
-
-- **"CIBERSORTx and MuSiC... it is unclear whether they had access to the same training single-cell data"** — CIBERSORTx and MuSiC are well-established reference-based methods with their own published signatures. Using them as baselines with their standard configurations is appropriate; they represent the state of the art in cell-type proportion deconvolution. Any mismatch in training data would likely disadvantage CB (trained on the specific dataset) rather than favor it.
-
-- **"The spot mean baseline for count profiles is trivially weak"** — The paper itself argues (lines 809–817) that the spot mean is biologically well-motivated in spatial transcriptomics because neighboring cells have correlated expression. The paper acknowledges it is a simple baseline and uses it because STDeconvolve cannot output count profiles.
-
-- **"No comparison with Blackout Diffusion"** — The paper explicitly discusses why Blackout Diffusion is not directly comparable: it is a pure-death process that cannot transport between arbitrary distributions (Section 5, line 545-548).
-
-- **Strength Finder claim about "state-of-the-art performance" without qualification** — Dropped as it conflicts with the verified weakness about limited baseline coverage (minor weakness above).
-
-- **Strength Finder generic claims**: "addressed an important problem," "targeted an interesting question" — Dropped as generic/superficial.
+- **"Enformer baseline comparison is fundamentally unfair"** — The paper fine-tunes Enformer on the same PBMC dataset. While the comparison may be imperfect (Enformer is designed for gene-level prediction), the authors acknowledge fine-tuning and the claim of "fundamentally unfair" overstates the issue.
+- **"The deconvolution comparison is asymmetric"** — All methods (CB, CIBERSORTx, MuSiC) are evaluated on the same cell-type proportion metrics. CB's additional step of aggregating predictions does not make the comparison asymmetric; it simply reflects CB's more granular output.
+- **"The authors do not report whether they used the same input data"** — This is an assumption not verified by reading the paper; the experimental setup in Section 6.2 and Appendix E describes the data pipeline.
+- **"Unclear how inference seed variation arises"** — The paper states (Section 6): "Synthetic tasks have std. errors over 3 training seeds; main applications have std. errors 3 over inference seeds." This is clearly explained.
+- **Missing comparison against Cell2location/DestVI** — The paper scopes its spatial comparison to reference-free methods and provides a comparison against RCTD (reference-based) in Appendix F.3, showing competitive performance despite being reference-free.
+- **"The model is not truly reference-free"** — The model uses single-cell data only for pre-training/distribution learning; during deconvolution it uses only aggregate data. This matches standard definitions of reference-free.
+- **"EM algorithm does not follow standard EM"** — The paper explicitly calls it "EM-style" and "generalized EM problem" (citing Rozet et al., 2024), never claiming standard EM convergence.
+- **Missing related work (Poisson factor analysis, NMF)** — The paper scopes itself as a generative modeling (diffusion-style) contribution, not a review of all count-based methods. These are not directly comparable approaches.
 
 ## Novel Insights
 
-The connection between Count Bridges and entropy-regularized optimal transport (the _κ_-parameter playing the same role as _σ_ in Gaussian bridges) is genuinely insightful and not merely an analogy: both frameworks recover their respective OT costs (_|x₁ − x₀|_ for counts, _∥x₁ − x₀∥²_ for Gaussians) in the low-noise limit. This suggests a broader principle — that bridge-based diffusion models are fundamentally solving regularized OT problems where the forward noising process defines the cost structure. Making this explicit could inform future bridge designs for other structured discrete spaces.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-- Add an ablation comparing the EM procedure against a direct conditional model (aggregate as input) on at least one dataset (e.g., the Gaussian mixture deconvolution task). This would isolate the value of the EM machinery.
-- Qualify the "state-of-the-art" claim on synthetic benchmarks by noting that the baselines (CFM, DFM) represent standard flow-matching approaches but are not count-optimized.
-- Include a continuous-diffusion-plus-rounding baseline on the synthetic integer benchmarks to strengthen the claim that CB is meaningfully better than continuous methods for count data.
-- Acknowledge that the nearest-neighbor cell-type assignment for STDeconvolve comparison could introduce a subtle advantage for CB.
+1. **Ablate the projection module** — Compare the learned Π_ψ against (a) the simple rescaling from Proposition 4.1 and (b) no projection, to isolate the value of the learned component.
+2. **Add a gene-level training baseline** — Train Count Bridges on gene-level aggregated counts and compare against nucleotide-level training on the deconvolution task to demonstrate whether nucleotide resolution actually helps.
+3. **Include simple optimization-based deconvolution baselines** (NNLS, Poisson GLM) to establish what value the generative approach adds.
+4. **Provide hyperparameter sensitivity analysis** for κ, K (NFE), and noise dimension in at least one real application.
+5. **Consider evaluating on a real Visium dataset with matched scRNA-seq reference** to strengthen the spatial deconvolution validation.
 
-**Assessment across axes**: The **originality** is high — the Poisson birth–death bridge is genuinely novel. The **research question** (generative modeling and deconvolution of count data) is important, particularly for transcriptomics. The **core claims** about the bridge construction are well-supported; the deconvolution claims are partially supported with an acknowledged theoretical gap. **Soundness** of the bridge theory is excellent; the deconvolution evaluation is adequate but missing a key ablation. **Clarity** is generally good, with well-structured algorithms and figures. **Value to the community** is substantial — the bridge construction and CUDA Bessel sampler will be useful to practitioners working with count data, and the biological applications demonstrate practical impact.
+## Score and Decision
 
-## Calibration Anchors
+### Calibration Anchors
 
-| Anchor | Avg Score | Comparison to paper under review |
-|--------|-----------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/p6YqLhrdhJ.md` (CountsDiff) | 4.00 | Similar domain (count diffusion) but less novel — a reparameterization of Blackout with weaker experiments. CB paper is substantially stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/azJnEkfqzp.md` (Discrete Markov Bridge) | 4.50 | Discrete diffusion with learnable rate matrix; theoretical guarantees were found too weak and experiments limited. CB paper has stronger theory and more comprehensive experiments. |
-| `/home/wg25r/review_agent/human_reviews_2026/5ekhMkawuT.md` (Quantization-Aware Diffusion) | 5.50 | Strong technical contribution for handling quantized data with clear NLL gains. Comparable quality — solid contribution with some limitations. |
-| `/home/wg25r/review_agent/human_reviews_2026/1taAXRcm21.md` (Unification of Discrete, Gaussian, Simplicial) | 6.00 | Innovative unifying theory with Wright-Fisher connection; limited practical applicability noted. CB paper has broader practical scope but acknowledged theoretical gaps in deconvolution. |
-| `/home/wg25r/review_agent/human_reviews_2026/wwPSfcf5Pj.md` (Prism) | 6.50 | Strong biological application with thorough experiments and novel causal framework. CB paper is broader in scope (generative + deconvolution) but less thoroughly validated on individual applications. |
-| `/home/wg25r/review_agent/human_reviews_2026/l7QEoK4uDP.md` (SAVE) | 5.00 | Flow matching for single-cell generation; mixed reviews (8, 2, 4, 6). CB paper is more innovative mathematically and has more coherent reviews. |
-| `/home/wg25r/review_agent/human_reviews_2026/cgPyllO65i.md` (PANDORA) | 2.50 | Diffusion for protein conformations; validation heavily criticized as insufficient. CB paper is far stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/RDerF20JYT.md` (La-Proteina) | 8.00 | Atomistic protein generation via partially latent flow matching; clearly exceptional. CB paper is not at this level — the deconvolution contribution has acknowledged gaps. |
+| Anchor | Avg Score | Comparison to Current Paper |
+|--------|-----------|-----------------------------|
+| p6YqLhrdhJ (CountsDiff) | 4.00 | Substantially weaker framework (pure-death only, incremental over Blackout); Count Bridges has genuinely novel closed-form bridge and stronger theory. |
+| azJnEkfqzp (Discrete Markov Bridge) | 4.50 | Weaker theory with limited convergence guarantees; Count Bridges has cleaner mathematics and broader validation. |
+| 1taAXRcm21 (Unification of Discrete/Gaussian/Simplicial Diffusion) | 6.00 | Similar level of theoretical contribution; Count Bridges has broader application scope but less tightly controlled experiments. |
+| RJHHbXhokV (SCSI) | 5.50 | Both papers have novel frameworks with honest limitations; Count Bridges has more extensive synthetic benchmarks. |
+| RSIoYWIzaP (Ψ-Samplers) | 7.00 | More focused technical contribution with stronger empirical validation; Count Bridges is more ambitious but has uneven validation. |
+| ctq8BfUXWz (BranchSBM) | 4.50 | Narrower contribution; Count Bridges has broader scope and more novel mathematics. |
+| wwPSfcf5Pj (Gene Expression Prediction) | 6.50 | Stronger biological validation; Count Bridges has a more novel methodological contribution. |
+| QH6RdbtWou (GenICF) | 4.67 | Much narrower scope and application domain. |
 
-The paper sits between the Quantization-Aware Diffusion (5.50) and the Unification paper (6.00). The core bridge construction is strong and the biological applications are compelling, but the deconvolution mechanism has an acknowledged theoretical gap and a missing ablation that prevent a higher score.
+The paper is substantially stronger than papers scoring in the 4.0–5.5 range (CountsDiff, Discrete Markov Bridge, BranchSBM). It is comparable to papers scoring 6.0–6.5 (Unification paper, SCSI, Gene Expression Prediction) — it has a genuinely novel theoretical contribution that is cleaner than most, strong synthetic validation, but uneven empirical validation on the biological applications. The paper is not as focused or tightly validated as the 7.0 Ψ-Samplers paper. The core methodological contribution (the Count Bridges framework with closed-form conditionals) is solid and well-presented, but the application sections would benefit from additional ablations and baselines.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

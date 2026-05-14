@@ -1,116 +1,92 @@
+Now I have a thorough understanding of both the paper and the calibration landscape. Let me write the consolidated review.
+
 ## Summary
 
-This paper introduces **InnoGym**, a benchmark and evaluation framework for measuring the innovation potential of AI agents along two complementary axes: **performance gain** (improvement over best-known solutions) and **methodological novelty** (dissimilarity to prior approaches). The benchmark (iBench) comprises 18 carefully curated Improvable Tasks sourced from real-world competitions and classical problems, each standardized through multi-stage filtering, evaluator normalization, and solution collection. A companion execution environment (iGym) provides unified infrastructure for long-horizon agent evaluation. Experiments on three agent scaffolds (MLAB, CODEACT, AIDE) reveal that while agents can exhibit moderate novelty, they consistently fail to surpass human state-of-the-art performance, exposing a robustness–creativity gap that the benchmark is uniquely designed to measure.
-
----
+InnoGym proposes a benchmark and framework for evaluating the innovation potential of AI agents along two dimensions: **performance gain** (improvement over known baselines) and **methodological novelty** (dissimilarity from prior solutions). The benchmark includes 18 "improvable tasks" curated from real-world competitions, standardized through multi-stage filtering. A companion execution environment (iGym) supports reproducible, long-horizon evaluation. Experiments on three agent frameworks (MLAB, CODEACT, AIDE) show that current agents universally fail to achieve positive performance gain, with most novelty scores in the 30-70 range, suggesting a gap between creativity and robust execution.
 
 ## Strengths
 
-- **Principled dual-metric framework**: The paper formalizes innovation through performance gain *G* and novelty *N* (Equations 2–3), grounded in a task quadruple (P, S, V, D) and a taxonomy of solved / improvable / exploratory problems (Section 2). This moves beyond correctness-only benchmarks in a well-motivated way, and Table 1 convincingly shows no prior benchmark evaluates both dimensions simultaneously.
+1. **Well-motivated and principled formal framework.** The quadruple formulation (P, S, V, D), the performance gain / novelty decomposition, and the taxonomy of solved/improvable/exploratory tasks provide a clean conceptual foundation that existing benchmarks lack. This framework cleanly captures something missing from prior work: the distinction between *what* a solution achieves and *how* it achieves it.
 
-- **Rigorous benchmark construction**: The 197 → 18 curation pipeline (Section 3, Appendix G) with resource filtering, evaluator normalization (Pearson ≥ 0.9, Kendall-τ ≥ 0.8 on ROADEF), validator construction, and solution collection is thorough and well-documented. Table 3 provides task metadata including reference solution counts and diversity scores, giving transparency into benchmark composition.
+2. **Rigorous and transparent benchmark construction.** The two-stage filtering pipeline (197→72→18 tasks), evaluator normalization with correlation checks (Pearson ≥ 0.9, Kendall-τ ≥ 0.8), and the solution collection process with independent cross-validation by three team members demonstrate serious methodological care. The resulting tasks span genuinely diverse domains (OR, ML, systems, science) drawn from real competitions rather than synthetic generation.
 
-- **Empirical validation of the novelty metric**: Appendix F validates D_AGENT on 50 EquiBench code triplets (Table 8: superficial edits = 1.00 vs. algorithmic variants = 9.75), 8 human-annotated triplets (Spearman ρ = 0.87, 75% triplet agreement — Table 10), and 3 human-expert method triplets across three AI subfields (perfect agreement, Table 12). This demonstrates the metric can distinguish superficial from substantive methodological changes at both code and paradigm levels.
+3. **Insightful experimental analyses that go beyond leaderboard reporting.** The temporal dynamics analysis (Figure 6a), the temperature exploration-exploitation trade-off on Circle Packing (Figure 6c), and the complex-plane representation of the innovation trajectory (Figure 5b) demonstrate that the two-metric framework can reveal agent behaviors that a single performance score would miss. The "sweet spot" at temperature 0.5-0.75 is a concrete, actionable finding.
 
-- **Meaningful empirical findings**: Table 2 shows that no agent achieves positive performance gain across 10 diverse tasks, and many task–agent pairs produce zero valid submissions (Table 6). The finding that agents can achieve moderate novelty (MLAB avg. 56.55) while failing on performance is a concrete, actionable insight about current agent limitations. The identification of a temperature "sweet spot" (0.5–0.75) balancing exploration–exploitation (Fig. 6c) offers practical guidance.
-
-- **Statistical rigor in appendix**: Appendix E.2 provides bootstrap confidence intervals (Table 4) and paired significance tests (Table 5) with pessimistic imputation of failure cases, going beyond what many benchmark papers provide.
-
----
+4. **Transparent documentation of current agent limitations.** The paper does not bury negative results. It clearly documents that all tested agents produce negative performance gain on all tasks, and that on 2 of 10 tasks no agent produces a valid submission. This level of candor is valuable for the community.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Limited domain coverage in novelty metric validation**. The D_AGENT validation (EquiBench code triplets, 3 ML research method triplets) demonstrates the metric works for code-level edits and ML paradigm shifts. However, the 18 benchmark tasks span operations research (ROADEF), combinatorial optimization (CirclePacking, Graph Coloring, 2D Bin Packing), compiler optimization (CompilerGym), and mathematical modeling (GMCM) — domains whose solution structures differ substantially from the ML-centric validation triplets. The paper provides no direct evidence that the extraction and comparison prompts produce sensible dissimilarity scores for, e.g., a branch-and-cut solver vs. a genetic algorithm on ROADEF. Since every novelty result in Table 2 and all subsequent interpretations depend on this metric, the domain gap in validation introduces uncertainty that the authors should acknowledge and address. This does not invalidate the contribution — the validation that exists is principled — but it limits confidence in novelty scores for non-ML tasks and should be discussed as a limitation.
+1. **Insufficient validation of the novelty metric D_AGENT, which is the paper's core differentiator.** The distance function D_AGENT — the mechanism for computing the novelty score N(s) — is validated against human judgments on only **11 triplets** (8 sub-sampled from EquiBench + 3 human-collected method triplets from AI subfields). The 50 automatic EquiBench triplets (Table 8) serve as a useful sanity check but do not substitute for human evaluation of the metric's behavior on the actual benchmark tasks. The sample is too small to establish reliability:
+   - The EquiBench human annotation set (8 triplets) is too small for meaningful correlation estimates.
+   - The 3 human-collected triplets produce suspiciously perfect correlations (1.00 Pearson/Spearman, Table 10), which is an artifact of tiny sample size.
+   - No inter-annotator agreement statistics are reported.
+   - No sensitivity analysis is provided (e.g., how scores change with different LLM judges, different prompts, or different extraction procedures).
+   - Most critically, the validation is performed on code-level (EquiBench) and published-method (3 triplets) examples, not on actual agent-generated solutions from iBench tasks. The metric could behave differently on the messy, partially broken solutions agents actually produce.
 
-- **Variance not integrated into main claims**. The main results (Table 2) report only the best of 3 runs, and the paper draws conclusions about agent novelty and the robustness–creativity gap from these point estimates. While Appendix E.2 provides bootstrap confidence intervals and paired tests that partially address this (Table 4: macro-averaged CI for MLAB novelty is [22.08, 56.25]), these are not referenced in Section 4.2 where the main claims are made. The reader encounters strong claims about novelty without seeing the substantial uncertainty around them. Integrating the appendix analysis into the main text would strengthen the paper considerably.
+   Since the novelty metric is *the* novel contribution that distinguishes InnoGym from every benchmark in Table 1, insufficient validation undermines the paper's central claim. This is not fixable by adding a few more examples in a rebuttal; a systematic validation study is needed.
+
+2. **The experimental results do not demonstrate that the benchmark measures "innovation potential" in a meaningful way.** Under the paper's own framework (Section 2.2), innovation requires G(s) > 0 or G(s) ≈ 0 with high N(s). Across all 10 main tasks, *every* agent achieves negative G. The average normalized ratios are -0.45 (MLAB), -0.69 (CODEACT), and -0.64 (AIDE). On 2 tasks, agents produce *zero* valid submissions. The paper interprets this as "the primacy of robustness over novelty," but an alternative reading is that the benchmark tasks are simply too difficult for current agents, turning the evaluation into a measure of basic execution feasibility rather than innovation potential. The space of (G, N) outcomes that would actually demonstrate "innovation" is entirely empty in these experiments. The paper does not provide diagnostic analysis of *why* agents fail (e.g., feasibility checks, timeouts, dependency issues), nor does it calibrate task difficulty (e.g., by showing human performance or simpler subtasks).
 
 ### Minor
 
-- **Performance gain scale interpretability**. While Appendix G.2 describes evaluator normalization and validates it via rank correlation, the main text never concretely states what *V* measures for each task (e.g., packing density for CirclePacking, classification accuracy for BETTL). The Gain/Ratio numbers in Table 2 are interpretable as "how far below the best known solution" but the reader cannot map them to task-intrinsic units without consulting the appendix or external competition documentation.
+1. **Exploratory problems are excluded, limiting the benchmark's reach.** The paper explicitly excludes tasks where S_known = ∅ ("exploratory problems") because they "cannot be reliably evaluated." Yet these are precisely the settings where measuring novelty is most valuable — the first feasible solution to an unsolved problem is definitionally maximally novel. The paper frames InnoGym as evaluating "innovation potential" broadly, but it only covers *incremental* improvement over known baselines. This scope limitation is acknowledged in Appendix B but the paper's claims (abstract, introduction) are broader than the operationalization supports.
 
-- **Analysis experiments limited to a single task**. The controlled experiments in Section 4.3 (temperature, base model comparison, temporal dynamics, prior knowledge) are all conducted on CirclePacking. While this task is representative of a hard optimization problem, the generality of insights about innovation dynamics across diverse task types remains unverified.
+2. **The paper does not report novelty scores for the reference solutions (S_known) themselves.** The diversity score Div(T) gives average pairwise distance among references, but individual novelty scores of reference solutions are not reported. This makes it difficult to calibrate expectations: if reference solutions have high mutual novelty (high Div), then an agent scoring N=50 might be doing well; if baselines are similar to each other, N=50 might indicate spurious deviation. Understanding the reference distribution is essential for interpreting agent novelty scores.
 
-- **iGym features claimed but not evaluated**. Section 3.5 and Appendix C describe iGym's recovery mechanisms, concurrency support, and unified abstraction layer. These are presented as contributions but none are empirically validated (e.g., ablation showing recovery improves success rates, or concurrency speeds up evaluation). The runtime environment is better positioned as infrastructure rather than a separately evaluated contribution.
-
-- **10/18 tasks used in main experiments**. This is acknowledged and pragmatically justified by resource constraints, but it leaves 8 tasks (including all 3 ROADEF challenges) unevaluated, narrowing the empirical scope.
+3. **No qualitative examples of high-novelty agent solutions are shown.** The paper mentions that agents achieve "mid-to-high novelty" on RCIC and TrojanDetection but with low performance. Showcasing even one or two such solutions with their extracted summaries and comparison scores would help validate whether the metric captures genuine methodological differences or spurious complexity. Without this, the novelty scores remain opaque to the reader.
 
 ### Trivial
-
-- The paper could benefit from explicitly stating which concrete *V* metric underlies each task in the main text or a small table, rather than requiring readers to trace through the appendix.
-
----
+None.
 
 ## Nice-to-Haves
 
-- Human evaluation of novelty on a sample of actual benchmark solutions (agent submissions vs. known solutions) would substantially strengthen confidence in the metric for the benchmark's specific task domains.
-- A controlled experiment where a known methodological innovation is deliberately injected into a baseline solution to verify D_AGENT captures the intended change would provide stronger construct validity than the triplet tests alone.
-- Qualitative case studies comparing high-novelty and low-novelty submissions for one or two tasks would help readers build intuition about what novelty scores mean in practice.
-
----
+- A failure analysis (taxonomy of why agents fail to produce valid submissions) would strengthen the paper's diagnosis and help the community prioritize fixes. The paper reports success rates (Table 6) but does not analyze failure modes.
+- Testing the sensitivity of novelty scores to the inclusion/exclusion of individual reference solutions (jackknife-style analysis) would help assess metric robustness. Currently, the paper acknowledges this only qualitatively in the limitations section.
+- Reporting confidence intervals on the main results (beyond the bootstrap analysis in Appendix E.2) would improve statistical rigor.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed; treat them with caution.
 
-1. **"The term Improvable Tasks is defined but the paper never provides a concrete example of what constitutes the optimum V\*"** — The definition of Improvable Tasks (Section 2.3, Appendix D.1) is precisely that the optimum is *unknown*. This is the defining property of the category. The criticism misunderstands the taxonomy. **Removed.**
-
-2. **"Known solutions S_known are not listed or characterized"** — Table 3 provides |S_known| counts and diversity scores (Div) for every task. Appendix G.1 details the multi-stage collection process. The solutions themselves are part of the open-source benchmark release. **Removed.**
-
-3. **"12-hour time budget impact is not analyzed relative to the nature of the tasks"** — Section 4.3 and Figure 6(a) analyze temporal dynamics of innovation (G and N evolution over time) on CirclePacking. **Removed.**
-
-4. **"The Gain column is entirely negative, meaning all agents underperform the best known; the values [are] unanchored"** — This is the paper's central empirical finding, not a weakness. The paper is transparent that agents fail to beat human baselines. The negative gains are precisely what make the robustness–creativity gap meaningful. **Removed.**
-
-5. **"The abstract's assertion that 'some agents produce novel approaches' presupposes the validity of the novelty metric"** — Every paper's claims presuppose its methods are valid. The novelty metric has validation (Appendix F). This is not a separate weakness. **Removed.**
-
-6. **"Comparison table lists multi-GPU, multi-node, and save-and-restore as important differentiators... yet no ablations are performed"** (from Strength Finder referencing InnovatorBench-style criticism) — This criticism appears to be about a different paper (InnovatorBench). InnoGym's Table 1 comparison focuses on reference solutions and evaluation dimensions, not infrastructure features. **Removed.**
-
-7. **Generic strength about "addressing an important problem"** — Too generic, no specific citation or concrete evidence. **Removed from strengths.**
-
----
+- *"The framework's definition of novelty is ambiguous about whether novelty alone constitutes innovation — the paper creates a tension by demoting novelty when G is not positive."* This is not a genuine weakness: the paper clearly defines the (G, N) regimes (Section 2.2) and explicitly states that high novelty with large negative G is "unsuccessful exploration rather than innovation." This is a design choice, not an ambiguity.
+- *"The benchmark's central contribution is not established"* — This is a conclusion, not a specific weakness. The specific weaknesses that lead to this conclusion are already listed above.
+- *Criticism about the paper claiming "first benchmark to evaluate innovation potential" not being established.* This follows from the major weaknesses above and need not be listed separately.
+- *"The paper does not discuss whether tasks are appropriate for the stated goal"* — The paper does discuss this in Section 3 (focusing on improvable tasks) and Appendix B (limitations).
 
 ## Novel Insights
 
-Beyond the paper's own contributions, a genuinely interesting observation emerges from the tension in the experimental results: agents can produce methodologically novel solutions (average novelty 46–57) that simultaneously fail catastrophically on performance (all gains negative). This suggests current agent scaffolds may be better at *divergent generation* of ideas than at *convergent refinement* of those ideas into working solutions — a pattern that mirrors known capability profiles of the underlying LLMs. The benchmark thus reveals that the bottleneck in AI-driven innovation is not ideation but execution robustness, which is a more nuanced and actionable diagnosis than simply "agents aren't creative enough."
-
----
+The harsh critic's observation about the structural tension between G and N is genuinely insightful: because almost all agent solutions have negative G, the benchmark's claim of measuring "innovation potential" reduces to measuring novelty alone in practice. This reveals a deeper issue with the framework's design — the two-metric decomposition is elegant in theory, but when one dimension (G) is empirically degenerate (always negative), the framework collapses to a single dimension. This suggests that either (a) the tasks need recalibration to allow some positive G (simpler subtasks, more time, better initial baselines), or (b) the framework needs a different formalization where innovation is not defined as occupying specific (G, N) regimes but rather as the *direction* of search in solution space regardless of absolute position. The temporal dynamics analysis (Figure 6a) hints at this richer view but does not develop it.
 
 ## Suggestions
 
-- Move the bootstrap analysis (Appendix E.2, Tables 4–5) into the main text or at minimum reference it directly in Section 4.2 when making claims about agent profiles, so readers see the uncertainty around novelty and gain estimates.
-- Add a brief limitations paragraph in the main text acknowledging the domain gap between D_AGENT's validation settings (code-level edits, ML paradigms) and the full task diversity of iBench, particularly for operations research and combinatorial optimization tasks.
-- For the camera-ready version, consider running at least one additional task from the 8 unevaluated ones (ideally a ROADEF challenge) to demonstrate cross-domain applicability, even if only with one agent scaffold.
-- Add per-task descriptions of the raw performance metric *V* (e.g., a one-line note in Table 2 or a small supplement table) to improve interpretability.
+1. **Validate D_AGENT at scale.** Collect human judgments on at least 100-200 triplets spanning diverse iBench tasks, with multiple annotators per triplet and reported inter-annotator agreement. This is essential for a benchmark that stakes its contribution on a novelty metric.
 
----
+2. **Include calibrated difficulty tiers.** Add subtasks or simplified versions of the current tasks where some agents can achieve G ≥ 0. This would allow the benchmark to measure innovation (not just feasibility) for current-generation agents. Alternatively, provide human baselines on all tasks.
+
+3. **Add failure analysis.** Report why agents fail to produce valid submissions — categorize failures as feasibility violations, timeouts, dependency errors, etc. This would clarify whether the benchmark's difficulty stems from genuine task complexity or from operational hurdles.
+
+4. **Provide case studies.** Show 2-3 concrete examples of agent solutions with their extracted summaries, D_AGENT scores per rubric dimension, and qualitative comparison to the nearest reference solution. This would give readers intuition for what the novelty metric actually captures.
 
 ## Score and Decision
 
-### Calibration anchors used:
+**Calibration anchors** (all from the human-reviewed ICLR 2026 corpus):
 
-| Paper | Path | Avg Score | Comparison to current paper |
-|---|---|---|---|
-| Gaia2 | `9gw03JpKK4.md` | 8.00 | Stronger: more comprehensive evaluation, genuine infrastructure contribution (ARE), action-level verification. Our paper has a more novel conceptual framework but less thorough execution. |
-| InnovatorBench | `w8rZ2Jd6Jo.md` | 5.33 | Weaker: similar concept (agent research/innovation benchmark) but fewer tasks, less rigorous curation, no metric validation, and no statistical analysis. Our paper is clearly stronger on all these axes. |
-| EXP-Bench | `KjgyAm383Z.md` | 6.00 | Comparable quality: 461 tasks from 51 papers, strong curation. Our paper has a more distinctive contribution (dual-metric framework vs. correctness-only) but smaller scale. |
-| FML-bench | `h6BT8RhrNc.md` | 4.50 | Weaker: contributed a benchmark but had arbitrary metric design and contrived conclusions. Our paper has better-justified metrics with validation. |
-| C2-Eval | `ywMGBtTi4z.md` | 3.00 | Much weaker: creativity benchmark with ad-hoc metrics that had no expert validation. Our paper validates its novelty metric against human judgments. |
-| TimeSeriesGym | `8gdfWRilR7.md` | 3.50 | Much weaker: domain-specific benchmark with critical evaluation flaws and floor effects. Our paper's benchmark construction and metric validation are more rigorous. |
-| A2ASecBench | `LfdFnakqGJ.md` | 5.50 | Comparable quality: security benchmark with well-defined threat model. Our paper has broader ambition (measuring innovation) but similar level of execution rigor. |
-| StockBench | `9tFRj7cmrS.md` | 2.50 | Much weaker: trading benchmark with significant methodological issues. Our paper is substantially stronger. |
+| Anchor | Avg Score | Decision | Comparison to InnoGym |
+|--------|-----------|----------|-----------------------|
+| AstaBench (M7TNf5J26u) | 7.00 | Oral | Far more comprehensive (2400+ tasks, 57 agents, cost-aware evaluation); rigorous validation of evaluation protocols. InnoGym is weaker. |
+| EXP-Bench (KjgyAm383Z) | 6.00 | Poster | 461 tasks vs. 18; also faces LLM-as-judge concerns but has larger scale and more validation. InnoGym is weaker. |
+| InnovatorBench (w8rZ2Jd6Jo) | 5.33 | Poster | Similar motivation (benchmarking agent innovation); comparable task count (20). InnovatorBench's weaknesses were about cost and limited detail; InnoGym's metric validation gap is more central. Comparable but InnoGym's weakness is more structural. |
+| HAL (vUaY1t64ZZ) | 5.20 | Poster | Large-scale engineering contribution (21K rollouts); different kind of contribution entirely. InnoGym is weaker in empirical scale. |
+| FML-Bench (h6BT8RhrNc) | 4.50 | Reject | 8 tasks, had metric reliability concerns similar to InnoGym's. InnoGym has more tasks and more careful curation, but its central weakness (novelty metric validation) is also more central to its contribution. Slightly stronger. |
+| UltraHorizon (FTZfVHWAIq) | 4.50 | Reject | 3 synthetic environments; LLM-as-judge concerns. InnoGym is stronger: more tasks from real competitions, more careful curation. |
+| FrontierBench (dMY9FGUkiU) | 2.00 | Reject | Tried too many contributions without deep validation; tasks were conceptually vague. InnoGym is substantially stronger. |
 
-This paper makes a genuine conceptual contribution — the dual-metric framework for evaluating innovation is novel and well-motivated. The benchmark construction (197→18 curation, evaluator normalization, solution collection) is rigorous by community standards. The novelty metric is validated against human judgments across two settings, which exceeds what many benchmark papers provide. The empirical findings (robustness–creativity gap) are meaningful and well-supported. The main weaknesses are the domain gap in novelty metric validation and the separation of variance analysis from main claims — both addressable in revision.
+**Final score:** The paper has a well-motivated framework and careful benchmark construction, but the central claim — that InnoGym evaluates "innovation potential" — rests on a novelty metric validated on only 11 human-annotated triplets. This is a fundamentally insufficient validation for the paper's core differentiator. The experimental results (all agents produce negative G) further limit what the benchmark can currently claim to measure. The paper is well above the weakest anchors (FrontierBench at 2.00) and comparable to the mid-range rejected papers (FML-Bench, UltraHorizon at 4.50), but falls short of the accepted anchor papers (InnovatorBench at 5.33, EXP-Bench at 6.00) in terms of validation depth relative to the strength of the claims.
 
-Compared to InnovatorBench (5.33, accepted), this paper is clearly stronger. Compared to Gaia2 (8.00, oral), it has less comprehensive evaluation and a less polished infrastructure contribution but a more conceptually distinctive benchmarking idea. I place it between these anchors, closer to the 6.0 mark.
-
-**Overall assessment**: A solid benchmark paper with a distinctive conceptual contribution, reasonable validation, and meaningful findings. The weaknesses are real but not fatal and are largely addressable through revision. Accept.
-
----
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

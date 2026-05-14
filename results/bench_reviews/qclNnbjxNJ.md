@@ -1,93 +1,92 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have all the information I need to produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper addresses a genuine and underexplored problem in interventional causal discovery: post-treatment selection, where samples are selectively retained after interventions (e.g., QC filtering in gene expression studies). The authors show that existing frameworks conflate dependencies induced by post-treatment selection with true causation, as both produce the same invariance patterns (variant marginal distributions, invariant conditionals). They introduce a new formulation extending augmented DAGs with an explicit selection node, define FI-Markov equivalence and the F-PAG graphical representation (with novel edge types →-, - capturing finer distinctions), and develop the F-FCI algorithm with soundness and completeness guarantees. Experiments on synthetic data show consistent improvements over strong baselines, and a real-world application on the Norman single-cell perturbation dataset recovers biologically validated edges while flagging genes plausibly affected by QC-based selection.
+This paper identifies a genuine and practically important gap in interventional causal discovery: post-treatment selection bias, where samples are retained only after interventions (e.g., QC filtering in single-cell genomics). The authors model this via an augmented DAG with explicit selection nodes, define a finer-grained equivalence class (FI-Markov equivalence) and a new graphical representation (F-PAG) that extends PAGs with square marks and new edge types, and propose a sound and complete constraint-based algorithm (F-FCI). The theoretical development is rigorous, and experiments on synthetic and real-world data show improvements over six baselines.
 
 ## Strengths
 
-- **Novel problem identification with rigorous formalization.** The paper identifies post-treatment selection as a distinct challenge that lies beyond existing interventional causal discovery frameworks (Section 2.2, Figure 1). The modeling via augmented DAGs with an explicit selection node S and intervention indicators ψ (Definition 1, Eq. 1) is principled and cleanly unifies observational and interventional data under selection.
+- **Novel problem formulation with real practical relevance.** The paper identifies a previously overlooked source of bias in interventional causal discovery — post-treatment selection. The case is compellingly illustrated (Figure 1: existing methods cannot distinguish causal relations from selection-induced dependencies) and grounded in concrete applications (single-cell QC filtering, per-protocol clinical trial analysis). This is a genuine extension of the problem scope beyond what existing frameworks (FCI, GIES, CDIS) handle.
 
-- **Principled theoretical framework.** The characterization of Markov properties (Theorem 1), the lemmas on when interventions alter marginal vs. conditional distributions (Lemmas 3–4), and the FI-Markov equivalence with graphical criteria (Theorem 2) form a coherent foundation. The F-PAG (Definition 5) with its novel edge types (→-, -) is a genuinely useful representational tool that goes beyond standard PAGs.
+- **Rigorous theoretical characterization of FI-Markov equivalence and F-PAG.** The paper formalizes the augmented DAG with intervention indicators and selection (Definition 1), characterizes CI patterns that distinguish causal relations from selection (Lemmas 2–4, Theorem 1), defines FI-Markov equivalence (Definition 2), and provides graphical criteria (Theorem 2). The F-PAG representation (Definition 5) extends PAGs with new edge types (→-, -, □-□, etc.) that capture strictly more information than standard PAGs. The soundness (Theorem 3) and completeness (Theorem 4) proofs are provided.
 
-- **Soundness and completeness with explicit conditions.** The F-FCI algorithm (Algorithm 1) is accompanied by soundness (Theorem 3) and completeness (Theorem 4) proofs. The proofs explicitly discuss the conditions under which fine-grained distinctions are recoverable — including the dependence on Type I inducing nodes for →- and - edges (Appendix B, lines 1341-1351) — and the paper acknowledges this limitation in Section 6.
+- **Provably sound and complete algorithm.** F-FCI (Algorithm 1) integrates observational and interventional CI patterns with tailored orientation rules. The proof structure builds appropriately on prior work (Kocaoglu et al. 2019, Zhang 2008b) and extends it to handle post-treatment selection. The algorithm is implemented and the code is released.
 
-- **Strong synthetic results against diverse baselines.** F-FCI consistently outperforms GIES, IGSP, UT-IGSP, JCI-GSP, FCI-interven, and CDIS across graph sizes in DAG Precision and SHD (Figure 6), with gains exceeding 15% in some settings. The method also demonstrates the ability to identify post-treatment selection (Table 1), with accuracy exceeding 70% at larger sample sizes.
+- **Comprehensive empirical evaluation.** Experiments span synthetic graphs with 10–25 variables (Figure 6, Figure 10), scalability to 50 variables (Figure 11), robustness under varying noise levels (Figure 12), and a large-scale real-world application to the Norman single-cell perturbation dataset (5,045 genes, 105 perturbations). F-FCI consistently improves DAG Precision (≈5%+) and reduces SHD over six baselines (GIES, IGSP, UT-IGSP, JCI-GSP, FCI-INTERVEN, CDIS). Table 1 directly reports accuracy of identifying post-treatment selection.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
+- **Evaluation does not disaggregate the core claim by edge type.** The paper's central contribution is distinguishing causal relations from selection-induced dependencies (Figure 1). Yet the main metrics (DAG Precision, DAG SHD, F1) are aggregated over all edges, conflating the novel contribution with standard parts of the graph. Table 1 reports accuracy for identifying post-treatment selection, which partially addresses this, but there is no breakdown by specific edge type (→-, -, □-□) or per-intervened-pair performance. Without knowing whether F-FCI correctly classifies Figure 1(a) vs (b) where baselines fail, the reader cannot verify whether the claimed distinguishing power is real or driven by improvements elsewhere in the graph. This is the paper's most significant empirical gap.
 
-None that undermine the paper's core claims. The theoretical framework is sound, the algorithm is well-motivated, and the synthetic results convincingly demonstrate the method's advantages.
+- **Algorithm Step 2.3 is underspecified.** The description of detecting Type I inducing nodes in Step 2.3 lacks sufficient operational detail. The paper says "Detect if the path has non-endpoints vertex and Type I inducing nodes" without specifying the detection procedure. The notation "XI(i) → Xn □- Xj" mixes marks that come from different sources (some from Step 2.2, some from the path structure), and it is not fully clear how the required edge marks are obtained for non-intervened nodes along the path. While this is not a fundamental circularity (the critic's claim is overstated — Step 2.2 does produce square marks before Step 2.3 runs), the description is not precise enough to implement from the text alone. The requirement that Type I inducing nodes must have available interventional data is also a significant practical limitation that should be discussed explicitly.
 
 ### Minor
+- **Precision-recall tradeoff with FCI-INTERVEN is not discussed.** Table 2 shows that F-FCI has substantially higher precision (e.g., 60.1 vs 46.7 for n=500 hard) but lower recall (55.7 vs 69.0) compared to FCI-INTERVEN. The paper frames this as an advantage, but the recall drop means F-FCI misses more true edges. Reporting F1 (which is comparable: 56.7 vs 54.8) partially mitigates this, but a frank discussion of the precision-recall tradeoff is warranted.
 
-- **Missing ablation of Step 2.3 (disambiguation via Type I nodes).** The synthetic experiments show that F-FCI outperforms baselines, but they do not isolate how much of the gain comes from the basic interventional orientation rules (Step 2.2) versus the fine-grained disambiguation enabled by Type I inducing nodes (Step 2.3). An ablation comparing full F-FCI against a variant omitting Step 2.3 would clarify whether the claimed ability to distinguish direct causation from selection-induced dependencies is empirically borne out or whether the gains primarily reflect standard interventional orientation. This is the most substantive empirical gap.
+- **Real-world validation is a coverage check, not a discrimination test.** The biological experiment (Section 5.2) reports which edges F-FCI finds and checks against databases (Enrichr, ARCHS4). This verifies that some outputs are consistent with prior knowledge, but does not evaluate (a) how many edges are not supported, (b) whether baselines find the same supported edges more efficiently, or (c) whether the flagged selection genes are genuinely due to QC filtering rather than other biological functions. The connections drawn (CDKN1A → cell-cycle arrest → QC filtering) are plausible but speculative.
 
-- **Norman dataset evaluation is suggestive rather than definitive for selection detection.** The paper flags genes (ZNF318, CDKN1C, CDKN1A, RREB1) as affected by post-treatment selection and provides plausible biological reasoning linking them to QC filtering. However, there is no independent ground truth or holdout validation that confirms these genes are genuinely selected against in the data-generating process. The causal edges validated via Enrichr test whether the method recovers known regulatory relationships, not whether it correctly disentangles causation from selection. This is an exploratory result and the paper appropriately frames it as such, but the strength of the empirical claim about selection identification is limited.
+- **The "at least two observed parents" assumption for selection is stated but not motivated.** Line 156 assumes selection works on at least two observed variables, which excludes the common case of selection on a single variable (e.g., thresholding on one QC metric). The paper does not discuss how restrictive this is or whether it can be relaxed.
 
-- **Theorem statements could be more precise about conditions.** Theorem 4 states that each substructure type "can be identified by different types of CI patterns" without explicitly conditioning on the availability of interventions on Type I inducing nodes. The proof does address this condition (lines 1341-1351 discuss when →- and - are/aren't identifiable), but the theorem statement itself would benefit from making this dependency explicit. This is a presentation issue — the underlying results are correct — but contributes to readers potentially overestimating the method's scope.
+- **No complexity analysis.** The algorithm inherits FCI's exponential search over conditioning sets, and the F-PAG orientation rules additionally check paths between every pair of intervened nodes. The paper acknowledges parallelization via Fast FCI but provides no runtime analysis or scaling discussion beyond a figure showing a 50-variable output.
 
 ### Trivial
-
-- The termination condition in Algorithm 1 Step 2.1 ("If no more paths can be blocked then break") is stated informally. While the logic is clear to practitioners, a more algorithmic specification would improve reproducibility.
-- The condition sets in Step 2.1 are enumerated from "AllPaths" without discussion of computational limits on path enumeration in dense graphs.
+- The new edge marks (→-, -, □-□, □-, □) in Figure 5 are visually dense and hard to distinguish. A larger, clearer figure would help.
+- The claim "go beyond traditional equivalence classes toward the underlying true causal structure" (line 22) is slightly over-enthusiastic given that F-FCI still identifies up to FI-Markov equivalence, not the exact DAG. The paper correctly qualifies this elsewhere.
 
 ## Nice-to-Haves
-
-- An evaluation under constrained interventions where Type I inducing nodes are intentionally excluded from the intervention set, to calibrate how far the output F-PAG falls back toward standard equivalence classes in such regimes.
-- A visual case study (e.g., a small synthetic graph) showing a specific false positive that a baseline like FCI-interven makes due to post-treatment selection, which F-FCI correctly avoids through its disambiguation step.
-- The paper mentions Type II inducing nodes as a limitation; outlining potential strategies (parametric assumptions, auxiliary constraints) for handling these cases would strengthen the forward-looking discussion.
+- Reporting precision/recall/F1 specifically on edges between intervened nodes, broken down by edge type.
+- A "controlled experiment without selection" to verify that F-FCI degrades gracefully to matching baselines when there is no post-treatment selection.
+- A discussion of how many intervened variables are needed in practice and what happens when only a subset of potential Type I nodes have interventions.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+**Removed: "Algorithm circularity in Step 2.3" as fatal flaw.** The claim that detecting Type I inducing nodes is circular because they are defined in terms of →□ edges in the F-PAG under construction is incorrect. Step 2.2 already assigns edge marks (including square marks) to edges between intervened node pairs before Step 2.3 runs. Step 2.3 then detects Type I nodes along paths using those pre-existing marks. The description is underspecified (see Major weaknesses), but not circular. The circularity criticism is moved here.
 
-- **"The soundness/completeness theorems do not explicitly condition on the requirement of interventional data on Type I nodes"** — This is not accurate. The proof of Theorem 3 (lines 1341-1351) explicitly discusses cases where Type I inducing nodes are present vs. absent (Type II), and the Limitations section (lines 716-718) states: "The identification of direct causal links and selection structures depends critically on the presence of Type I inducing nodes." The paper is transparent about this condition. The theorems are about what CI patterns identify what structures given available data; they do not claim universal identifiability without Type I nodes.
+**Removed: "Simulation selection mechanism may not reflect real selection."** The paper uses a sum of nonlinear functions with thresholding. This is a reasonable synthetic mechanism for a first evaluation. Whether it perfectly matches real selection is a secondary concern that does not threaten the paper's contribution.
 
-- **"The completeness theorem is stated unconditionally"** — Overstated. Theorem 4 is a claim about mapping CI patterns to substructure types. It does not guarantee that every graph yields all patterns — it says each pattern type that exists can be identified. The conditionality is in the proof and limitations, and Theorem 4 is correct as stated.
+**Removed: "Harsh critic's claim that Theorem 1's statement about conditional invariance under post-treatment selection is stated without proof."** The paper states this as a known property from the augmented DAG framework (citing Tian & Pearl 2001, Kocaoglu et al. 2019). Theorem 1 provides the formal CI/invariance mapping for the general setting.
 
-- **"The proof sketches are too high-level / not rigorous"** — The proofs in Appendix B provide step-by-step reasoning for each mark type (tail, arrowhead, square, →-, -) with explicit handling of edge cases (e.g., Y-structures in Figure 8, Type I vs Type II nodes in Figure 9). While not formalized to theorem-prover standards, they are substantive and match the norms of the causal discovery literature.
+**Removed: "Missing related works" style criticisms.** These cannot be verified without external sources.
 
-- **"The gains might be attributable primarily to the interventional orientation rules that do not require the disambiguation step"** — This is speculative rather than demonstrated. It is a valid hypothesis motivating an ablation (which is why the missing ablation is listed as a Minor weakness), but it is not a confirmed problem with the paper. The paper does show that F-FCI recovers selection structures (Table 1), and the ablation question is about attribution, not correctness.
-
-- **Harsh critic's formatting/notation nitpicks** — The parser artifacts (broken characters, garbled symbols) in the PDF extraction are not author errors. The original submission does not have these issues.
-
-- **Criticism that the Norman dataset biological interpretation is "post-hoc and anecdotal"** — The paper acknowledges the exploratory nature of this analysis and uses prior knowledge (Enrichr, ChEA, GEO, ARCHS4) to validate identified causal edges. For a real-world biological dataset where ground truth is unavailable, this is standard practice.
+**Removed: Various formatting/style nitpicks.** These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-The most novel insight emerging from this work is the systematic characterization of how post-treatment selection creates a structural symmetry with causation in interventional invariance patterns, and how this symmetry can be broken by exploiting hard interventions on intermediate Type I inducing nodes that block selection effects on latent confounders. This reveals that the information needed to distinguish causation from selection is not in the endpoint CI patterns (which are identical) but in the CI patterns involving intermediate nodes along inducing paths — a genuinely non-obvious insight that motivates the algorithm design and explains why prior frameworks cannot make this distinction.
+The harsh critic's most valuable observation is the evaluation gap: the paper's central distinguishing power is not directly measured at the edge-type granularity that would most convincingly demonstrate the contribution. However, this is an empirical gap, not a theoretical flaw. The critic's circularity claim is incorrect upon verification — Step 2.2 produces square marks before Step 2.3 uses them — though the underspecification complaint has merit. A genuinely novel insight is the precision-recall asymmetry in Table 2: F-FCI trades recall for precision relative to FCI-INTERVEN, which may or may not be desirable depending on the application. The paper would benefit from acknowledging and contextualizing this tradeoff.
 
 ## Suggestions
 
-- Add the Step 2.3 ablation experiment. This is the single most impactful improvement: show what F-FCI without disambiguation achieves vs. full F-FCI, to quantify how much the fine-grained equivalence matters in practice.
-- In the abstract and introduction, add a brief qualifier about the dependence on Type I inducing nodes for the finest distinctions (e.g., "when interventional data on suitable intermediate variables is available"). The limitation is already discussed in Section 6, but front-loading it prevents overclaiming.
-- For the Norman evaluation, consider a quantitative validation strategy: e.g., use known TF-target pairs from independent databases as a partial ground truth for directed edges, and report precision/recall specifically on those pairs.
-- Tighten the Theorem 4 statement to make explicit that identification of →- and - edge types depends on the presence of Type I inducing nodes with available interventional data, consistent with what the proof already acknowledges.
+1. **Add targeted evaluation for the core claim.** Report precision, recall, and accuracy specifically on edges between intervened nodes, broken down by edge type (→, →-, -, →, □-□, etc.). Show a confusion matrix comparing predicted vs. true edge types. This would directly validate the Figure 1 claims.
+
+2. **Clarify Step 2.3 implementation.** Provide pseudocode or a more detailed description of how Type I inducing nodes are detected along inducing paths, including how the required edge marks for non-intervened nodes are obtained.
+
+3. **Discuss the precision-recall tradeoff openly.** Address why F-FCI has lower recall than FCI-INTERVEN and in what scenarios users should prefer one over the other.
+
+4. **Add a "no selection" control experiment.** Show that F-FCI matches baseline performance when there is no post-treatment selection (only latent confounders). If performance degrades, explain why.
+
+5. **Provide a runtime/scaling analysis.** Even a brief discussion of how the number of CI tests scales with graph size and number of interventions would be useful for practitioners.
 
 ## Score and Decision
 
-### Anchor comparison
+I evaluated this paper against the following calibration anchors:
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/ta8BKRa1bl.md` | 6.00 | Accept | Strong theory (identifiability from two environments), but limited to bivariate synthetic experiments. Our paper has comparable theory plus broader experiments. Our experiments are stronger; theory is comparably rigorous in parts but less formally polished in places. |
-| `/home/wg25r/review_agent/human_reviews_2026/BNHplerBYE.md` | 5.33 | Accept | First score-based method for partially observed models. Similar contribution level (novel algorithm with identifiability). Our paper is comparable — novel problem formulation, sound algorithm, solid synthetic results. |
-| `/home/wg25r/review_agent/human_reviews_2026/s0nYSwlV3I.md` | 5.00 | Accept | Causal discovery from temporal data with theoretical guarantees. Similar structure: theory + algorithm + synthetic + one real-world dataset. Our paper has stronger theory (soundness + completeness). |
-| `/home/wg25r/review_agent/human_reviews_2026/V7pT2ZRoTB.md` | 4.50 | Accept | Theoretical guarantees on random graphs but narrow empirical scope. Our paper is stronger empirically. |
-| `/home/wg25r/review_agent/human_reviews_2026/lYearSsgXj.md` | 4.50 | Reject | Coupled confounding and collider biases with strong assumptions. Our paper has explicit limitations discussion and broader experiments. |
-| `/home/wg25r/review_agent/human_reviews_2026/HfiRzzmFt8.md` | 4.00 | Reject | Bayesian causal discovery with unclear contributions and presentation issues. Our paper is much clearer and better motivated. |
-| `/home/wg25r/review_agent/human_reviews_2026/Twpdb61nE0.md` | 3.33 | Reject | Differentiable causal order regularizer, incremental contribution. Our paper has substantially more novelty and depth. |
-| `/home/wg25r/review_agent/human_reviews_2026/YvMkU4BYOA.md` | 2.00 | Reject | Heuristic BIC modification with weak theory. Our paper is far stronger theoretically and empirically. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `ta8BKRa1bl.md` | 6.00 (Accept Poster) | Strong identifiability theory, very narrow experiments (bivariate only). Our paper has broader experiments but less striking theoretical novelty. Comparable overall quality. |
+| `WtbPaWO8lH.md` | 6.00 (Accept Poster) | Solid contribution with theory and experiments. Our paper has stronger theoretical depth. |
+| `expkpx9TWg.md` | 4.00 (Reject) | Decent theory but significant concerns about evaluation and scope. Our paper has stronger empirical support and clearer contribution. |
+| `V7pT2ZRoTB.md` | 4.50 (Accept Poster) | Theory-focused, questions about practical relevance. Our paper has better practical grounding. |
+| `aS7EVadvZD.md` | 3.00 (Reject) | Fundamentally flawed theory and poor writing. Our paper is in a different tier. |
 
-**Calibration judgment:** The paper sits in the 5.0–6.0 range. It is clearly stronger than the 4.0–4.5 rejected papers (better theory, clearer contributions, better experiments) and comparable to accepted papers at 5.0–6.0. It does not reach 6.0+ because of the missing ablation (minor but substantive) and the somewhat preliminary real-world validation. The theoretical framework is solid, the problem is important, and the synthetic results are convincing. **Score: 5.5.**
+This paper makes a clear and well-motivated contribution to a genuine problem. The theory is rigorous, the algorithm is principled, and the experiments show meaningful improvements. The most significant weaknesses are the evaluation gap (not disaggregating by edge type) and the underspecified algorithm step — both addressable. No fatal flaws exist. 
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+Relative to the anchors, the paper sits comfortably in the 6.0 range: stronger than papers scoring 4.0–5.0 (which typically have significant empirical or theoretical gaps), comparable to well-regarded papers at 6.0 (which have genuine strengths and tolerable weaknesses), but below the exceptional papers at 7.0+ (which would have more polished evaluation or more striking results).
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

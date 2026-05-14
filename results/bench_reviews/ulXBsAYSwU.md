@@ -1,16 +1,18 @@
-Now I have a thorough understanding of the paper and all calibrating anchors. Let me write the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me write the consolidated review.
 
 ## Summary
-MolMiner proposes a fragment-based, autoregressive generative model for molecules that unifies several capabilities: (1) order-agnostic rollout with rollout resampling as a regularizer, (2) symmetry-aware fragment attachment handling, (3) geometry-aware attention using a learnable distance-based bias, (4) dynamic forcefield-relaxed geometry during inference, and (5) high-dimensional multi-property conditioning via a Gaussian Mixture Model (GMM) prior over 12 molecular properties. The model is evaluated on unconditional distribution matching against HierVAE and on conditional generation via calibration plots.
+
+MolMiner proposes a fragment-based, autoregressive transformer for molecular generation that supports conditional generation over twelve physicochemical and structural properties. It incorporates symmetry-aware fragment attachments, order-agnostic rollout, and dynamic 3D geometry via forcefield relaxation. A GMM enables partial conditioning (any subset of properties). The paper evaluates unconditional generation (Wasserstein distances against HierVAE) and conditional generation (calibration plots).
 
 ## Strengths
-- **Order-agnostic rollout resampling is well-ablated as a regularizer**: Appendix A.3.3 (Figure 8) convincingly shows that resampling molecular rollouts per epoch reduces validation loss, narrows the train-validation gap, and enables continued learning beyond 30 epochs — directly supporting the claim that order-agnostic generation improves flexibility and mitigates overfitting.
-- **Geometry-aware attention improves reconstruction**: Appendix A.3.2 (Figures 6-7) demonstrates that a trainable distance-based attention bias initialized at +1 yields consistently lower reconstruction loss than a geometry-agnostic baseline, and that performance is sensitive to the sign and magnitude of the initialization — validating the usefulness of 3D information.
-- **GMM-based property-sampling prior is validated**: Appendix A.2 provides quantile-quantile plots and Wasserstein distances for reconstructing one masked property given the others, confirming the GMM prior captures the conditional distribution of the training data well.
-- **Symmetry-aware attachment protocol is technically sound and well-documented**: Section 3.2 and Appendix A.6 detail a principled method for resolving fragment symmetries via cyclic permutation matching using Morgan fingerprints and Tanimoto similarity — an aspect not rigorously addressed in prior fragment-based models like MoLeR or HierVAE.
-- **Sampling strategy analysis is systematic**: Appendix A.7 explores condition source, decoding greediness, and seed-fragment selection across 24 configurations, providing practical guidance for deployment.
+
+1. **First demonstration of multi-property conditioning at this scale (12 properties)**: The calibration plots (Figure 2) show that MolMiner can simultaneously condition on twelve properties across their dynamic range, with predicted values tracking prompted targets for most properties. Prior fragment-based models (HierVAE, G-SchNet) handle at most 1–3 properties. This is a legitimate advance in controllable molecular generation.
+
+2. **Well-motivated symmetry-aware attachment protocol**: Sections 3.2 and Appendix A.6 develop a clean, implementable procedure using Morgan fingerprint similarity and cyclic permutations to resolve fragment symmetries in a deterministic, canonical manner. This addresses a real and underexplored problem in fragment-based generation that earlier models (MoLeR, JTNN) do not clearly detail.
+
+3. **Practical GMM-based partial conditioning**: The mechanism allowing users to specify any subset of properties while sampling the remainder (Section 3.6, Appendix A.2) is mathematically sound and validated (Figure 4). This is practically useful for real-world usage where users may not know all targets upfront.
+
+4. **Thorough within-model ablations**: Appendix A.3 systematically ablates conditioning dimensionality, geometry information, and rollout resampling with training/validation curves. The "tomographic effect" (more conditions → better reconstruction), geometry benefit, and regularization from rollout resampling are convincingly demonstrated at the within-model level.
 
 ## Weaknesses
 
@@ -18,66 +20,81 @@ MolMiner proposes a fragment-based, autoregressive generative model for molecule
 None.
 
 ### Major
-- **Headline claim of multi-property control is not evaluated with simultaneous constraints**: The paper claims MolMiner supports conditioning on "any subset of twelve molecular properties" and enables "simultaneous, multi-property control." However, the conditional evaluation in Section 4.3 tests only *single*-property control: for each property in turn, a target value is set and the remaining 11 are drawn from the GMM prior conditioned on that single target. Calibration plots showing that the prompted value of, e.g., logP matches the generated logP — when the other 11 properties are filled by the GMM — do not demonstrate that the model satisfies multiple user-specified constraints *simultaneously* (e.g., logP=3 AND QED=0.8 AND molWt=350). This is a central evaluation gap: the paper's most prominent contribution claim is not directly tested. The experiments are consistent with the model having multi-property capability but do not constitute evidence for it.
 
-- **No conditional baselines are provided**: The conditional generation results consist solely of calibration plots for MolMiner, with zero comparison to any existing conditional molecular generation method. While no prior work conditions on the same 12 properties, the authors could have compared against a conditional VAE, a goal-directed optimization method, or even a simple baseline on a common subset of properties. Without any conditional baseline, it is impossible to judge whether the reported calibration represents a meaningful advance or a trivial consequence of the GMM prior and training distribution. This substantially weakens the evidence for the paper's central contribution.
+1. **No conditional generation baselines whatsoever**: The paper's central claim is conditional multi-property generation, yet Section 4.3 provides calibration plots *only for MolMiner itself*. There is no comparison to any other conditional model — not a conditional HierVAE, not MARS, not a simple property-conditioned diffusion model. Without baselines, the reader cannot assess whether these calibration results are good, mediocre, or poor. The calibration plots show visible biases (molWt, MR, TPSA) and high variance (wide ±1σ bands), but there is no reference point to interpret these. This is not a minor omission — it undermines the paper's primary claimed contribution.
+
+2. **Central architectural claims not properly validated against simpler alternatives**: 
+   - **Order-agnostic vs. fixed-order**: The ablation (Appendix A.3.3) compares "resampling" vs. "no resampling." Resampling is the mechanism that implements order-agnostic training, but this confounds data augmentation (more diverse training trajectories) with the property of being order-agnostic per se. A fixed-order model with the same degree of data augmentation (e.g., breadth-first + depth-first variants) would isolate the claimed benefit. The paper never provides this comparison.
+   - **Dynamic vs. frozen geometry**: The paper claims dynamic forcefield relaxation as an improvement over G-SchNet's frozen geometries (Section 2, line 80-81). However, the geometry ablation (Appendix A.3.2) only compares "geometry factor=1 (trainable)" vs. "factor=0 (no geometry)." This shows that *having* geometry helps, not that *updating it dynamically* helps. A comparison against a frozen-initial-geometry baseline is missing.
+   - **Symmetry-aware attachments**: No ablation shows this matters for generation quality — it remains an implementation detail rather than a validated contribution.
+
+3. **Unconditional results are meaningfully worse than HierVAE, not "modestly" different**: Table 1 shows MolMinerS vs. HierVAE Wasserstein distances: logP (0.46 vs. 0.26), molWt (65 vs. 15), TPSA (10.9 vs. 2.3), MR (16.3 vs. 3.8). The paper (line 452) characterizes these as "modest differences," which understates the gap. For molecular weight and molar refractivity, MolMiner's Wasserstein distance is 4–5× larger. While the paper correctly notes the model is optimized for conditional use, this framing is misleading and weakens trust in the reporting.
 
 ### Minor
-- **Training-geometry generation pipeline is ambiguously specified**: Section 3.3 states that during training, "rollouts are precomputed: for each molecule, a sequence of attachment actions and intermediate geometries is generated in advance" without forcefield optimization, while during generation, geometry is relaxed via a forcefield after each step. The paper does not describe how these precomputed intermediate geometries are obtained (e.g., extracted from the ground-truth 3D structure of the complete molecule vs. independently relaxed). If they are not forcefield-relaxed, there exists a distributional mismatch between training and inference geometry distributions, which complicates the "dynamic geometry" contribution. The geometry ablation (A.3.2) shows geometry information helps, which partially mitigates concern and suggests the mismatch may not be catastrophic in practice, but the ambiguity should be resolved.
 
-- **No quantitative metrics for conditional generation**: The calibration plots in Figure 2 are purely visual. No summary statistics are reported — no MAE, Spearman/Pearson correlation, hit rate within tolerance windows, or any other quantitative measure of conditional accuracy. For several properties (QED, molWt, MR), the visual trends show systematic deviations, yet the text claims "calibrated conditional generation for most properties" without defining "calibrated" or providing objective metrics. This makes the conditional evaluation insufficiently rigorous.
+4. **QED failure reported but not analyzed**: The paper notes (line 475) that "QED is a notable exception, where control accuracy degrades" but provides no analysis of why. QED is a composite property derived from multiple molecular features. Understanding whether the model fails on its components or their integration would guide improvement and is a natural follow-up the paper should have included.
 
-- **Unconditional generation lags HierVAE on several properties**: MolMiner performs worse than HierVAE on molecular weight, TPSA, molar refractivity, and several other properties in the unconditional benchmark (Table 1). The authors acknowledge this (Section 5) and attribute it to early termination bias, which is plausible, but the gap is notable given that MolMiner incorporates additional architectural components (geometry, symmetry handling) that should in principle help.
+5. **MoLeR exclusion is adequately supported but deserves more care in the main text**: The paper provides MoLeR results in Appendix A.9 (Table 4) showing catastrophically poor Wasserstein distances (e.g., 4.00 for logP vs. 0.26–0.46 for other methods). The exclusion is reasonable given this evidence. However, the main text (lines 429-433) blames "known limitations of VAE-based models" and a GitHub issue, which reads as dismissive. A clearer statement that "MoLeR results are included in Appendix A.9 and are not competitive on this task" would be more appropriate.
 
-- **MoLeR baseline exclusion**: MoLeR was excluded after a 7-day training run that completed only two mini-epochs and produced poor results (Table 4, Appendix A.9). While the authors cite known VAE prior-posterior mismatch issues, a 7-day run producing unconverged results on a dataset of 200K molecules is unusual, and the exclusion removes a potentially relevant fragment-based comparator. This is secondary to the conditional baseline gap but worth noting.
+6. **Limited insight into when conditioning works**: The paper provides calibration plots showing aggregate trends but no case studies illustrating what successful vs. failed conditioning looks like at the molecular level. This would build intuition for whether the calibration translates to practical controllability.
 
 ### Trivial
-- The paper's abstract and introduction use the term "calibrated" (e.g., "calibrated conditional generation") without defining what calibration means in this context or specifying a quantitative calibration metric. Defining this would improve clarity.
+
+7. **Fragment position definition in attention mechanism**: The Gaussian-decayed distance kernel (Equation 2) uses Euclidean distance between fragments, but it is not specified whether this is computed from centroids, attachment points, or all atoms. This is an implementation detail that could be clarified but does not affect the paper's validity.
 
 ## Nice-to-Haves
-- A simultaneous multi-property constraint-satisfaction experiment (e.g., generate molecules with 3+ properties fixed to specific values and measure compliance with all targets) would greatly strengthen the paper.
-- Comparison against at least one existing conditional generation method on a subset of properties.
-- Quantification of the geometry mismatch between training intermediates and inference-time forcefield-relaxed partial structures, or a clear specification of how training geometries are generated.
-- Quantitative conditional metrics (MAE, correlation, hit rate) alongside the calibration plots.
+
+- Compare conditional generation against at least one adapted baseline (e.g., a conditional HierVAE trained with the same 12-property conditioning regimen)
+- Ablate order-agnostic vs. fixed-order generation controlling for data augmentation
+- Ablate dynamic vs. frozen geometry
+- Analyze why QED control degrades by examining its component properties
+- Provide case studies showing molecules generated at different property targets
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-1. **Strength Finder claimed "Multi-property conditioning is well calibrated" as a strength** — This directly conflicts with the verified weakness that the evaluation only tests single-property calibration while 11 properties are drawn from the GMM prior. The calibration plots do not constitute evidence of simultaneous multi-property control. → Removed.
+These points are flagged to be removed; treat them with caution:
 
-2. **Harsh Critic: "The attention formulation (Equation 2) appears garbled in the parser output"** — This is a PDF parsing artifact, not a paper problem. → Removed.
+- **Criticism about MARS exclusion**: The reviewer claimed MolMinerD (sampling conditions from the dataset) is equivalent to MARS (using oracle evaluations of generated molecules). The paper (lines 416-427) correctly distinguishes these: MolMinerD samples from the training property distribution; MARS computes properties of *generated* molecules on-the-fly via an oracle and uses them to guide MCMC sampling. These are fundamentally different, and the paper's reasoning is sound. **REMOVED** (factually wrong).
 
-3. **Harsh Critic: "The introduction also states that 'multistep generation … offers greater transparency and interactive control,' but no human-in-the-loop or interpretability study is presented."** — The paper mentions this as motivation for multi-step generation but does not claim to have conducted a user study. The statement is aspirational framing, not an evaluated claim. → Removed as scope creep.
+- **Criticism about MoLeR exclusion being "insufficient evidence"**: The paper provides MoLeR results in Appendix A.9 (Table 4) showing Wasserstein distances 1–2 orders of magnitude worse than other methods. The exclusion is well-supported by evidence. **REMOVED** (factually wrong — paper does provide the evidence the reviewer claims is missing).
 
-4. **Harsh Critic: "The paper does not describe how the precomputed intermediate geometries are generated; without that detail, reproducibility is impossible"** — The paper does describe the overall mechanism; the missing detail is about the source of geometry coordinates (ground-truth vs. relaxed), not the entire process. The reproducibility concern is overstated. → Moved to Minor weakness with softened language.
+- **Criticism that the training objective lower bound "assumes independence across rollout steps"**: The derivation (Equation 3) is log E_R[∏ p(x_i|x_<i, c)] ≥ E_R[∑ log p(x_i|x_<i, c)] via Jensen's inequality. The autoregressive product ∏ p(x_i|x_<i, c) already conditions each step on previous steps via x_<i, so there is no independence assumption. The reviewer misunderstood the mathematics. **REMOVED** (factually wrong).
 
-5. **Harsh Critic: MoLeR exclusion is "questionable and weakens the unconditional comparison"** — The unconditional comparison is not the paper's central contribution, and MoLeR's results (Wasserstein distance of 4.00 for logP, 1303 for molWt — Table 4) are genuinely poor. The exclusion is defensible. → Moved to Minor rather than treated as a major flaw.
+- **Criticism about the "tomographic effect" being trivial**: The reviewer called this "not a discovery." The paper is citing a 2025 paper and reporting an observation from their ablation, not claiming it as a discovery. This is a neutral descriptive statement. **REMOVED** (strawman).
+
+- **Criticism about MolMiner being "worse than HierVAE" in unconditional**: The paper acknowledges this explicitly (lines 452-456, Section 5). The criticism restates what the paper already says. **WEAKENED** to point #3 (about "modest" vs. "meaningful" framing) rather than treated as an independent weakness.
 
 ## Novel Insights
-The most interesting conceptual contribution that emerges across reviews is the "tomographic effect" observed in the ablation (A.3.1): conditioning on more properties (12 vs. 3) consistently improves reconstruction fidelity. This aligns with the interpretation that richer conditioning vectors help disambiguate molecular structure during generation — a finding that has implications beyond MolMiner for the design of conditional generative models. The order-agnostic rollout resampling acting as an effective regularizer (A.3.3) is also an insight that could transfer to other autoregressive generation settings.
+
+The most notable gap across the reviews is the tension between the paper's genuine technical contributions (12-property conditioning at scale, symmetry-aware attachments, GMM partial conditioning, thorough ablations) and the severe evaluation deficit. The missing conditional baselines are not a routine omission — they leave the paper's primary claim unsupported. Comparatively, accepted papers in this space (FragFM, avg 5.0; InVirtuoGen, avg 5.0) had weaker methodological novelty but stronger empirical validation. This suggests the reviewing culture for molecular generation at ICLR weighs evaluation completeness heavily, and this paper falls short on that axis despite genuine architectural contributions.
 
 ## Suggestions
-- The single most impactful addition would be a **multi-property simultaneous constraint experiment**: generate molecules with, say, 3–5 properties fixed to specific values simultaneously and report compliance rates for all targets. This would directly address the central evaluation gap.
-- Add **quantitative metrics** (MAE, Spearman ρ, ±ε hit rate) to accompany the calibration plots in Figure 2.
-- **Clarify the training geometry pipeline**: state explicitly whether precomputed intermediate geometries are extracted from the ground-truth 3D structure of the complete molecule, or are independently relaxed. If the former, discuss and ideally quantify the mismatch with inference-time forcefield relaxation.
-- Include at least one **conditional baseline** (e.g., a conditional VAE or property-optimization method) on a shared subset of 3–6 properties.
 
----
+1. **Add at least one conditional baseline**: Train a conditional HierVAE variant (conditioning the latent prior on properties) and reproduce the calibration plots. This would contextualize MolMiner's conditional performance and is the single most important missing experiment. Even showing that HierVAE cannot effectively condition on 12 properties (confirming a known limitation) would strengthen the paper.
 
-**Anchor comparison:**
+2. **Disentangle ablations**: Compare order-agnostic rollout against fixed-order rollout with matched data augmentation. Compare dynamic (UFF after each step) against frozen-initial-geometry. Ablate the symmetry-aware attachment procedure.
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/OvMtGGaFUT.md` (SynGA) | 6.00 | Accept | SynGA has stronger experimental validation across multiple benchmarks and clear baselines. MolMiner has comparable technical ambition but weaker evaluation of its headline claim. |
-| `/home/wg25r/review_agent/human_reviews_2026/tr6vRn2aPg.md` (FragFM) | 5.00 | Accept | FragFM has similar fragment-based approach and scope; its evaluation gaps (missing baselines, missing ablation) are less central to its claims than MolMiner's missing multi-property test is to its own. MolMiner is slightly weaker. |
-| `/home/wg25r/review_agent/human_reviews_2026/jH1UE2QiDe.md` (M4olGen) | 4.00 | Reject | M4olGen also targets multi-property control but with narrower scope (3 properties). MolMiner has stronger technical contributions and ablations but similar evaluation gaps. MolMiner is stronger overall. |
-| `/home/wg25r/review_agent/human_reviews_2026/lEpsspNjRF.md` (FGMOL) | 3.50 | Reject | FGMOL had concerns about information leakage and marginal improvements. MolMiner has clearer contributions. |
-| `/home/wg25r/review_agent/human_reviews_2026/dWEQpTkr1v.md` (RL4SBDD) | 4.50 | Reject | Comparable score band. RL4SBDD had methodological concerns about biased value estimation. MolMiner has different issues: evaluation gaps rather than methodological flaws. |
-| `/home/wg25r/review_agent/human_reviews_2026/2depT0lWm3.md` (NSGGM) | 2.50 | Reject | NSGGM had limited novelty and weak experiments. MolMiner is substantially stronger across all dimensions. |
-| `/home/wg25r/review_agent/human_reviews_2026/IccLTTXjHE.md` (Warped Latent Spaces) | 2.50 | Reject | Limited novelty, outdated baselines. MolMiner is much stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/X9nDBjJDie.md` (MolGeneration) | 2.00 | Reject | Severely limited dataset and poor baselines. MolMiner is far stronger. |
+3. **Calibrate language about unconditional results**: Replace "modest differences" with a frank assessment of the gaps (e.g., "MolMiner underperforms HierVAE in unconditional generation, particularly for molWt, TPSA, and MR, consistent with its design focus on conditional control"). The honesty about this in Section 5 (Limitations) is good — the main text should match this tone.
 
-MolMiner sits between FragFM (5.0) and M4olGen (4.0). Its technical contributions (symmetry handling, GMM conditioning, order-agnostic rollouts, geometry-aware attention) are genuine and well-ablated, but the central claim of multi-property control is not adequately evaluated, and no conditional baselines are provided. These evaluation gaps are significant but addressable.
+4. **Analyze the QED failure**: Examine whether the model fails on QED's individual components (e.g., logP, molecular weight contributions) or their aggregation. This would provide insight into the model's conditioning limitations.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+5. **Provide conditioning case studies**: Show 3–4 concrete examples of molecules generated at different logP/ring-count targets alongside unconditionally generated molecules, to build intuition for what the calibration plots mean in practice.
+
+## Score and Decision
+
+**Calibration anchors:**
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/tr6vRn2aPg.md` (FragFM) | 5.00 | Similar contribution level (fragment-based, property-conditioned) but FragFM had stronger baseline comparisons and clearer empirical story. MolMiner has worse evaluation gaps. |
+| `/home/wg25r/review_agent/human_reviews_2026/Qdu92a5DiM.md` (InVirtuoGen) | 5.00 | Stronger optimization results and SOTA on PMO compensate for some novelty concerns. MolMiner's evaluation is weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/de4bbZedv3.md` (InertialAR) | 4.00 | Missing ablations and robustness concerns — similar pattern to MolMiner. InertialAR had SOTA numbers on QM9; MolMiner has no SOTA performance claims. |
+| `/home/wg25r/review_agent/human_reviews_2026/OvMtGGaFUT.md` (SynGA) | 6.00 | Strong evaluation with clear baselines and proper ablations. MolMiner falls well short of this standard. |
+| `/home/wg25r/review_agent/human_reviews_2026/jH1UE2QiDe.md` (M$^{4}$olGen) | 4.00 | Similar multi-property control focus, limited scope. Withdrawn/Treated as Reject. MolMiner has broader architectural contributions but similar evaluation weaknesses. |
+| `/home/wg25r/review_agent/human_reviews_2026/X9nDBjJDie.md` | 2.00 | Very weak evaluation, poor baselines. MolMiner is significantly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/hRIhAppr3a.md` | 1.50 | Fundamentally flawed. MolMiner is much stronger methodologically. |
+
+**Score rationale:** MolMiner has genuine architectural contributions (12-property conditioning at scale, symmetry-aware attachments) that position it above the weakest papers (scores 1.5–2.0). However, the evaluation is insufficient: the central claim of conditional generation has zero baselines, and two core architectural claims (order-agnostic, dynamic geometry) are not properly ablated. The unconditional results show meaningful gaps that are understated. Compared to accepted papers in this space (FragFM at 5.0, InVirtuoGen at 5.0) which had stronger empirical validation despite lower novelty, MolMiner's evaluation deficit weighs against acceptance. The nearest comparable in terms of review profile is InertialAR (4.0, Reject) which also had missing ablations and insufficient validation of core claims but had SOTA performance — MolMiner lacks even that. A score of 3.5 reflects a paper with real contributions held back by an evaluation that does not adequately support its core claims.
+
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

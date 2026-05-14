@@ -1,26 +1,18 @@
-Now I'll synthesize the final consolidated review. Let me go through the harsh critic's points systematically against the paper, then write the review.
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper presents *Calgacus*, a protocol that encodes a text into another text of identical token length using an LLM's token probability ranks. The method records the rank of each token in the hidden text under the LLM's own probability distribution, then generates a new text from a secret prompt by selecting tokens at those same ranks. This achieves full capacity (1:1 length ratio) in generative steganography, with steerable cover text. The paper demonstrates that stegotexts fall within the real-text log-probability distribution (Figure 4), provides a mechanistic explanation for the probability gap between originals and stegotexts (Figure 5), and illustrates a concrete AI-safety scenario where an aligned chatbot's responses encode uncensored answers from an unfiltered model (Figures 11-12).
-
----
+The paper presents Calgacus, a protocol that uses an off-the-shelf LLM to hide a secret text inside a different, coherent cover text of the *same token length*. Encoding is straightforward: record the rank of each token of the secret message under the LLM, then generate the stegotext by selecting tokens at those same ranks from the LLM's distribution conditioned on a secret prompt key. Decoding reverses the process. The paper demonstrates the method with several examples (e.g., hiding a political critique inside a boar recipe), shows that generated stegotexts fall within the log-probability distribution of real Reddit posts, discusses a deniability property, and presents a concrete AI-safety scenario (an "Shibbolethian Theatre" for covertly deploying an unfiltered LLM). A substantial portion of the paper philosophically reflects on how this protocol challenges notions of authorship, intention, and hallucination in LLMs.
 
 ## Strengths
 
-- **Novel full-capacity steganographic protocol**: The core mechanism — repurposing token ranks from one generation context to constrain generation under another — is genuinely elegant and, to the authors' and reviewers' knowledge, novel. Achieving 1:1 length ratio between hidden message and stegotext is a notable property not attained by prior generative text steganography methods (Section 2).
+- **Simple, working, and reproducible protocol.** The method requires no fine-tuning — it uses an off-the-shelf LLM with logit access. The paper provides concrete encoding/decoding timing (e.g., 5.0s encode / 4.6s decode on Llama 3 8B with an RTX 4070), a publicly available demo, and clear step-by-step instructions. The protocol is trivially verifiable.
 
-- **Quantitative evidence of stegotext plausibility**: The evaluation in Figure 4 shows that stegotexts constructed from three diverse source texts (chosen at μ, μ−2σ, μ+2σ of the real-text distribution) fall within the log-probability range of 1000 real Reddit posts. This is further corroborated using a different LLM (Phi-3, Figure 14), directly supporting the claim that stegotexts are not obviously fake by LLM standards.
+- **Steerability of the cover text.** The secret prompt key \(k\) controls the topic, tone, and style of the stegotext. The paper demonstrates diverse steering (culinary recipes, VR game reviews, Python code) with concrete examples, and shows that the method works across multiple LLMs (Llama 3 8B, Gemma 3 27B, Qwen 3 8B, Phi-4 14B, Phi-3 3.8B).
 
-- **Mechanistic insight into the probability gap**: The "Low entropy token choices" analysis (Figure 5) provides a clear, non-obvious explanation for why stegotexts are systematically less probable than their originals: rank-1 tokens (which carry the bulk of probability mass) are "wasted" on low-entropy contexts because their availability is determined by the hidden text's rank distribution, not by the generating context's entropy.
+- **Quantitative plausibility evidence.** Figure 4 shows that 300 stegotexts (from 3 original Reddit posts at different points in the distribution) fall within the log-probability distribution of 1000 real Reddit posts under Llama 3 8B. Figure 14 confirms the same ranking holds under a different LLM (Phi-3 3.8B). This provides reasonable evidence that the method produces text that is *statistically* similar to human-written text according to LLM probability estimates.
 
-- **Practical and reproducible**: The method works on consumer hardware (RTX 4070 laptop) with quantized 8B-parameter models, with encoding/decoding in seconds. A working demo and implementation are provided. The appendices contain useful practical findings including rank inversion (Figure 9), model quality ablation (Figure 8), and domain-dependence analysis (Figure 7).
-
-- **Concrete and thought-provoking AI-safety scenario**: The "Shipping unfiltered LLMs without really shipping them" play (Section 4, Figures 11-12) demonstrates how an aligned, lightweight open-source LLM can deliver uncensored answers from a powerful unfiltered private model while exposing only compliant surface text. This is a genuinely novel concern distinct from standard jailbreak or alignment-failure modes.
-
----
+- **Engaging philosophical framing.** The discussion of hallucinations as a failure of intention rather than factuality (drawn from Tacitus and Oulipo parallels), and the questioning of what it means for an LLM to "know" something when it can serve as a conduit for information it is supposedly incapable of expressing, is genuinely thought-provoking. The Shibbolethian Theatre scenario (Figures 11–12) is a novel and alarming application that concretely illustrates AI safety implications.
 
 ## Weaknesses
 
@@ -29,81 +21,63 @@ None.
 
 ### Major
 
-- **Overclaimed scope in the abstract and introduction vs. acknowledged limitations**: The abstract claims the protocol can hide "a meaningful text" and Section 1 says "arbitrary meaningful text" can be encoded. However, the method's mechanism (Section 3, "When the stegotext *s* sounds like a real text") and Appendix A.1 make clear that stegotext quality depends on the LLM's ability to predict the hidden text: when *e* is out-of-distribution (Romanesco dialect, cryptographic hashes), the output is garbled. The paper *does* acknowledge this dependency (e.g., "If *e* is difficult to guess for the LLM, ranks will be high and *s* will be gibberish"), but the abstract and introduction frame the capability in unqualified terms. The class of text that works is genuinely broad (English prose, code, chess notation, Spanish) but the headline framing should be tempered. This matters because readers may take away a stronger capability claim than the method delivers.
+- **No quantitative comparison to prior LLM steganography methods.** The paper mentions Meteor (Kaptchuk et al., 2021), Wu et al. (2024), and Zamir (2024) in Section 2, but never benchmarks Calgacus against any of them on standard metrics: bit rate, stegotext perplexity, human detection rate, or throughput. The paper claims the "notable property of having full capacity" (same-length stegotext and secret), but without any quantitative baseline comparison, it is impossible to assess whether this property translates into any practical advantage over existing methods, or whether the trade-offs (e.g., inability to choose high-rank tokens freely, detectable probability shifts) make it less useful. This is not a missing ablation — it is a fundamental failure to situate the claimed contribution in the literature.
 
-- **Security and deniability claims lack systematic evidence**: The deniability argument rests on a single hand-constructed example (Figure 15). While this demonstrates *existence* of a bogus key yielding a plausible alternate message, there is no quantification of how reliably this property holds — what fraction of stegotexts admit such a key, at what computational cost, and whether an adversary who knows the protocol could distinguish real from bogus keys by other means (e.g., checking whether the revealed *e* is itself predictable by the LLM). Similarly, the security analysis (Section 3.1) is informal and does not quantify the effective key space after accounting for the natural-language constraint on *k*. The paper acknowledges some of these gaps ("the feasibility of such an approach is unclear and remains an open research question") but then draws conclusions ("this observation evidences that our method provides deniability") that outpace the evidence. These claims underpin the paper's most attention-grabbing applications (the aligned/unfiltered LLM scenario, political censorship use-case).
+- **No human evaluation of stegotext detectability despite explicit claims.** The paper states that stegotexts are "opaque to humans" (line 85) and that "for a human both the original and fake texts are plausible" (line 290), yet provides zero human evaluation. For a steganography protocol whose central goal is undetectability, this gap is severe. A Turing-like test or even a small-scale human rating study is essential to support these claims. All evidence is based on LLM-assigned log-probability, which is partially circular (the same model family used to generate stegotexts is used as the judge; Figure 14 partially addresses this with a different model, but still relies on an LLM rather than human judgment).
 
 ### Minor
 
-- **Limited evaluation diversity**: The main quantitative evaluation (Figure 4) uses only 3 original texts (chosen at μ, μ−2σ, μ+2σ from the Reddit distribution) to produce 100 stegotexts each. While the selection strategy is thoughtful, 3 source texts cannot fully characterize the method's behavior across different hidden-text types. The appendix provides qualitative examples across domains (Figure 7: chess, code, Romanesco) but no quantitative diversity evaluation. The paper would be strengthened by measuring stegotext quality across a wider range of hidden-text types with varying predictability.
+- **The scale of the main experiment is small.** Only 3 original texts (chosen at \(\mu, \mu-2\sigma, \mu+2\sigma\) of the Reddit distribution) and 100 stegotexts each are evaluated. While the results are consistent, a larger and more diverse set of original texts would substantially strengthen confidence in the method's generality. The paper does not systematically study how the capacity-quality trade-off varies with different secret message domains, lengths, or perplexities.
 
-- **Probability gap and its steganalysis implications not fully explored**: The paper notes that stegotexts are consistently less probable than originals (Figure 4, Figure 14) and explains the mechanism (Figure 5), but does not analyze whether this gap is exploitable for steganalysis — i.e., whether an observer who only sees the stegotext (without the original for comparison) could detect it as steganographic. The "Low entropy token choices" analysis itself suggests a potential signature (systematic underuse of top-rank tokens), but the paper does not discuss whether this creates a detectable statistical pattern against a baseline of natural cover text.
+- **Security analysis is informal and lacks threat modeling.** The paper explicitly states it will not frame the method in a formal security model (lines 123–125), which is a reasonable scope choice. However, given that the paper claims safety and security implications (e.g., "nips [attacks] in the bud" line 377), the security discussion is overly informal. There is no treatment of stronger threat models (known-plaintext, chosen-message attacks), no empirical steganalysis, and the deniability claim rests on a single cherry-picked example (Figure 15). A systematic search for plausible bogus keys across many secret messages would be needed to substantiate the deniability claim.
+
+- **The novelty of "full capacity" requires clearer articulation.** The paper defines "full capacity" as equal-length stegotext and secret, which is a direct consequence of rank-based encoding. Prior variable-length steganography methods can encode messages of arbitrary length by adjusting bits per token; they do not guarantee same *token length* because they do not attempt to. The paper would benefit from a more precise discussion of what "full capacity" enables that prior methods cannot do, rather than presenting it as an uncontested advantage.
 
 ### Trivial
 None.
 
----
-
 ## Nice-to-Haves
 
-- A quantitative characterization of the relationship between the hidden text's average rank and the stegotext's log-probability would help practitioners predict whether their message will produce acceptable output.
-- Comparison with other generative steganography methods (e.g., Meteor, Zamir 2024) on capacity-distortion trade-offs would help contextualize when full capacity is worth the quality cost.
-- Discussion of potential defenses against the unfiltered-LLM scenario — e.g., could a platform detect that a response doubles as a rank sequence for generating harmful content?
-
----
+- A systematic study of how often high-rank tokens degrade stegotext quality, with quantitative coherence scores across varied secret messages.
+- An empirical steganalysis experiment (e.g., token-rank distribution divergence, autoencoder-based detection) to complement the log-probability analysis.
+- A larger-scale deniability experiment (systematic search for plausible bogus keys across many secret messages).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Criticism about "full capacity" being inaccurate / prior methods having same capability.** The reviewer claimed prior methods can achieve "arbitrary compression ratios" and that same-length encoding is not a lacking capability. However, prior methods embed bits into tokens and produce stegotexts whose length depends on the bit-to-token encoding ratio, not the token-length of the secret. Same-length is a genuine property of rank-based encoding that prior methods do not guarantee. The criticism is not factually wrong per se, but overstates the capability of prior methods. *Kept as a weakened point in Minor section.*
 
-1. **"The method does not actually hide arbitrary meaningful text — it hides only text the LLM can predict well. This invalidates the paper's core claim."** — REMOVED. The paper explicitly acknowledges this limitation in Section 3 ("When the stegotext *s* sounds like a real text") and Appendix A.1. The tension between the abstract's "meaningful text" claim and the acknowledged limitation is real, but the paper does not hide it; moving this to a softened major weakness about overclaiming rather than a fatal flaw.
+- **Criticism about missing appendices / proofs.** The parser strips appendices from all papers; they exist in the original submission. *Removed per hard rule.*
 
-2. **Various demands for formal security models and missing experiments on detectability by a steganalysis-aware observer** — MOVED TO NICE-TO-HAVE. The paper explicitly declines to adopt a formal steganographic model (Section 2: "we will avoid building a palace on the sand, and not frame our method in a formal model of steganography"). Demanding formal security analysis contradicts the paper's stated scope. The suggestion about steganalysis evaluation is reasonable but is a nice-to-have, not a core requirement for a paper introducing a novel protocol.
+- **Nitpicks about formatting, typos, broken characters.** These are parser artifacts. *Removed per hard rule.*
 
-3. **Complaints about Reddit posts as "real text" being potentially LLM-generated** — REMOVED. This is speculative and generic; most steganography papers use publicly available text corpora as cover-text proxies without exhaustive provenance verification. The dataset is cited (Trimness8, 2025) and the paper notes the texts are "more recent than Llama 3 and therefore cannot appear in its training corpus."
-
-4. **Demand for larger-scale experiments and more models** — WEAKENED (partially moved to Minor). The paper provides ablations across 6 model sizes (Appendix A.2, Figure 8) and evaluates cross-model generalization (Phi-3, Figure 14). The core evaluation is adequate as a proof-of-concept for the protocol.
-
-5. **"The philosophical discussion is largely disconnected from empirical grounding"** — REMOVED. The discussion section (Section 4) is explicitly a discussion and does not claim empirical support. It engages with conceptual questions about intentionality, hallucination, and LLM knowledge that the protocol naturally raises. Creative philosophical discussion is a legitimate component of a paper, particularly one that explicitly positions itself as raising questions about the nature of LLM-generated text.
-
-6. **"The connection to hallucinations as 'lack of intention' is interesting but the argument's validity does not depend on the protocol"** — REMOVED. This is a matter of taste; the paper uses the protocol to *motivate* and *illustrate* a conceptual reframing of hallucinations. It does not claim the protocol is necessary for the argument.
-
-7. **Strength Finder: "Thorough treatment of robustness factors"** — WEAKENED. While the appendices contain useful ablations, calling them "thorough" overstates the case given the small scale of some analyses.
-
----
+- **Strength about "improving on prior methods that embed fewer bits per token."** The strength finder claimed Calgacus improves on prior methods, but the paper provides no quantitative comparison to support this. This strength conflicts with the verified major weakness (no baseline comparison). *Moved here — the weakness wins.*
 
 ## Novel Insights
 
-Beyond the paper's own contributions, a genuinely novel observation emerging from the reviews is the tension between the protocol's steerability and its detectability. The method allows the cover text's topic and style to be freely chosen via the prompt *k*, which has significant practical benefits (e.g., tailoring the cover to a target platform). However, the very mechanism that enables this — decoupling the generating context from the text being encoded — also creates the probability gap that the paper documents. This is not just a bug but a structural feature: any protocol that preserves full capacity while decoupling surface text from hidden content will face the same tension, because the hidden text's token ranks are sampled from one distribution while the generating context imposes a different distribution. This suggests a fundamental capacity-stealth trade-off in generative steganography that the paper implicitly identifies but does not fully formalize.
-
----
+None beyond the paper's own contributions. The reviews surface no observation about the paper that the paper does not already articulate itself.
 
 ## Suggestions
 
-- Revise the abstract and introduction to accurately bound the method's capabilities: replace "arbitrary meaningful text" with phrasing that acknowledges the LLM-predictability requirement (e.g., "text within the LLM's modeling distribution").
-- Add a brief quantitative analysis (even a scatter plot) relating the hidden text's average rank to the stegotext's log-probability, which would give readers a practical diagnostic tool.
-- The deniability section should either be significantly strengthened with a systematic evaluation or its claims should be toned down to match the current evidence level (single example = existence proof, not established property).
-- Consider discussing whether systematic underuse of rank-1 tokens (Figure 5) could serve as a steganalysis signal, even if only qualitatively.
-
----
-
-## Calibration Anchors
-
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `q4qxtaKVAU` — "Early Signs of Steganographic Capabilities in Frontier LLMs" | 6.0 (Accept Poster) | More thorough evaluation across multiple models and settings; Calgacus has a more novel core mechanism but weaker empirical support. The 6.0 paper's evaluation is more systematic. |
-| `6cEPDGaShH` — "Invisible Safety Threat: Malicious Finetuning for LLM via Steganography" | 6.0 (Accept Oral) | Strong practical demonstration with multiple models and a clear attack pipeline. Calgacus is comparably novel in concept but less thorough in evaluation and has overclaiming issues the 6.0 paper does not. |
-| `ZujfJpD6as` — "Hiding in Plain Sight: A Steganographic Approach to Stealthy LLM Jailbreaks" | 3.50 (Reject) | Had fundamental problems: overclaimed results that a reviewer could not replicate, low-quality jailbreak outputs, and fusion of known techniques. Calgacus is clearly stronger — its method is genuinely novel and demonstrably works. |
-| `9u8HFU6ioO` — "The Coding Limits of Robust Watermarking for Generative Models" | 3.50 (Reject) | Theoretical paper; not directly comparable. Calgacus has more practical novelty. |
-| `YHz6PybFqK` — "The Hidden Cost of Modeling P(X): Membership Inference Attacks" | 5.0 (Reject) | Different topic area but similar in having a clear idea with somewhat limited evaluation scope. Calgacus has a more novel core contribution. |
-| `TVSPV6D0co` — "Fast, Secure, And High-Capacity Image Watermarking" | 4.67 (Reject) | Image domain, not directly comparable. Had strong results but evaluation concerns. |
-| `pAeEzS4LwS` — "Catch-22: Pareto Frontier for Detectability and Robustness in LLM Watermarking" | 2.67 (Reject) | Theoretical work with fundamental issues; Calgacus substantially stronger. |
-
-**Calibration judgment**: The paper is clearly above the 3.50 StegoAttack paper (which had replicability issues and limited novelty) and below the two 6.0 steganography papers (which had more thorough evaluation). The core idea is genuinely novel and elegant, the method demonstrably works, and the AI-safety implications are thought-provoking. However, the overclaiming in the abstract/intro, the single-example deniability evidence, and the limited evaluation diversity pull the score down. Positioned at the high end of the marginal-accept range.
-
----
+1. **Add baseline comparisons.** Evaluate Calgacus against Meteor, Zamir, and Wu et al. on a common set of secret messages. Report bit rate (bits per token), stegotext perplexity (under a held-out LLM), and a human detection rate study. This is the single most important revision.
+2. **Conduct a human evaluation.** At minimum, a small-scale Turing-like study where raters distinguish stegotexts from real texts of comparable topic/length. Report detection rates and confidence intervals.
+3. **Expand the empirical evaluation.** Test on more original texts (e.g., 30+ rather than 3), more domains, and more varied lengths. Quantify the frequency of incoherent stegotexts.
+4. **Strengthen the security discussion.** Even without a formal model, provide a threat model (adversary capabilities, goals), a systematic deniability experiment (search for bogus keys across many messages), and at least one simple steganalysis baseline (e.g., rank-distribution divergence).
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Calibration anchors used:**
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/q4qxtaKVAU.md` | 6.00 | *Early Signs of Steganographic Capabilities* — thorough empirical evaluation of LLM steganography with multiple models, metrics, and threat models. The current paper has much weaker evaluation but offers a novel protocol + philosophical discussion absent from this anchor. |
+| `/home/wg25r/review_agent/human_reviews_2026/6cEPDGaShH.md` | 6.00 | *Invisible Safety Threat* — rigorous steganographic attack evaluation with AdvBench, multiple models, and LlamaGuard classification. Much stronger experimental methodology. Current paper is less rigorous. |
+| `/home/wg25r/review_agent/human_reviews_2026/ZujfJpD6as.md` | 3.50 | *Hiding in Plain Sight: StegoAttack* — steganographic jailbreak with missing baselines and overclaimed results. Current paper has a cleaner protocol but similarly lacks thorough evaluation and baseline comparisons. |
+| `/home/wg25r/review_agent/human_reviews_2026/nrinbZTy26.md` | 3.50 | *Eliciting Secret Knowledge* — empirical benchmark with limited novelty. Current paper has more novel conceptual contribution but similar evaluation limitations. |
+| `/home/wg25r/review_agent/human_reviews_2026/nDSTDq0uDK.md` | 2.00 | *Watermarks via Probabilistic Automata* — fundamentally flawed theoretical claims. Current paper has no such theoretical flaws. |
+| `/home/wg25r/review_agent/human_reviews_2026/a195V8Qp4Z.md` | 2.50 | *Low-frequency Image Information Hiding* — image steganography paper with weak evaluation. Current paper is clearer and more reproducible. |
+| `/home/wg25r/review_agent/human_reviews_2026/TVSPV6D0co.md` | 4.67 | *Fast, Secure Image Watermarking* — image-domain steganography with solid evaluation. Current paper has a more novel protocol but less rigorous evaluation. |
+
+The paper presents a genuinely interesting protocol and a thought-provoking philosophical discussion. However, for a venue like ICLR, the experimental evaluation is insufficient to support the strong claims made. The lack of any comparison to prior LLM steganography methods, the absence of human evaluation despite explicit claims about human undetectability, and the very small scale of the main experiment (3 original texts, 300 stegotexts) are significant gaps. The paper is positioned between the clearly flawed papers (score 2–3) and the well-evaluated papers (score 6) in the calibration set. It has a real contribution in the protocol itself and the philosophical framing, but the evaluation falls short of what is needed.
+
+MY FINAL SCORE: <pineapple>3.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

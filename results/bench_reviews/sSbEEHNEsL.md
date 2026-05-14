@@ -1,16 +1,21 @@
-Now I have all the evidence I need. Let me compose the final meta-review.
-
----
+Now I have all the information I need. Let me synthesize the review.
 
 ## Summary
-USR 2.0 proposes CTC-driven teacher forcing for semi-supervised unified speech recognition (ASR, VSR, AVSR). Instead of slow autoregressive pseudo-labelling, it feeds greedily decoded CTC outputs into the teacher decoder to generate attention targets in a single parallel forward pass, then has the student decoder predict both CTC and attention pseudo-labels jointly. Mixed sampling alternates between this CTC-driven mode and standard AR mode to mitigate exposure bias. The method achieves roughly 2× faster training than USR, substantial OOD robustness gains (long utterances, noise, cross-dataset), and a new SOTA at Huge scale (17.6% VSR / 0.9% ASR / 0.8% AVSR on LRS3).
+2-3 sentence summary of the paper's contribution.
+
+The paper proposes **USR 2.0**, an improved semi-supervised unified speech recognition framework that replaces autoregressive pseudo-label generation with **CTC-driven teacher forcing** — feeding greedily-decoded CTC outputs into the decoder to produce attention targets in a single forward pass. This design halves training time, substantially improves out-of-distribution robustness on long utterances, noisy audio, and cross-dataset settings, and achieves state-of-the-art results on LRS3, LRS2, and WildVSR when scaled to a Huge model.
 
 ## Strengths
-- **CTC-driven teacher forcing is genuinely innovative**: The core idea of using CTC outputs as forced decoder inputs during pseudo-labelling elegantly eliminates the AR bottleneck while enabling joint CTC-attention supervision. The insight that global incoherence is harmless in a self-training setting (shared conditioning between teacher and student) is clever and well-argued (Section 4.1).
-- **Thorough and convincing OOD evaluation**: The paper tests robustness across three distinct distribution shifts — long utterances (Figure 3, VoxCeleb2), additive noise at multiple SNR levels (Table 1, zero-shot), and unseen datasets (Table 3, LibriSpeech/WildVSR/AVSpeech). USR 2.0 substantially outperforms USR and self-supervised baselines (BRAVEn, AV-HuBERT) across all settings. The beam size analysis (Figure 3c) and greedy decoding results are particularly important for pseudo-labelling efficiency.
-- **Clear efficiency gains**: Figure 5 demonstrates ~2× training speedup across Base, Base+, and Large configurations (VSR), driven by both faster per-step decoding and faster convergence (50 vs. 75 epochs). Figure 1 documents the ~40× raw decoding speedup of CTC vs. AR.
-- **Well-designed ablations**: Table 4 cleanly isolates the contribution of CTC vs. attention targets to both ID and OOD performance under both modes. Figure 4 shows the trade-off between AR sampling probability, ID accuracy, OOD robustness, and training time — a useful practical guide.
-- **Minimal adoption cost**: The method requires no architectural changes, only a change to the pseudo-labelling strategy (Section 4.3), making it straightforward to adopt within existing USR pipelines.
+
+- **CTC-driven teacher forcing nearly halves training time while maintaining accuracy.** Figure 5 shows USR 2.0 achieves comparable or better VSR WER in roughly half the wall-clock time across Base, Base+, and Large models. The speedup comes from replacing autoregressive attention PL generation with parallel CTC-conditioned teacher forcing, and the method also converges in fewer epochs (50 vs. 75, Table 13).
+
+- **Substantially improved out-of-distribution robustness.** Figure 3a shows USR 2.0's greedy decoding WER stays nearly flat on VoxCeleb2 sequences up to 600 frames while baselines rise sharply beyond ~150 frames. Table 1 shows USR 2.0 outperforms all baselines at every SNR level for both ASR and AVSR. Table 3 shows large gains on LibriSpeech, WildVSR, and AVSpeech under greedy decoding. These results convincingly demonstrate the method's core advantage.
+
+- **State-of-the-art unified speech recognition with a single model.** USR 2.0 Huge achieves 17.6% VSR, 0.9% ASR, and 0.8% AVSR on LRS3 (Table 7), 12.6%/1.3%/1.3% on LRS2 (Table 8), and 38.5% on WildVSR (Table 9), outperforming all prior unified models and most modality-specific systems — including those using external language models or orders-of-magnitude more labelled data.
+
+- **Thorough ablations isolating each design choice.** Table 4 dissects CTC-driven vs. AR modes, Table 10 ablates loss weighting and sampling schedules, and Figure 4 characterizes the mixed-sampling trade-off between ID accuracy, OOD robustness, and training efficiency. These ablations systematically validate the design rather than relying on holistic gains.
+
+- **Qualitative examples demonstrate concrete failure-mode fixes.** Table 11 shows USR 2.0 eliminates the truncation and repetition errors plaguing USR on long utterances (e.g., correctly transcribing 150+ word sentences where USR omits half or loops on "Sharry says").
 
 ## Weaknesses
 
@@ -18,55 +23,69 @@ USR 2.0 proposes CTC-driven teacher forcing for semi-supervised unified speech r
 None.
 
 ### Major
-- **Incomplete in-distribution comparisons in Table 2**: USR 2.0 results are absent from the Base, Base+, and Large configurations in Table 2 (the main in-distribution table). Only the Huge model appears. Appendix Table 13 shows that at Base scale, USR 2.0 achieves 36.2/3.0/2.9 (V/A/AV) at 50 epochs vs. USR at 36.0/3.2/3.0 at 75 epochs — essentially equivalent performance, with gains coming from faster convergence rather than better final accuracy. This matters because the paper's framing implies consistent in-distribution gains across settings, while the evidence suggests that at matched model sizes and data, USR 2.0's in-distribution advantage is modest; the headline SOTA numbers come primarily from scaling to Huge with more unlabelled data, which the efficiency gains enable but which is not a comparison against USR at equivalent scale. The paper should include USR 2.0 rows for all configurations in Table 2 (or explain why they are omitted) and qualify the in-distribution claims appropriately.
+
+- **Table 2 omits USR 2.0 results, making in-distribution comparisons opaque.** The paper's primary in-distribution benchmark (Table 2) lists only USR and other baselines — it does **not** report USR 2.0's numbers for any setting (Base/LRS3, Base+/Vox2, Large/Vox2). The text claims "USR 2.0 matches or outperforms the state of the art" and "gains over USR are more pronounced with VoxCeleb2 pre-training," but the reader cannot verify these claims from Table 2. The controlled comparison exists in **Table 13** (Base/LRS3, with variance), but forcing readers to cross-reference an appendix table to understand the main result undermines the paper's narrative. The authors should add USR 2.0 results directly to Table 2.
+
+- **SOTA claims for the Huge model are confounded with scale.** Tables 7–9 compare USR 2.0 Huge (656h labelled, 2,649h unlabelled) against USR Large (433h labelled, 1,326h unlabelled). The improvements could partly stem from larger model capacity and more data rather than the proposed method. Controlled comparisons at smaller scales (Table 13, Figure 5) do consistently favor USR 2.0, which mitigates this concern, but the paper should explicitly note the confound and ideally provide an apples-to-apples comparison at matched scale.
 
 ### Minor
-- **Isolation of CTC-driven teacher forcing from decoder-side supervision could be sharper**: Table 4 ablates which targets each branch predicts, but does not cleanly separate the effect of the teacher-forcing mechanism (CTC-conditioned decoder inputs) from the joint target supervision. A variant where the decoder operates autoregressively but is additionally supervised with a CTC-aligned auxiliary loss would help distinguish these contributions. This does not threaten the core claims — the existing ablations already demonstrate the value of joint supervision — but would strengthen the methodological narrative.
 
-- **Per-iteration speedup not quantified**: The paper reports overall training time reduction (~2×) but does not break down wall-clock time per training step for CTC-driven vs. AR mode. This would help practitioners estimate throughput gains independent of the convergence speedup.
+- **In-distribution improvements over USR are modest.** Table 13 shows that at equal epochs (50), USR 2.0 improves VSR from 37.6→36.2, ASR from 3.4→3.0, AVSR from 3.2→2.9. At 75 epochs, USR catches up (VSR: 36.0 vs. 36.1) while USR 2.0 retains ASR/AVSR advantages (3.0 vs. 3.2, 2.9 vs. 3.0). These gains are real but small. The paper's framing should emphasize efficiency and robustness as the primary contributions, with in-distribution improvement presented as a secondary, smaller benefit.
+
+- **OOD evaluations rely on Whisper as ground truth without reporting its error rate.** The OOD evaluations in Section 5.1 and 5.3 (VoxCeleb2, AVSpeech, WildVSR) use Whisper-generated transcriptions as ground truth. Whisper's own WER on these datasets is not reported, making it impossible to bound the measurement noise. While relative comparisons remain meaningful, the absolute WERs could be floor-limited differently across methods. The paper should at minimum acknowledge this limitation.
+
+- **Variance is not reported for several key experiments.** Tables 1 (noise), 3 (OOD datasets), and Figure 3 (long utterances) lack variance or standard deviation. While single-run evaluation is the norm in large-scale speech benchmarks, providing at least some measure of variability (e.g., via bootstrapping or a few seeds) would strengthen confidence in the results. The paper does report variance for the controlled in-distribution comparison in Table 13, which is good.
 
 ### Trivial
-- The claim that USR 2.0 "halves training time" (abstract, line 27) is supported by the data but depends on the mixed sampling ratio and early stopping at 50 epochs — a brief qualification in the abstract would improve precision.
+
+- Figure 5's label text is garbled in the PDF extraction; this is a rendering artifact.
+- The "CTC merge & collapse" ablation (Table 10c) is useful but its heading is ambiguous.
 
 ## Nice-to-Haves
-- Attention or alignment visualizations comparing USR 2.0 and USR on long OOD utterances would provide qualitative intuition for the robustness mechanism.
+
+- Provide a quantitative analysis of CTC-driven attention pseudo-label quality (e.g., WER relative to teacher AR PLs or ground truth) to validate the claim that global incoherence does not harm learning. The qualitative examples in Appendix C.4 are insightful but anecdotal.
+- Investigate whether the optimal mixed-sampling probability (0.5) depends on the OOD dataset characteristics.
+- Evaluate USR 2.0 in a streaming ASR setting where its strong greedy decoding could be leveraged.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
 
-- **"Failure to isolate CTC-driven teacher forcing from joint supervision" (as a major concern)**: The harsh critic framed this as a major methodological gap that "leaves the unique contribution unclear." The paper's Table 4 does show that removing CTC supervision from the decoder in CTC-driven mode degrades OOD WER from 24.2% to 35.1%, and that AR mode (which lacks CTC-driven teacher forcing) yields OOD WER of 40.1%. These ablations directly demonstrate that both the teacher-forcing mechanism and joint supervision matter. The specific ablation the critic requests (auxiliary CTC loss on AR decoder) is a nice-to-have refinement, not a gap that obscures the contribution. → **Moved to Nice-to-Have tier.**
+*These points are flagged for removal; treat with caution.*
 
-- **Demand for per-iteration speedup breakdown as a major concern**: The overall ~2× training time reduction is clearly shown in Figure 5. A per-step breakdown would be informative but is not essential to the core efficiency claim. → **Downgraded to Minor.**
-
-- **Attention/alignment maps as a "Missing Experiment"**: Qualitative visualization is nice-to-have, not a requirement for validating the robustness claims, which are already quantitatively supported by Figures 3a-c, Table 1, and Table 3. → **Moved to Nice-to-Haves.**
-
-- **"Huge model not directly comparable to USR's Huge results because no such results are reported for USR"**: The paper makes clear that its efficiency enables scaling to Huge; the lack of USR Huge results is precisely because USR's slow pseudo-labelling made such scaling impractical. This is a strength of USR 2.0, not a weakness. The comparison to prior SOTA methods (Table 7 in Appendix) is fair.
+- **Critic's claim that "no numbers support [the in-distribution claim] at matched scale"** — This is factually incorrect. Table 13 provides a controlled comparison at Base/LRS3 with variance (USR 2.0 at 50 epochs: 36.2/3.0/2.9 vs. USR at 50: 37.6/3.4/3.2). The critic's broader concern about Table 2 missing USR 2.0 is valid and retained above; the "no numbers" phrasing is removed.
+- **Critic's claim that improvements "could be due to increased model scale, more labelled+unlabelled data, or longer training, not to the proposed method"** — This is a valid concern about the Huge SOTA comparison specifically, but the paper provides controlled comparisons at smaller scales (Table 13, Figure 5) that isolate the method's effect. The criticism is retained in weakened form above. The absolute phrasing suggesting no isolation is removed.
+- **Strength Finder's generic strengths that conflict with verified weaknesses** — Generic phrasing removed where applicable (e.g., statements that are restatements of claims rather than evidence-backed strengths).
+- **Several presentation/punctuation/formatting nitpicks** from the critic's section-by-section notes — Removed per instruction.
+- **"Missing comparison with USR Huge" as a fatal flaw** — It is impractical to expect a paper to train a USR Huge model that does not exist. The scaled comparison with USR Large is imperfect but informative. Moved to Major weakness with weakened framing.
 
 ## Novel Insights
-None beyond the paper's own contributions. The key insight — that CTC-driven teacher forcing is viable in pseudo-labelling because teacher and student share conditioning, making global coherence unnecessary — is the paper's own.
+
+The harsh critic raises a genuinely useful observation: the paper's framing overemphasizes in-distribution gains while underplaying the fact that the strongest claimed improvements (SOTA on LRS3/LRS2/WildVSR) come from a Huge model that is not directly comparable to any existing USR model at the same scale. However, the strength finder correctly identifies the core narrative: the paper's central contribution is *not* in-distribution SOTA but rather the efficiency-robustness trade-off. The CTC-driven teacher forcing insight — that global incoherence is harmless in self-training because teacher and student share the same conditioning — is clever and well-supported by both ablations and qualitative examples. An insightful observation that emerges from reading both reviews and the paper is that the method's OOD gains are most dramatic precisely where the AR decoder fails catastrophically (repetition/truncation), which is a failure mode the paper documents clearly in Table 11. This suggests the method's value is highest when the unlabelled data distribution differs substantially from the labelled distribution — a common real-world scenario that the paper could emphasize more.
 
 ## Suggestions
-- **Critical**: Add USR 2.0 rows to all configurations in Table 2 (Base, Base+, Large for both low- and high-resource). If those experiments were not run, explicitly state this and qualify the SOTA claim as being primarily at the Huge scale.
-- **Helpful**: Include per-step timing for CTC-driven vs. AR pseudo-labelling to complement the overall training time reduction shown in Figure 5.
-- **Minor**: Qualify the "halves training time" claim in the abstract by noting the dependence on mixed sampling and early stopping.
+
+1. **Add USR 2.0 results directly to Table 2** for all model sizes (Base, Base+, Large) and both low/high-resource settings. Without this, readers cannot verify the claimed in-distribution gains from the main table.
+
+2. **Calibrate the framing** to emphasize efficiency and OOD robustness as the primary contributions, and present in-distribution SOTA as a product of scaling + the method rather than the method alone.
+
+3. **Report Whisper's WER on the OOD evaluation sets** or at minimum add a caveat about ground-truth quality.
+
+4. **Add variance** to Tables 1 and 3 (or provide a reproducibility statement about single-run evaluation conventions).
 
 ## Score and Decision
 
-**Anchor comparison:**
+I retrieved the following calibration anchors from the human-review corpus:
 
-| Path | Avg Score | Comparison to paper under review |
-|------|-----------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/DzvPiqh23f.md` | 7.33 | Self-Forcing++ has cleaner claims and more ambitious technical scope (minute-scale video generation). USR 2.0 has better ablation depth but weaker in-distribution evidence. Slightly below. |
-| `/home/wg25r/review_agent/human_reviews_2026/17DNmdQ9aU.md` | 7.50 | StableToken has tighter novelty-to-evidence mapping with cross-task validation. USR 2.0's core idea is comparably novel but the in-distribution story is less clean. Below. |
-| `/home/wg25r/review_agent/human_reviews_2026/vjEl1PuIDE.md` | 7.00 | AVoCaDO is a strong systems/engineering paper with comprehensive evaluation. USR 2.0 is comparable in quality but has the Table 2 gap. Slightly below. |
-| `/home/wg25r/review_agent/human_reviews_2026/ghwxbTx7do.md` | 6.00 | SSPO has a theoretical contribution plus strong empirical results but faces fairness-of-comparison concerns. USR 2.0 has stronger empirical evidence (OOD) but shares the incomplete-comparison issue. Slightly above. |
-| `/home/wg25r/review_agent/human_reviews_2026/dDHnO3Vhyj.md` | 6.00 | Text-speech understanding gap paper — solid but narrow contribution. USR 2.0 is more impactful and better evaluated. Above. |
-| `/home/wg25r/review_agent/human_reviews_2026/ISSxXXiu3w.md` | 3.50 | Chunk SSL has novelty concerns and presentation issues. USR 2.0 is far stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/tpkBiKShwV.md` | 2.67 | Weak clinical grounding, limited evaluation. USR 2.0 is incomparably stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/M9jciGcJpC.md` | 3.00 | Dataset+model paper with limited validation. USR 2.0 is much stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/IKihT0qTdt.md` | 4.00 | Systematic evaluation of SSL features for deepfake detection — thorough but narrow. USR 2.0 is more impactful. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `yt40xuRBA9.md` (CTC-DRO) | 5.00 | Similar tier — both are cleanly-motivated speech method papers with real gains. USR 2.0 has broader experimental scope but more overclaiming issues. Comparable. |
+| `MiV3WXDYJb.md` (WAVE) | 6.00 | Slightly stronger presentation and more comprehensive evaluation, but also has unresolved weaknesses (prompt-dependence, missing baselines). USR 2.0 has a clearer methodological contribution. |
+| `oBXfPyi47m.md` (RL + non-curated data) | 8.00 | Significantly stronger — cleaner experiments, no overclaiming, stronger empirical support. USR 2.0 is not at this level. |
+| `tpkBiKShwV.md` (SSL disease detection) | 2.67 | Much weaker — misleading framing, narrow scope. USR 2.0 is substantially stronger on every dimension. |
+| `M9jciGcJpC.md` (AVSU-Bench) | 3.00 | Weaker — incomplete baselines, unclear contributions. USR 2.0 has clearer contributions and stronger evidence. |
+| `xGmWHCpVoM.md` (SSL speech enhancement) | 3.50 | Weaker — the method is less clearly motivated and the gains are marginal. USR 2.0 has larger and more convincing improvements. |
+| `E9hSdtsAG0.md` (Drax, discrete flow matching) | 5.33 | Similar quality — novel method with clear experiments but some overclaiming. Scores would be comparable. |
 
-USR 2.0 sits between the 6.0 and 7.0 anchors. It has a genuinely clever core idea, thorough OOD evaluation, and clear efficiency gains — stronger than the 6.0 papers. The missing Table 2 entries (and resulting overclaim concern) keep it below the 7.0-7.5 tier, where papers have tighter evidence-to-claim alignment. This is a solid paper with one addressable weakness.
+Relative to these anchors, the paper is clearly above the 3.5 rejected-tier papers and comparable to the 5.0–6.0 accepted-tier papers. It is not at the 8.0 excellence level due to the framing/overclaiming issues. A score of **5.5** reflects a solid paper with real contributions that needs moderate revisions to fix presentational and framing issues.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

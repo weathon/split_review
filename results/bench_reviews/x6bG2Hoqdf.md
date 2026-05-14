@@ -1,113 +1,84 @@
-Now I have all the evidence I need. Let me write the final consolidated review.
-
----
+Now I have all the information needed. Let me synthesize the final review.
 
 ## Summary
 
-CALM introduces a framework that jointly evolves both the prompt-generation process and the LLM itself for automatic heuristic design (AHD). Unlike prior LLM-based AHD methods that keep the LLM frozen and rely solely on textual prompt manipulation ("verbal gradients"), CALM uses GRPO-based reinforcement learning to fine-tune the LLM on-the-fly using prompt-response-performance triplets from the evolutionary search loop. The framework includes novel fine-granularity mutation operators (injection, replacement) designed to produce token-level variation that GRPO can credit-assign effectively, plus a diversity-aware crossover and collapse mechanism. Using an INT4-quantized Qwen2.5-7B-Instruct model on a single 24GB GPU, CALM discovers heuristics that outperform GPT-4o-mini-based baselines across OBP, TSP, CVRP, and OP.
+This paper introduces CALM, a framework for automatic heuristic design (AHD) that co-evolves both the prompt generation strategy and the LLM itself via GRPO-based reinforcement learning. While prior LLM-based AHD methods keep the underlying LLM frozen and only manipulate prompts ("verbal gradients"), CALM uses heuristic performance as a training signal to fine-tune the LLM during search ("numerical gradients"), enabling it to discover better heuristics. Using an INT4-quantized Qwen2.5-7B model on a single 24GB GPU, CALM outperforms SOTA baselines that rely on much more powerful API-based models (GPT-4o-mini) across four optimization tasks (OBP, TSP, CVRP, OP), and the paper includes a thorough ablation study decomposing each component's contribution.
 
 ## Strengths
 
-- **RL-based co-evolution is a genuine advance for LLM-based AHD.** Prior work keeps the LLM frozen; CALM demonstrates that treating the evolutionary loop as a training-data source and adapting the LLM via GRPO yields consistent, substantial improvements. The API-based CALM variant (matching baseline query budgets) is competitive with SOTA (Tables 1–3, Section 5.2), and adding GRPO on a quantized 7B model pushes performance past GPT-4o-mini-based baselines — a result that would be impossible without the learned adaptation.
+- **Novel integration of RL-based LLM fine-tuning into AHD.** CALM is a first framework that jointly optimizes both the prompt generation process and the LLM parameters via GRPO during heuristic search. The ablation (Table 4) confirms that removing GRPO degrades OBP performance from 0.71% to 1.78% gap, directly validating that the co-evolution mechanism drives improvement. This is a clear departure from prior work (EoH, ReEvo, MCTS-AHD) that keeps the LLM frozen.
 
-- **Fine-granularity operators are well-motivated and empirically validated.** The injection and replacement operators are explicitly designed to create token-level variation that maps naturally onto GRPO's per-token advantage signal (Section 4.1). The ablation (Table 4) shows removing any operator degrades performance, and removing diversity-aware crossover hurts more than removing crossover entirely, confirming that the design choices matter.
+- **Consistent SOTA performance with a substantially weaker base model.** Across all four tasks, CALM using an INT4-quantized Qwen2.5-7B-Instruct (objectively the weakest model in the comparison) outperforms GPT-4o-mini-based baselines: OBP 0.71% vs. next best 0.82% (MCTS-AHD), CVRP 3.83% vs. 5.44% (MCTS-AHD), OP 12.58% vs. 15.10% (ReEvo). This demonstrates that RL-based co-evolution can compensate for a significant gap in foundation model capability.
 
-- **Thorough experimental validation across diverse problems and comparisons.** The paper evaluates on four distinct optimization tasks (OBP, TSP step-by-step, CVRP with ACO, OP with ACO), compares against 7+ LLM-based baselines plus hand-crafted and NCO methods, and includes ablations for every major component (operators, reward function, collapse mechanism). Appendix I.9 further compares GRPO-enhanced MCTS-AHD vs CALM under matched training conditions, isolating the benefit of CALM's design beyond simply adding GRPO to any method.
+- **Thorough and systematic ablation study.** Table 4 evaluates 11 ablation conditions covering reward design variants, collapse mechanism hyperparameters, and operator removal. This allows readers to decompose the contribution of each component — e.g., removing simplification causes the largest drop (1.35% on OBP), and the collapse mechanism with poor hyperparameters (δ₀=0.005, C=15) hurts markedly (1.93%). The ablation isolates the RL component's contribution from the prompt operator design.
 
-- **Practical and accessible computational footprint.** Running entirely on a single 24GB GPU with a heavily quantized model (1.15% weights fine-tuned, 5–7 hours per experiment) while outperforming API-based methods is a meaningful demonstration of efficiency.
-
-- **Reward function design is carefully considered and ablated.** The progressive reward scheme (infeasible  duplicate  new < improvement) with credit relative to the best base heuristic in the prompt (Equation 4) is shown to outperform simpler alternatives (Table 4: rew=performance and binary-improvement variants), confirming that prompt-aware credit assignment matters.
+- **API-based ablation disentangles operator design from RL.** The "CALM (API, w/o GRPO)" variant shows that even without RL, CALM's prompt operators (using GPT-4o-mini with G=1) are highly competitive with MCTS-AHD — e.g., OBP 0.82% vs. 0.89%, and outperforming on CVRP and OP. This cleanly separates the contribution of the prompt engineering from the RL fine-tuning.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The core claim — that RL-based fine-tuning within the evolutionary loop improves heuristic discovery — is well-supported by the evidence.
+None.
 
 ### Major
 
-None.
+- **Unequal evaluation budgets compromise the main baseline comparison for TSP, CVRP, and OP.** The paper reports "1,000 heuristic evaluations for baselines and a fixed budget of 2,000 LLM queries for CALM" on these three tasks (p. 7, lines 447–448). Since each LLM query in CALM produces a response that is evaluated, CALM effectively evaluates up to 2,000 candidates versus the baselines' 1,000. This 2× advantage in evaluation budget could explain part of the performance gap, independent of the method's innovations. The paper acknowledges this framing only for OBP (where baselines get 2,000 evaluations from 4,000+ queries, making the comparison there actually query-efficient for CALM) but does not correct or control for it on TSP, CVRP, and OP. A controlled comparison where CALM is run with 1,000 queries (e.g., T=250, G=4) against baselines at 1,000 evaluations would be needed to isolate the method's contribution from the extra search budget. While the ablation study (Table 4) holds budget constant within CALM's internal comparisons, the headline superiority claim over baselines on these three tasks remains partly confounded.
+
+- **Budget reporting inconsistency.** The paper states that baselines use "1,000 heuristic evaluations" but also that the API-based CALM variant matches "the query budgets of prior LLM-based AHD methods" at 2,000 queries for TSP/CVRP/OP (Section 5.2). These two statements are difficult to reconcile — it is unclear whether "heuristic evaluations" and "LLM queries" refer to different things in the baseline context, or whether the paper is internally inconsistent. Either way, the ambiguity makes it hard for readers to assess the fairness of the comparison.
 
 ### Minor
 
-- **Query budget asymmetry for non-OBP tasks when comparing CALM (w/ GRPO) to baselines.** CALM uses 2,000 LLM queries for non-OBP tasks while most baselines use 1,000 heuristic evaluations (≈1,000 LLM queries). The paper is transparent about this (Section 5, "Baselines"), and the asymmetry is partially mitigated by (a) the API-based CALM variant that matches baseline budgets and still performs competitively, (b) the EvoTune comparison using the same Qwen 7B model at 1,000 evaluations, and (c) the Appendix I.9 comparison of MCTS-AHD+GRPO vs CALM+GRPO under matched training conditions. However, the main headline comparison in Tables 1–3 between CALM (local, w/ GRPO) and the GPT-4o-mini baselines compounds both the model-quality gap (in CALM's favor) and the query-budget gap (in baselines' partial favor), making it slightly harder to attribute the full performance delta to the method alone. This does not invalidate the core claim but should be discussed more explicitly.
+- **EvoTune re-implementation lacks validation.** The paper re-implements EvoTune within Unsloth because the original requires ~80GB of GPU memory (Appendix H.2). No validation is reported that the re-implementation reproduces the original EvoTune's performance on a common benchmark. Since EvoTune is the main RL-based baseline, any deviation (reward scaling, quantization, hyperparameters) could bias the comparison. This concern is somewhat mitigated by EvoTune's very poor results (e.g., 2.40% on OBP vs. CALM's 0.71%), but the uncertainty remains unaddressed.
 
-- **No "collect-then-fine-tune" baseline to isolate the benefit of online co-evolution.** The paper shows CALM (w/ GRPO) vs CALM (w/o GRPO), establishing that RL fine-tuning helps. It also shows CALM+GRPO benefits more than MCTS-AHD+GRPO (Appendix I.9), suggesting the co-evolution design matters. However, comparing online co-evolution against a two-stage pipeline (run verbal evolution to collect data, then fine-tune offline on that static corpus) would more cleanly isolate whether continuous on-the-fly adaptation is necessary. This is a reasonable ablation to request but does not threaten the paper's main contribution.
+- **No direct evidence that fine-granularity operators improve RL credit assignment.** The paper motivates the injection and replacement operators as helping GRPO "more effectively identify the contribution of individual structural changes" (Section 4.1). The ablation shows removing these operators hurts performance, but this is equally compatible with the explanation that the operators simply reduce the search space or introduce useful inductive biases — not that they improve token-level gradient attribution. Direct evidence (e.g., gradient analyses, token attribution comparisons) would strengthen this claim.
 
-- **Selective reporting on OP N=50 in-domain.** The paper states CALM "outperforms EoH and the most recent approach, MCTS-AHD and EvoTune" on OP in-domain, which is factually correct (15.054 vs 13.388, 14.847, 15.053 respectively). However, ReEvo achieves 15.103 (gap 23.98%) on this same metric, outperforming CALM. The paper never claims to beat ReEvo on this metric, but readers may find the omission noticeable given ReEvo is a prominent baseline in the table.
+- **Collapse mechanism hyperparameters require careful tuning.** The collapse mechanism's probabilistic triggering depends on δ₀ and C. Table 4 shows that while most configurations work well, the setting (δ₀=0.005, C=15) causes a large degradation (OBP: 1.93% vs. 0.71%). The paper acknowledges this but does not provide a systematic sensitivity analysis across tasks. This limits the mechanism's turn-key applicability, though the default configuration (δ₀=0.0005, C=25) performs robustly.
 
 ### Trivial
-
-- The collapse mechanism's analytical approximation (Equation 2) relies on δ₀ ≪ 1 per Appendix G, while experimental values δ₀=0.005 are borderline for this assumption. The practical results in Table 4 confirm the mechanism works, so this is a minor precision concern.
+None.
 
 ## Nice-to-Haves
 
-- A "collect-then-fine-tune" offline baseline as discussed above would further strengthen the co-evolution narrative.
-- Replacing each operator with a simpler alternative (e.g., random mutation instead of injection) rather than removing it entirely, to test whether the specific operator design matters beyond just having some mutation.
-- A visualization (e.g., embedding plot) of how the LLM's output distribution shifts over the course of fine-tuning to make the co-evolution dynamic more tangible.
-- An experiment with a larger model (e.g., Qwen2.5-14B) to assess whether gains scale with model capacity.
+- Run CALM with 1,000 total queries (e.g., T=250, G=4) and compare directly against baselines at 1,000 heuristic evaluations to verify that the performance advantage persists under budget-matched conditions.
+- Validate the EvoTune re-implementation by reporting its performance on a standard task from the original paper under the same LLM and GPU configuration.
+- Provide gradient-based analysis (e.g., token attribution scores) to substantiate the claim that injection/replacement operators improve RL credit assignment beyond search space reduction.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+- **Criticism that the RL component is not unique to CALM because adding RL to MCTS-AHD also helps (Appendix I.9).** This is not a weakness — the paper transparently reports this experiment and correctly notes that CALM benefits *more* from RL than MCTS-AHD does, which supports the claim that CALM's operator design is tailored for RL integration. Removed as the paper actually addresses this constructively.
 
-- **"Unfair evaluation budget renders headline comparisons invalid" (harsh critic).** The budget asymmetry is real but the paper addresses it through (1) the API variant matching baseline budgets, (2) the Appendix I.9 matched-setting comparison, and (3) the EvoTune comparison at equal budget. The asymmetry does not invalidate the core claims. Downgraded from fatal to minor.
+- **Criticism about the analytic approximation (Equation 2) being tangential.** While fair, this does not harm any core claim; it is presented as a supplementary detail. Removed as a non-substantive complaint about scope.
 
-- **"Inaccurate result reporting for OP" (harsh critic).** The critic claimed MCTS-AHD achieves 15.103 on OP N=50 vs CALM's 15.054. This is factually incorrect — the 15.103 value belongs to ReEvo, not MCTS-AHD. MCTS-AHD's OP N=50 result is 14.847 (Table 3, line 615). CALM (15.054) does outperform MCTS-AHD (14.847), as the paper states. Removed entirely; the reviewer misread the table.
-
-- **"Missing comparison to GRPO-enhanced MCTS-AHD" (harsh critic).** This experiment exists in Appendix I.9 (Tables 15–16), comparing MCTS-AHD+Qwen w/GRPO vs CALM+Qwen w/GRPO under matched training conditions. Removed.
-
-- **"Introduction oversimplifies prior work" (harsh critic).** The paper acknowledges concurrent fine-tuning work (Surina et al., Liu et al.) in Section 2, lines 124–127. The introduction's framing is a stylistic choice, not a factual error. Removed.
-
-- **"Collapse derivation not rigorously justified" (harsh critic).** The approximation is in Appendix G, and the experimental results validate the mechanism empirically. Downgraded to trivial.
-
-- **"Reward function confound: base heuristic quality" (harsh critic).** The paper addresses this in Appendix I.7 (sensitivity analysis). Removed.
-
-- **"Ablation should replace rather than remove operators" (harsh critic).** This is a nice-to-have methodological improvement, not a weakness. Moved to Nice-to-Haves.
-
-- **Strength Finder generic strengths about "the paper addressing an important problem" or "targeting an interesting question" without concrete evidence.** Removed.
-
-- **"Missing appendix, missing proofs" (harsh critic implication).** The parser strips appendices; they exist in the original submission. Removed.
+- **Strength Finder's claim about "comprehensive and fair evaluation against baselines" regarding budget.** This conflicts with the verified budget disparity weakness described above, so per instructions the weakness wins. The strength is dropped from the Strengths section.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, a notable insight emerging from this work is that token-level credit assignment from GRPO pairs particularly well with operators that produce localized, interpretable code changes (injection of new components, replacement of specific fragments). This design choice — making the mutation granularity match the RL signal granularity — is not obvious and may generalize beyond AHD to other code-generation domains where RL fine-tuning is applied.
+None beyond the paper's own contributions. The reviews do not surface novel observations about the method or results that go beyond what the paper itself articulates.
 
 ## Suggestions
 
-- Add an explicit discussion of the query-budget asymmetry in Section 5, perhaps noting that while CALM uses 2,000 queries vs 1,000 for baselines, the model used is substantially weaker (INT4-quantized 7B vs GPT-4o-mini), and the API-based variant at equal budget already shows competitive performance.
-- Acknowledge in the OP results discussion that ReEvo achieves a slightly better gap on the in-domain N=50 scale (23.98% vs CALM's 24.22%), to avoid the appearance of selective reporting.
-- Consider adding a "static fine-tuning" baseline for the final version to cleanly isolate the co-evolution benefit, though this is not essential for the current contribution.
+1. **Address the budget confound directly.** Either provide a controlled experiment with matched evaluation budgets, or clearly explain why the "1,000 heuristic evaluations" and "2,000 LLM queries" are in fact comparable (e.g., because a fraction of prior methods' queries fail and do not yield evaluable heuristics, or because "evaluation" has a different meaning in each context). The paper's own reporting is ambiguous, and until this is clarified the central comparison is under a cloud.
+
+2. **Validate the EvoTune re-implementation**, even briefly in the appendix, by showing it reproduces similar results on a task from the original paper under the same conditions.
+
+3. **Clarify the distinction between prompt operators' role in search space reduction vs. RL credit assignment** — this could be addressed with even a simple analysis (e.g., measuring token-level gradient norms with and without the operators).
 
 ## Score and Decision
 
-### Anchor Comparisons
+I compared this paper against the following calibration anchors (all from the ICLR 2026 human review corpus):
 
-- **EvoPH** (`oD9RwlFqEE.md`, avg 2.00, withdrawn/rejected): Co-evolves prompts and heuristics but limited to 2 problems, one LLM, lacks RL-based model adaptation. CALM is substantially stronger in novelty, experimental breadth, and practical impact.
+| Anchor Path | Avg Score | Comparison |
+|---|---|---|
+| `aITKXFeivk.md` (RFTHGS) | 6.00 | Similar topic (RL fine-tuning LLM for optimization). RFTHGS focuses on CVRP only; CALM covers 4 tasks with more thorough ablations but has a budget confound that RFTHGS does not. Roughly comparable quality. |
+| `tIQZ7pVN6S.md` (MoH) | 5.00 | Meta-optimization for LLM heuristic generation. CALM's empirical validation is broader and the ablation is more systematic. CALM is stronger. |
+| `6f8qlK7wN4.md` (RedAHD) | 5.33 | End-to-end AHD via reductions. RedAHD has a larger conceptual scope but the score is split (8, 4, 4). CALM's experiments are cleaner and more controlled. CALM is slightly stronger. |
+| `yX1gmPYHOL.md` (AutoHD) | 5.50 | Inference-time heuristic discovery for LLM reasoning. Different framing but related methodology. CALM is more comprehensive in empirical scope. CALM is stronger. |
+| `HWxHUO15Yy.md` (HeuriGym) | 6.00 | Benchmark for LLM-generated heuristics. Different contribution type (evaluation framework vs. method). Not directly comparable. |
+| `VEMknlIPtM.md` (TPD-AHD) | 3.00 | LLM-AHD with preference optimization. Much weaker novelty and validation. CALM is substantially stronger. |
+| `oD9RwlFqEE.md` (EvoPH) | 2.00 | Co-evolution of prompts and heuristics. Very similar high-level framing but lacks RL fine-tuning, has narrower evaluation, and was withdrawn. CALM is substantially stronger. |
 
-- **TPD-AHD** (`VEMknlIPtM.md`, avg 3.00, rejected): Textual preference differentiation for LLM-AHD; limited novelty (similar to reflection), poor reproducibility, restricted experiments. CALM significantly exceeds this in contribution and validation.
+Relative to these anchors, CALM presents a well-motivated and well-validated contribution. The budget confound is a genuine concern but does not rise to the level of invalidating the paper's contributions, given that (a) the OBP comparison is fair or favors baselines, (b) the internal ablation cleanly validates the RL component with budget held constant, and (c) the API-based variant (without RL) is competitive at comparable budgets. The paper's thorough ablations, consistent SOTA across 4 tasks with a weaker base model, and the novel integration of RL fine-tuning into AHD represent a solid contribution.
 
-- **MoH** (`tIQZ7pVN6S.md`, avg 5.00, accepted poster): Meta-optimization of heuristics; novel idea but concerns about fairness and generalizability. CALM has stronger experimental validation, more thorough ablations, and a more concrete technical mechanism (GRPO co-evolution rather than meta-prompt optimization).
-
-- **RedAHD** (`6f8qlK7wN4.md`, avg 5.33, rejected): Uses LLM for problem reductions; introduces new manual effort burdens, limited sensitivity analysis. CALM's contribution (RL co-evolution + specialized operators) is more technically novel and better validated.
-
-- **HiFo-Prompt** (`imSLzfZ6av.md`, avg 4.40, accepted poster): Hindsight-foresight prompt for AHD. CALM's RL-based co-evolution is a more fundamental advance beyond prompt engineering.
-
-- **HeuriGym** (`HWxHUO15Yy.md`, avg 6.00, accepted poster): Benchmark for LLM-crafted heuristics; different paper type. As a method contribution, CALM is comparable in quality — thorough experiments, clear novelty, practical value.
-
-CALM sits above the 5.0–5.33 range (MoH, RedAHD) due to stronger experimental validation, more thorough ablations, and a more concrete technical contribution. It is comparable to HeuriGym (6.00) in quality though as a method rather than benchmark paper. The minor budget asymmetry and missing static-fine-tuning baseline prevent a higher score, but neither threatens the core contribution.
-
-**Originality:** High — first to integrate RL-based LLM fine-tuning into the AHD evolutionary loop with operators designed for token-level RL signal.
-
-**Importance:** The research question (can LLMs be adapted during heuristic search rather than used as static generators?) is important and timely. Demonstrating that a local quantized 7B model can outperform API-based methods has practical significance.
-
-**Claims supported:** Well-supported overall. The API-based variant validates the verbal operators independently; GRPO comparisons and ablations validate the RL contribution; Appendix I.9 validates the co-evolution design against GRPO-enhanced baselines.
-
-**Soundness:** Generally sound, with the minor budget asymmetry caveat discussed above.
-
-**Clarity:** Well-written and well-organized. Tables and figures are informative.
-
-**Value to community:** High — the framework, operators, and reward design provide a blueprint for future RL-enhanced AHD work; the code is open-sourced.
+**Score: 6.0 / Decision: Accept (Poster)**
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

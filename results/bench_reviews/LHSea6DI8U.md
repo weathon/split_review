@@ -1,66 +1,97 @@
-Now I have a thorough understanding of the paper, the critic claims, and the calibration anchors. Let me write the consolidated review.
+Now I have enough information to write the consolidated review. Let me synthesize everything.
 
 ---
 
 ## Summary
 
-STBP proposes a framework for continual spatio-temporal forecasting that combines a frozen general spatio-temporal backbone (FreNet for frequency-domain temporal processing + DLGA for linear graph attention) with an incrementally expandable contextual pattern bank. The backbone remains fixed after initial training to preserve general knowledge, while the pattern bank expands and adapts via parameter expansion and prompt-based gating to handle evolving graph topologies and distribution shifts. Experiments on three real-world streaming datasets show substantial accuracy improvements over CSTF baselines (21%+ MAE reduction on two datasets).
+This paper proposes STBP, a framework for continual spatio-temporal forecasting that combines a frozen general-purpose backbone (with frequency-domain processing and linear attention) with an expandable contextual pattern bank that is fine-tuned incrementally. The backbone captures stable representations while the pattern bank adapts to new distributions and node additions. Experiments on three real-world streaming datasets (traffic and air quality) show consistent improvements over state-of-the-art CSTF methods, with MAE reductions of 21.44%, 21.93%, and 2.35% over the best competitor on PEMS-Stream, CA-Stream, and AIR-Stream, respectively.
 
 ## Strengths
 
-- **Strong empirical performance across diverse streaming scenarios.** STBP reduces average MAE by 21.44% (PEMS-Stream), 21.93% (CA-Stream), and 2.35% (AIR-Stream) compared to the best baseline EAC (Table 1). Gains are consistent across forecasting horizons and hold in few-shot settings (Table 2), indicating robust knowledge reuse when new data is limited.
+- **Consistent and substantial performance gains across diverse streaming scenarios**: STBP outperforms all CSTF baselines on three datasets spanning gradual expansion (+33% nodes), explosive expansion (+254%), and stable expansion (+10%), reducing average MAE by 21.44%, 21.93%, and 2.35% respectively over the best competitor (Table 1). The improvements hold across all three forecasting horizons (3, 6, 12 steps) and are backed by low standard deviations from 5 runs.
 
-- **The frozen backbone + expandable pattern bank design is conceptually sound and empirically validated.** The ablation study (Section 5.3) shows that removing the pattern bank ("Retrain" and "Online" variants) or replacing the backbone with a simpler CNN+GCN stack ("w/o Backbone") causes significant performance degradation, confirming that both components are necessary and that their collaboration drives the improvements.
+- **Principled architecture design**: The separation of a frozen, general-purpose backbone (FreNet + DLGA) from an expandable contextual pattern bank is a clean and practical approach. The ablation study (Figure 4) confirms that both components are necessary — freezing the backbone while fine-tuning only the pattern bank significantly outperforms full retraining (Retrain) and full online fine-tuning (Online) across all three datasets.
 
-- **DLGA provides an effective and efficient mechanism for dynamic spatial modeling.** Ablating DLGA (Figure 4) causes clear performance drops, and the efficiency study (Figure 8) demonstrates that linear attention reduces computational overhead while preserving dynamic spatial correlation modeling. The dual-stream design that incorporates the pattern bank as an additional key is a clean integration.
+- **Strong empirical support beyond averages**: Per-period results in the appendix (Tables 7, 8) show STBP achieves the best or near-best MAE on the vast majority of individual periods across all three datasets, not just on averages. The few-shot evaluation (Table 2, 10% training data) further demonstrates robustness, with STBP achieving 15.8% improvement over the best baseline on PEMS-Stream.
 
-- **The contextual pattern bank autonomously captures meaningful node-level structure.** t-SNE visualizations (Figures 3, 6) reveal clusters corresponding to distinct temporal behaviors, and new nodes from later incremental periods are correctly assigned to existing clusters, corroborating the bank's ability to consolidate and generalize spatio-temporal patterns without explicit clustering constraints.
-
-- **Comprehensive evaluation spanning multiple domains and expansion regimes.** Three datasets cover traffic and air quality domains with node increases from 10% to 254% (Tables 4–5), including both gradual and explosive graph growth. The few-shot evaluation, parameter sensitivity analysis, and efficiency study add depth.
+- **Comprehensive comparison with relevant baselines**: The evaluation includes 8 baselines spanning both conventional STGNNs (adapted for incremental training) and dedicated CSTF methods (TrafficStream, STKEC, PECPM, STRAP, EAC), providing a thorough assessment.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **FreNet does not perform temporal frequency analysis as the paper claims.** The input X_τ ∈ ℝ^{N_τ × T_h} is first mapped through a linear layer to H_τ ∈ ℝ^{N_τ × d}, collapsing the temporal dimension. The FFT is then applied to H_τ along the feature (d) dimension, not the time dimension. Consequently, the operation cannot extract temporal periodicity, trends, or any frequency content related to the original time series — the "low-frequency components" in this transform refer to slow variations across feature dimensions, not temporal patterns. The paper's central claim that "FreNet is designed to capture temporal correlations while emphasizing stable components in the data, such as periodicity and trends" (Section 4.3) is therefore misleading. This does not necessarily invalidate the empirical results (the FFT-based feature transformation may still be useful), but it means a key part of the method's motivation and claimed mechanism is unsupported as described. The authors should either (a) clarify that the FFT operates in feature space and adjust claims accordingly, or (b) re-implement to apply FFT along the temporal axis.
-
-- **The paper claims to mitigate catastrophic forgetting but never measures forgetting.** Standard continual learning metrics such as forgetting rate, backward transfer, or per-period performance degradation on earlier tasks are absent. The evaluation relies solely on average metrics across all incremental periods, which cannot distinguish between genuine knowledge retention and a model that simply performs well on new tasks while silently degrading on old ones. For a paper whose third stated challenge is "alleviating catastrophic forgetting" (Section 1), this omission directly undermines a core contribution claim.
+None.
 
 ### Minor
 
-- **No ablation isolates FreNet's specific contribution.** The "w/o Backbone" variant replaces both FreNet and DLGA with a CNN+GCN stack, conflating the two modules. A targeted ablation replacing FreNet with a standard temporal module (e.g., MLP, TCN, or GRU) while keeping DLGA and the pattern bank intact would allow readers to assess whether frequency-domain processing provides any benefit over simpler alternatives. The current ablation supports the backbone as a whole but leaves FreNet's individual value unquantified.
+- **Forgetting measurement is indirect**: The paper claims to "alleviate catastrophic forgetting" but does not directly track performance on old node sets after learning new periods. The per-period evaluation tests on all current nodes (old + new), so if the model suffered significant forgetting, the metrics on later periods (which include old nodes) would degrade. STBP's MAE on PEMS-Stream improves monotonically (14.29 → 12.13 → 11.60 → 11.71 → 11.61 → 11.38 → 13.42), providing indirect evidence against catastrophic forgetting. However, a direct measurement (e.g., tracking MAE on the initial 655 nodes across all seven periods) would make the claim unambiguous.
 
-- **Notation ambiguity in the prompt-based guidance equation.** Equation (5) uses "·" without specifying whether it denotes element-wise (Hadamard) product, matrix multiplication, or broadcast operations. Given the dimensions involved (P_τ^(0), P_τ^(1) ∈ ℝ^{N_τ × d} and H_τ ∈ ℝ^{N_τ × d}), clarifying the exact operation at each step would improve reproducibility.
+- **Linear attention approximation (Eq. 9) lacks empirical validation**: The derivation in Appendix A.3.1 approximates Softmax(QK^T + QP^T) by splitting into two separately normalized linear attention terms. This is not a standard derivation — the softmax of a sum is not equal to the sum of separate softmaxes. While linear attention with random feature maps is well-established (Katharopoulos et al., 2020), the specific dual-stream formulation mixing representations with prompt keys is a custom construction. The paper provides no empirical comparison between the full quadratic attention (Eq. 8) and the linear approximation (Eq. 9) to verify that accuracy is preserved. Given that the DLGA module is a core component, this validation is needed.
+
+- **Ablation study is informative but somewhat coarse**: The ablations test relatively high-level design choices (removing the entire DLGA module, replacing the entire backbone). Finer-grained ablations — such as ablating the FFT in FreNet, removing the P^(2) prompt key from attention, or comparing the gating mechanism against simple addition — would better isolate which specific design choices drive the gains. The current ablations show that the components matter but not exactly why.
+
+- **Improvement on AIR-Stream is modest**: The 2.35% MAE reduction over EAC on AIR-Stream is small compared to the +21% gains on the traffic datasets. Per-period results (Table 8) show STBP is actually worse than EAC on the 2016 period (MAE 30.95 vs. 30.36), though it outperforms on the remaining three periods. The paper acknowledges this by describing AIR-Stream as a "cross-domain validation" but does not analyze why the gains are smaller in the air-quality domain.
+
+- **Qualitative analysis without quantitative backing**: The t-SNE visualization and case study (Figures 3, 6) show interesting clustering behavior in the pattern bank, but no clustering quality metrics (e.g., silhouette score, cluster purity) are provided. The claim that clusters correspond to "meaningful spatio-temporal patterns" would be strengthened by quantitative evaluation.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- A direct visualization comparing FreNet's frequency-domain embeddings to raw time-series spectra would help substantiate the claim of stable component extraction, even if the FFT operates in feature space.
-- Reporting per-period test performance on the first incremental period's data after each subsequent update would provide a rough estimate of forgetting without requiring a full CL metric suite.
-- A discussion of how the random feature mapping φ(·) in DLGA (Eq. 9–10) affects expressivity compared to standard softmax attention would strengthen the linear attention justification (the paper defers details to Appendix A.3.1, which is reasonable).
+- Direct forgetting measurement (tracking old nodes' performance across periods)
+- Empirical comparison of full quadratic vs. linear attention on a subset
+- Quantitative clustering metrics for pattern bank analysis
+- A per-node error map showing prediction error on old vs. newly added nodes across periods
 
-## Removed Harsh Critic Points (after cross-checking with the paper)
+## Removed Points
 
-- **"The linear attention derivation is hand-waved"**: The paper explicitly states "For further details on the approximation derivation, see Appendix A.3.1." The appendix is stripped by the PDF parser — this is not a paper flaw. Removed.
-- **"The exact point in the computation graph where each P component interacts should be explicitly illustrated"**: Figure 2 already shows the architecture with the three pattern bank components P^(0), P^(1), P^(2) annotated at their interaction points. The text in Section 4.2 describes P^(0) interacting via gating (Eq. 5) and P^(2) acting as a key in DLGA. Sufficiently clear.
+These points were flagged by reviewers but are removed after verification against the paper:
 
-## Calibration
+1. "The paper does not actually measure catastrophic forgetting" — **Removed as overstated**. The evaluation tests on all current nodes (old + new) at each period. If catastrophic forgetting occurred, MAE would increase on later periods. STBP's MAE improves over time (Table 7), providing indirect but meaningful evidence. A direct measurement would be cleaner but the claim that the "experimental design cannot support the claim" is inaccurate.
 
-Compared to closely related anchor papers: **SNIP** (avg 5.33, Reject) addresses a similar expanding-node forecasting problem with prompting, but has less architectural novelty, weaker empirical results, and synthetic node expansion — STBP offers stronger experiments and a more complete framework. **TIFO** (avg 5.00, Reject) proposes frequency-domain processing for time series with theoretical backing, but its contributions were judged as incremental reinterpretation — STBP's FreNet has a similar issue with misleading frequency-domain motivation, but STBP's overall framework (backbone + bank) is more substantial. **DPGNet** (avg 2.00, Reject) suffers from weak novelty, baseline inconsistencies, and marginal improvements — STBP is clearly stronger on all dimensions. I assess STBP at approximately the same quality level as SNIP/TIFO, with stronger empirical results offset by the FreNet motivation issue and missing forgetting metrics.
+2. "EAC in the ablation figure is a separate method, not an ablation" — **Removed**. The paper states: "We also include EAC, which follows a similar approach, for comparison in the ablation study" (Section 5.3). This is clearly labeled as an additional comparison.
 
-## Overall Assessment
+3. "The efficiency scatter plot has overlapping labels and no tabular support" — **Removed**. This is a presentation/potentially parser artifact issue, not a substantive weakness.
 
-STBP presents a well-engineered continual forecasting framework with genuinely strong empirical results. The frozen backbone + expandable pattern bank + prompt-based guidance is a coherent and validated design, and DLGA is an effective spatial module. However, the paper has two significant issues: (1) the FreNet module's claimed temporal frequency analysis is misleading because the FFT operates on feature dimensions, not the time axis, which undermines a central motivation; and (2) the paper repeatedly claims to mitigate catastrophic forgetting but never reports any forgetting metric, leaving this key claim unsubstantiated. These issues are addressable — clarifying or correcting FreNet and adding forgetting metrics would substantially strengthen the paper. In its current form, the contribution is promising but not fully supported.
+4. "The 'adapted specifically for incremental training' phrase is vague" — **Removed**. The paper defines this: baselines like GWNet and STID are "initialized from the previous period's weights, enabling end-to-end fine-tuning" (lines 433-434). This is adequately clear.
 
-**Score: 5.0 — Reject (with encouragement to resubmit after addressing the FreNet description and adding forgetting metrics).**
+5. "Section 5.2 — confidence intervals overlap" — **Weakened to minor**. The average MAE on AIR-Stream (24.21±0.43 vs. 23.64±0.23) has a small overlap at 1-sigma. The per-period exception (2016) is one of four periods, and STBP outperforms on the other three. This is minor.
 
----
+6. "Section 4.2 — t-SNE is qualitative" — **Moved to minor/trivial**. The t-SNE is presented as a case study/visualization, not as rigorous proof. A quantitative metric would strengthen it.
 
-Now let me produce the final output with the correct score.
+## Novel Insights
 
-<center>MY FINAL SCORE: 5</center>
+None beyond the paper's own contributions.
+
+## Suggestions
+
+1. Add a direct forgetting evaluation: after each incremental period, evaluate the model on only the original node set (or all previous test sets). This would directly validate the "mitigating catastrophic forgetting" claim.
+2. Provide an empirical comparison of full quadratic attention (Eq. 8) vs. linear approximation (Eq. 9) on a subset, showing the accuracy-efficiency trade-off.
+3. Add finer-grained ablations: ablate the FFT in FreNet, remove P^(2) from attention, or replace gating with simple addition, to isolate which components drive gains.
+4. Include clustering quality metrics (e.g., silhouette score) for the pattern bank analysis.
+5. Discuss the AIR-Stream results more thoroughly — why are gains smaller in this domain, and what does this imply about the method's cross-domain applicability?
+
+## Score and Decision
+
+**Calibration anchors used** (all from ICLR 2026 human review corpus):
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/z45L1eYoHE.md` (SNIP) | 5.33 | Similar topic (expanding-node STF with prompting). STBP has stronger empirical evaluation (real streaming vs. synthetic splits) and larger gains, but SNIP does not face the forgetting-measurement concern. |
+| `/home/wg25r/review_agent/human_reviews_2026/19LHXi9uLw.md` (EDGE) | 5.60 | Different domain (CIL evaluation protocol). Both have clear contributions with addressable weaknesses. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/Ohq5sk3agt.md` (Memorization in CL) | 4.00 | Weaker — core conclusions insufficiently supported by experiments. STBP's empirical claims are better supported. |
+| `/home/wg25r/review_agent/human_reviews_2026/68TggRP3Bb.md` (Scaling Law for Forgetting) | 2.00 | Much weaker — flawed theoretical assumptions and insufficient validation. STBP is far stronger empirically. |
+| `/home/wg25r/review_agent/human_reviews_2026/uI4QK9LJlJ.md` (Less Forgetting Learning) | 3.00 | Weaker — memory-free CL with insufficient comparison. STBP has stronger baselines and results. |
+| `/home/wg25r/review_agent/human_reviews_2026/b6Py2zy0fK.md` (PhySTA) | 5.33 | Accept poster. Comparable quality — both have clean architectures and solid experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/P1PZBR6a4S.md` (SONATA) | 5.50 | Accept poster. Comparable — both propose novel frameworks with thorough empirical evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/1CR1MTIgmq.md` (False/misleading claims) | 0.00 | Much weaker — fundamentally flawed work. Not comparable. |
+
+STBP is stronger than SNIP (avg 5.33, rejected) and comparable to EDGE (avg 5.60, accepted poster), PhySTA (avg 5.33, accepted poster), and SONATA (avg 5.50, accepted poster). The forgetting measurement concern is real but not fatal (the evaluation provides indirect evidence). The attention approximation lacks validation but is addressable. The core contributions — the architecture design and strong empirical results — are solid.
+
+**Decision**: Accept (Poster)
+**Score**: 5.5
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

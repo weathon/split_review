@@ -1,101 +1,96 @@
-Now let me synthesize everything into the final review.
+Now I have a thorough understanding of the paper, the reviews, and the calibration anchors. Let me produce the consolidated review.
 
 ---
 
 ## Summary
 
-MoEP introduces a sparse decoder-only architecture that combines layer-level parallelism with Mixture-of-Experts-style top-k routing. Parallel blocks operate at reduced hidden dimension, interleaved with MoE-based shrink/grow projections, keeping total parameter count matched to a dense GPT-2 baseline (28M). Evaluated on the BabyLM strict-small track, MoEP outperforms the matched GPT-2 baseline and shows faster early specialization during training.
+This paper introduces MoEP (Modular Expert Paths), a decoder-only architecture that introduces sparsity by combining layer-level top-k routing across parallel Transformer blocks with MoE-style linear projections, while keeping the total parameter count fixed at 28M (matching the GPT-2 baseline used in BabyLM strict-small). The model is evaluated on the BabyLM benchmark and compared against dense GPT-2 and GPT-BERT baselines. The core idea—layer-level parallelism with dimension-reducing MoE transitions to maintain fixed parameter counts—is novel and underexplored. However, the experimental evaluation has significant gaps that undermine the paper's central claims about efficiency and sparsity.
 
 ## Strengths
 
-- **Genuinely novel architecture**: The combination of layer-level parallel blocks with top-k routing and dimension-shrink/grow MoE projections (Figure 2) is a new point in the design space, distinct from standard FFN-level MoE and from prior layer-level approaches like MoLE. Section 3.1–3.3 provides a clear architectural description.
+- **Novel architectural concept combining layer-level parallelism with parameter-fixed sparsity**: The idea of interleaving full-size layers with a reduced-dimension parallel stack connected via MoE projections (enabling top-k routing across parallel blocks) is a genuinely underexplored direction. The design carefully manages dimensionality transitions (dL=384 → dP=192 via MoE shrink, then back via MoE grow) to avoid information bottlenecks while introducing sparsity without increasing total parameter count (Section 3.1, Table 2). This is clearly differentiated from FFN-level MoE, attention-level MoE, and PaPaformer's full-parallelism approach.
 
-- **Controlled comparison at matched parameter count**: MoEP is trained against a reproduced GPT-2 at identical 28M parameters under the same training pipeline (same data, same tokenizer, same seed, same epoch budget). Table 1 shows MoEP achieves macro average of 67.30 vs. 63.45 for the authors' GPT-2 and 61.50 for the BabyLM GPT-2 baseline (excluding AoA). This directly supports the claim that sparsity can be added without parameter inflation while improving performance.
+- **Training dynamics analysis provides useful insights**: The smoothed deviation plots (Figures 3–5 in Appendix A.3) give a task-level view of learning trajectories across checkpoints. The observation that MoEP reaches peak performance early (30M words) while GPT-2 improves more gradually, and that MoEP subsequently overfits, is an honest and informative analysis. The finding that different expert types (linear vs. SwiGLU) shift the stability-specialization tradeoff is worth further study.
 
-- **Standardized evaluation pipeline**: Following the BabyLM strict-small track with its official evaluation protocol (both zero-shot and fine-tuned tasks) provides a reproducible comparison framework and facilitates future work.
-
-- **Useful analysis of training dynamics**: Appendix A.3 provides per-checkpoint evaluation curves showing that MoEP achieves stronger early specialization (particularly on Entity Tracking and WUG) compared to GPT-2, and the paper is honest that MoEP subsequently overfits — a diagnostic practice that reveals failure modes rarely discussed in similar work.
-
-- **Practical architecture insight**: The comparison between linear-expert MoEP and SwiGLU-expert MoEP (Table 1, Section 5.1) demonstrates that lightweight linear projections outperform SwiGLU-based experts at small scale, providing actionable guidance for resource-constrained settings.
+- **Controlled experimental setup on a well-defined benchmark**: The authors train their own GPT-2 under identical conditions (same tokenizer, data, seed-based example sharing) and follow the official BabyLM evaluation pipeline, ensuring results are comparable to a large set of existing small-scale LM experiments. Their GPT-2 reimplementation slightly outperforms the official BabyLM GPT-2 baseline, establishing a strong dense baseline.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Single-run evaluation with no statistical validation**: All results in Table 1 come from a single training run with seed 42 (Table 3). No standard deviations, confidence intervals, or replicates are reported. On a 10M-word dataset with modest performance gaps between models, this makes it impossible to assess whether the reported differences are robust or attributable to seed variance. This is the most significant weakness and directly affects the reliability of the paper's headline result.
+- **No efficiency metrics provided despite efficiency being a core claim**: The paper's entire motivation is that MoEP achieves sparsity "without overloading computation" (Abstract, Introduction). Yet no FLOPs, inference speed, training time, or any other computational cost metric is reported. MoEP uses a fundamentally different architecture (40 parallel blocks at reduced dimension 192 vs. 12 full-dimension layers at 384), so total parameter count alone is insufficient to compare efficiency. Without per-token FLOPs or throughput measurements, the reader cannot evaluate whether the sparsity translates into any real efficiency gain, or whether accuracy differences simply reflect a different parameter allocation independent of sparsity. This is the single most consequential weakness—it leaves the paper's primary claim unsubstantiated.
+
+- **No comparison to any standard MoE baseline**: The only baselines are dense GPT-2 and GPT-BERT models. A standard FFN-level MoE (same expert count, same top-k, same total parameters) is not evaluated, nor is a dense parallel-layer variant (top-k=P, all blocks active). Without these controls, it is impossible to attribute observed performance to the specific combination of layer-level routing, reduced-dimension parallel blocks, and MoE gating. The paper presents a single architectural point and claims it is better than dense baselines, but the novelty of each component is not isolated. This is particularly important because the parallel architecture itself (even without sparsity) could account for gains at small scale.
+
+- **"Fast and stable training" claim is contradicted by the paper's own analysis**: Contribution 3 claims that "layer level parallelism enable[s] fast and stable training" (Section 1). However, Appendix A.3 shows that MoEP peaks at 30M words and then degrades substantially ("deviations regress toward zero," "MoEP quickly learns...but later begins to overfit"), while GPT-2 continues improving on some tasks. The text acknowledges that "sparse modular routing...also introduces instability." The claim of stability is thus unsupported by the evidence presented. The paper also uses best-checkpoint selection (choosing the 30M checkpoint that happens to peak) rather than final-checkpoint performance, which may inflate the reported advantage.
+
+- **Evaluation table is difficult to interpret, and key claims cannot be cleanly verified**: Table 1 has confusing formatting with multiple numbers per cell, footnoted references without clear mapping to conditions, and missing AoA scores for several model variants (the paper notes "our GPT-2 and MoEP-SwiGLU results do not include AoA scores"). The text claims MoEP achieves highest performance "when AoA was included," but the table's numbers (MoEP: 49.00 including AoA vs. GPT-BERT causal: 54.10 including AoA) appear to contradict this. The table caption and formatting are ambiguous enough that the headline comparison cannot be verified at a glance. Given the small dataset (10M words) and ~2-point differences from the best non-MoEP baseline, the lack of any variance or confidence intervals (single seed, single run) is a concern.
 
 ### Minor
 
-- **Missing dense-parallel ablation to isolate sparsity effect**: The paper compares MoEP against a standard dense GPT-2, which is appropriate for the main claim (fixed-parameter performance). However, a dense variant of the parallel architecture — where all P parallel blocks are activated and their outputs averaged — would cleanly isolate whether the gains come from the parallel structure itself or specifically from sparse top-k routing. Without it, the paper cannot fully attribute the improvement to sparsity rather than to increased representational capacity from parallelism at reduced dimension.
+- **Routing mechanism details are underspecified**: Section 3.3 says "Linear router is shaped dP × P and it applies a token-level top-k selection" but does not specify the gating function (softmax? sigmoid?), whether the router uses a separate or shared load-balancing loss for parallel blocks vs. MoE blocks, or the exact values of the λ hyperparameters in Eq. (3). The load-balancing loss (Eq. 2) is written as −Σ p_i log p_i (negative entropy), intended to maximize entropy, but the sign convention is not explained.
 
-- **No compute-cost measurement despite efficiency framing**: The abstract mentions "without overloading computation," but the paper reports only parameter counts. FLOPs per token, throughput, or latency are never measured. While the primary framing is about fixed parameter count (not compute), the repeated references to efficiency and sparsity would be strengthened by at least a theoretical FLOPs analysis. MoEP's two-level routing (experts + parallel blocks) may have non-trivial computational implications relative to the dense baseline.
+- **Single seed with no variance reporting**: All experiments use seed 42 (Table 3). For a comparison where the headline advantage is ~2 macro-average points on a 10M-word dataset, reporting variance over multiple seeds is important.
 
-- **Limited scale and unclear generalizability**: The paper is restricted to BabyLM's 10M-word corpus and 28M-parameter models. The authors appropriately acknowledge this in Section 6, noting that with "more complex data, parallel layers may no longer operate as effectively at reduced dimensionality." This is honest but means the contribution remains a proof-of-concept at small scale.
+- **Code links are generic**: The paper states code and models are released (footnotes 5, 6) but provides only github.com and huggingface.co domain links rather than specific repository URLs, making it impossible to verify the implementation.
 
 ### Trivial
 
-- The "fast evaluation" used for checkpoint selection (Section 4) is not described in sufficient detail — which tasks or subset of data it uses is unclear, creating a minor transparency concern about potential indirect selection bias.
+- Minor grammatical issues (e.g., "Despite of GPT-2 outdatedness" in line 67). The table formatting is clearly degraded by PDF extraction, but the original formatting in the submission may be cleaner.
 
 ## Nice-to-Haves
 
-- **Multiple training runs** with mean and standard deviation across at least 3 seeds would substantially strengthen the reliability of the performance claims.
-
-- **Dense parallel (no routing) baseline**: Activating all parallel blocks and averaging/summing their outputs would isolate the sparsity effect from the architectural change.
-
-- **Routing utilization analysis**: Histograms or entropy statistics of expert/block routing probabilities would make the claimed "diverse computational pathways" concrete and verify that load balancing (Equations 2–3) works as intended.
-
-- **FLOPs comparison**: A theoretical FLOPs-per-token analysis (even without wall-clock measurements) would help assess the efficiency claim.
+- A dense parallel-layer ablation (top-k = P, all blocks active) to separate gains from parallelism vs. sparsity.
+- Load-balancing statistics (router entropy, expert utilization over training) to verify that the auxiliary loss is effective.
+- Hyperparameter sensitivity analysis for number of parallel blocks P, top-k, and λ values.
+- Final-checkpoint macro-average in addition to best-checkpoint to test whether MoEP's advantage is robust or transient.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-- **"Early-stopping undercuts the comparison"** (Harsh Critic #4): The paper states in Section 4 that both MoEP *and* GPT-2 achieve their best accuracy at the 30M-word checkpoint. The same best-checkpoint criterion is applied to all models. The critic's claim that "GPT-2 continues to improve on several tasks up to 100M" is not supported by the paper's own analysis — Appendix A.3 states GPT-2 peaks at 30M overall, with some task-level variation but no improvement in macro performance after 30M. Both models are compared under identical early-stopping conditions, so this is not a valid criticism.
-
-- **"Missing comparison against standard dense Transformer of identical parameter count"** (part of Harsh Critic #1): This comparison is present. The authors train their own GPT-2 at 28M parameters under matched conditions, and also compare against the BabyLM GPT-2 baseline. The claim that no such comparison exists is factually incorrect.
-
-- **"No evidence load balancing prevents collapse"** (Harsh Critic, Section-by-Section Notes): While explicit routing histograms would be nice, the model trains stably and achieves good downstream performance — this is de facto evidence that collapse does not occur. Demanding explicit routing distribution plots is a nice-to-have, not a weakness.
-
-- **Strength Finder claim about "GPT-2 requires more tokens to converge"**: Both MoEP and GPT-2 peak at 30M words according to the paper. MoEP shows *stronger early specialization*, which is a real finding, but the claim about GPT-2 requiring more tokens is imprecise. The retained strength reflects the more accurate framing (faster early specialization).
-
-- **Strength Finder claim that the paper's decomposition of routing loss is novel**: Load-balancing auxiliary losses (Equations 2–3) are standard in the MoE literature. Applying them at two levels is sensible but not a novel contribution. Dropped.
+- **Typos and grammar nitpicks** (e.g., "Despite of GPT-2 outdatedness," PaPaformer spelling): Removed per hard rules (parser artifacts / formatting nitpicks).
+- **"Missing related work"**: Removed per instructions — I cannot verify existence of missing citations.
+- **Criticisms about missing appendix content**: Removed per hard rules (parser strips these sections; they exist in the original submission).
+- **"Strawman" weakness about PaPaformer credit confusion**: The paper's text (lines 78–81) says "MoEP did not employ the PaPaformer style of modularity, in which independent modules are partly pre-trained separately, which prior work suggest as the major of the performance increase." The Introduction mentions PaPaformer as related work that uses parallel paths, but clarifies MoEP does not use its modular pre-training — this is consistent, not confusing as the harsh critic claimed.
+- **"Fair comparison" criticism about asymmetry favoring baselines**: The harsh critic notes asymmetry in some comparisons, but the paper actually gives the *baseline* the advantage where applicable (self-trained GPT-2 slightly outperforms official baseline), so this does not disadvantage the proposed method.
+- **"MoEP-SwiGLU 38M parameters not matching fixed-parameter claim"**: The paper presents MoEP (28M) and MoEP-SwiGLU (38M) separately. The "fixed total parameter count" claim applies to MoEP vs. GPT-2 (both 28M). MoEP-SwiGLU is presented as a variant exploring a different expert type, not as the main comparison.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core architectural insight — that layer-level parallelism with sparse routing can match or exceed dense performance at fixed parameter count on small-scale language modeling — is the paper's own finding. Neither the harsh critic nor the strength finder surfaces a genuinely novel observation that the paper itself did not already make.
+None beyond the paper's own contributions. The reviews do not surface a key observation about the paper that the paper itself misses.
 
 ## Suggestions
 
-- The single most impactful improvement would be running the main experiment with 3–5 different random seeds and reporting mean ± std. This alone would address the most serious weakness and substantially increase confidence in the results.
+1. **Add computational cost measurements**: Report per-token FLOPs (active vs. total), training time, and inference throughput for MoEP vs. GPT-2. This is essential to substantiate the efficiency claim that motivates the paper.
 
-- A dense-parallel ablation (all blocks active, outputs averaged) would cleanly decompose the contribution of architectural parallelism from sparse routing, strengthening the paper's central narrative.
+2. **Add a standard FFN-level MoE baseline**: Replace the dense GPT-2 FFNs with an MoE layer (same expert count, top-k, total parameters) to isolate the effect of layer-level routing from standard MoE sparsity.
 
-- Consider reporting at least a theoretical FLOPs-per-token comparison between MoEP and the dense GPT-2 baseline. Even a back-of-the-envelope analysis would help readers assess the efficiency trade-off.
+3. **Add a dense parallel-layer ablation**: Train MoEP with top-k = P (all blocks active) to measure how much gain comes from parallelism vs. sparsity.
 
-- The paper would benefit from explicitly stating architectural hyperparameters (N parallel layers, P parallel blocks, d_L, d_P, E experts, top-k values) in the main text rather than only in Appendix Table 2, as these numbers are essential for understanding the architecture.
+4. **Improve table clarity**: Present macro averages in clearly separated rows, add task-level comparison with confidence/error bars, and ensure all AoA inclusion/exclusion scores are transparently shown for all models.
 
----
+5. **Report final-checkpoint performance** alongside best-checkpoint to show whether MoEP's advantage holds at convergence or is a transient peak.
+
+6. **Report variance over 3–5 seeds** for the main evaluation table, given the small dataset and modest score differences.
+
+7. **Specify λ[block] and λ[expert] values** and explain the sign convention of Eq. (2).
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration Anchors** (all retrieved from the human review corpus):
 
-| Anchor Paper | Avg Score | Decision | Comparison to MoEP |
-|---|---|---|---|
-| VALM (mXMKm4pilN) | 1.50 | Reject | Significantly weaker — no baselines, no quantitative evaluation, preliminary prototype. MoEP is far more rigorous. |
-| Layer-Parallel Training (G1MCI1Qp9u) | 3.50 | Reject | Weaker — unfair baselines, limited contribution, methodological gaps. MoEP has cleaner evaluation and clearer claims. |
-| Fully Sparsely-Activated LLMs (0Iw52EDu82) | 4.50 | Reject | Comparable in ambition but weaker in execution — unclear definitions, missing architectural details. MoEP has a more concrete architecture and clearer results. |
-| MoE Can Surpass Dense LLMs (oIdzliJAeA) | 5.00 | Accept (Oral) | Most comparable. Both ask whether sparse architectures beat dense at matched resources. That paper has much larger scale (7B models, 50T tokens) and more extensive ablations, but had significant methodological concerns from reviewers. MoEP is smaller-scale but cleaner in its comparison and more architecturally novel. |
-| SparseEval (CZAzAedGSV) | 6.00 | Accept (Poster) | Stronger — comprehensive experiments across many models, clear practical gains. MoEP is narrower in scope and less thoroughly validated. |
-| Optimal Sparsity of MoE (XFw2EPRUUR) | 6.50 | Accept (Oral) | Clearly stronger — systematic investigation with extensive controlled experiments, well-supported claims. MoEP has architectural novelty but thinner validation. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|--------------------------|
+| `oIdzliJAeA.md` (MoE vs. dense under equal resources) | 5.00 | Stronger experimental rigor (200 models at 2B scale), but similar question of whether MoE outperforms dense. This paper is significantly less thorough. |
+| `CwQzoZ1WxH.md` (Dynamic Expert Clustering) | 4.00 | Similar quality: interesting architectural idea but limited baselines and missing comparisons. This paper is comparable. |
+| `azmp7x3lZv.md` (Sparsity and Superposition) | 2.00 | Toy-problem paper with very limited scope. This paper is stronger — it evaluates on a real benchmark. |
+| `XFw2EPRUUR.md` (Optimal Sparsity of MoE) | 6.50 | Far more rigorous with extensive experiments and clear presentation. This paper falls well short of this standard. |
+| `0apbqOrxV8.md` (Energy Efficient LMs through Dynamic Sparsity) | 4.00 | Similar profile: claims efficiency without directly measuring it on target hardware. Comparable quality. |
+| `yKUbw7q1IA.md` (How to train data-efficient LLMs) | 6.80 | Extensive empirical study across 22 methods. This paper is much narrower and less rigorous. |
+| `gdZ6J5hZzF.md` (Sequences of Logits) | 7.33 | Combines strong empirical and theoretical contributions. This paper does not approach this level. |
 
-MoEP sits squarely between the 4.50 reject and the 6.00 accept anchors. Its architectural novelty and clean comparison are real strengths that distinguish it from the weaker papers. However, the single-seed evaluation and missing ablations prevent it from reaching the level of the 6.0+ papers. It is most comparable to the "MoE Can Surpass Dense" paper (5.00), which was accepted (Oral) despite its own methodological gaps. MoEP brings stronger architectural novelty but at much smaller scale.
+The paper proposes a genuinely novel architectural idea, but the experimental evaluation has major gaps that leave its core claims (efficiency from sparsity, outperforming baselines) insufficiently supported. Relative to the anchors, this paper falls between the 4.00-level papers (interesting idea, incomplete validation) and does not reach the 5.00+ level (thorough empirical or theoretical support). The missing efficiency metrics and the absence of any MoE baseline are the most damaging weaknesses.
 
-The paper makes a genuine contribution — a novel architecture combining layer-level parallelism with sparse routing — and provides credible evidence that it outperforms a matched dense baseline on a standard benchmark. The weaknesses (single seed, missing dense-parallel ablation, no compute analysis) are addressable and do not invalidate the core contribution, but they do limit the strength of the conclusions.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,89 +1,82 @@
-Now I have a comprehensive understanding of the paper and the calibration anchors. Let me write the final consolidated review.
-
----
+Now I have verified the central problem in the paper. Let me write the consolidated review.
 
 ## Summary
 
-FedMPDD proposes a federated learning algorithm that compresses each client's gradient into \(m \ll d\) scalars by computing directional derivatives along \(m\) random projection vectors. The server reconstructs an aggregated gradient estimate by projecting these scalars back onto the same random vectors (regenerated from transmitted seeds). The authors claim two benefits: (1) communication efficiency via \(O(m)\) uplink cost, and (2) inherent privacy against gradient inversion attacks from the rank-deficient projection. A Johnson–Lindenstrauss argument is used to claim \(O(1/\sqrt{K})\) convergence with \(m = O(\log d)\).
+This paper introduces FedMPDD, a federated learning algorithm that uses multi-projected directional derivatives to simultaneously reduce per-client uplink communication (from O(d) to O(m) with m ≪ d) and provide inherent privacy against gradient inversion attacks. Each client computes m scalar directional derivatives along random Rademacher vectors, transmits only these scalars plus a seed, and the server reconstructs a gradient estimate. The paper claims O(1/√K) convergence matching FedSGD with only m = O(log d) random directions, and provides both reconstruction-error-based privacy guarantees and empirical evaluations.
 
 ## Strengths
 
-- **Novel compression mechanism with practical design**: The use of multiple random projected directional derivatives — each client transmits \(m\) scalars plus a seed — is genuinely novel for FL. The Rademacher distribution choice for lower variance (Lemma 3) and the seed-based server-side reconstruction are well-motivated and practical.
+- **Novel algorithmic idea.** The multi-projected directional derivative encoding/decoding is a genuinely creative approach to joint compression and privacy in FL. The decomposition of the gradient into scalar inner products plus a seed for server-side reconstruction is elegant and achieves substantial communication reduction (O(m) bits per client instead of O(d)). This departs meaningfully from standard compression methods (quantization, sparsification, fixed-subspace projection).
 
-- **Strong communication efficiency demonstrated empirically**: Under fixed bit budgets and target-accuracy constraints (Tables 1–2, Figure 3), FedMPDD achieves dramatic uplink savings — e.g., reaching 60% accuracy on CIFAR-10 using 1.32 GB vs. FedSGD's 471.96 GB (\(>350\times\) reduction) — while outperforming QSGD, Top-k, lp-proj, and SA-FedLora in the low-budget regime. The bit-vs-accuracy curves are convincing.
+- **Correct and useful privacy analysis (Lemmas 1–2).** The gradient reconstruction error bound of (d−1)/m (Lemma 1) is mathematically sound and provides a clear, tunable privacy metric. The lower bound on data reconstruction error (Lemma 2) connects projection rank-deficiency to actual data-level ambiguity. These results are independent of the convergence theory and constitute a genuine privacy contribution.
 
-- **Comprehensive experimental evaluation**: Experiments cover three datasets (MNIST, FMNIST, CIFAR-10), four model architectures, IID and non-IID splits, and multiple client participation rates (10%, 50%, 100%). The ablation over \(m\) values (Appendix A.9) demonstrates the tunable trade-off.
-
-- **Clear algorithm specification**: Algorithms 1–2 are presented with sufficient detail, and the encoding/decoding strategy using seeds for server-side reconstruction is practical and well-described.
+- **Extensive empirical validation.** The paper evaluates FedMPDD across three datasets (MNIST, FMNIST, CIFAR-10), four model architectures, multiple m values, IID and non-IID partitions, and two attack families (Yu et al. 2025; DLG). The results consistently show FedMPDD operating within tight communication budgets (0.9 GB) while achieving SSIM < 0.22 under GIAs, where compression-only baselines leak information substantially. The per-client latency measurements (Table A.10) and the variance analysis for Rademacher vs. Gaussian (Lemma 3) are useful contributions.
 
 ## Weaknesses
 
 ### Fatal
 
-None.
+- **The central convergence theorem (Theorem 2) relies on a fundamentally incorrect application of the Johnson–Lindenstrauss lemma, invalidating the paper's core theoretical claim.** The paper states in Lemma 6 (incorrectly attributed as the JL lemma) that a random matrix P ∈ ℝ^{m×d} satisfies ‖P^⊤P − I_d‖₂ ≤ ε with m = O(log(d/δ)/ε²). This is mathematically false: for m < d, P^⊤P has rank at most m, so it must have at least d−m zero eigenvalues, making ‖P^⊤P − I_d‖₂ ≥ 1 regardless of m. The correct operator-norm bound requires m = Ω(d).  
+
+  More critically, the paper then applies this incorrect lemma to claim ‖(1/m)U_{k,i}U_{k,i}^⊤ g_i(x_k)‖ ≤ (1+ε)‖g_i(x_k)‖ with m = O(log d). The direct computation (which the paper itself does elsewhere in Lemma 1) shows that **the actual expected squared norm is E[‖ĝ_i‖²] = ((d+m−1)/m)‖g_i‖²**. For the experimental setting with d ≈ 2048 and m = 600, this is ≈ 4.4‖g_i‖² — far larger than (1+ε)‖g_i‖². The resulting variance term in the convergence bound is ((d−1)/m)‖g_i‖², not O(ε)‖g_i‖².  
+
+  Consequently, Theorem 2's claimed O(1/√K) rate with logarithmic m is unsupported. The correct rate would be O(√(d/m)/√K), which for m ≪ d is substantially worse than FedSGD. Since this theorem is the paper's headline theoretical contribution, the error is fatal.
 
 ### Major
 
-- **Convergence proof contains a genuine technical gap at the JL-to-expectation transition (Theorem 2)**. The proof at Eq. (32)–(33) attempts to bound \(\mathbb{E}[\|\hat{\mathbf{g}}_i(\mathbf{x}_k)\|^2] - \mathbb{E}[\|\mathbf{g}_i(\mathbf{x}_k)\|^2]\) by applying the JL high-probability bound (\(\|\frac{1}{m}UU^\top\mathbf{g}\|^2 \leq (1+\epsilon)^2\|\mathbf{g}\|^2\) w.p. \(\geq 1-\delta\)) and then wrapping it in an expectation without accounting for the failure probability. This is problematic because Lemma 1 independently establishes \(\mathbb{E}[\|\hat{\mathbf{g}}_i - \mathbf{g}_i\|^2] / \|\mathbf{g}_i\|^2 = (d-1)/m\), which for \(m = O(\log d)\) gives a relative error of \(\approx d/\log d\) — far from \(\epsilon^2\). The JL high-probability event cannot be directly converted into an expectation bound without bounding the contribution of the \(\delta\)-probability failure events, where the norm inflation can be substantial for Rademacher matrices. This means the claimed \(O(1/\sqrt{K})\) rate with \(m = O(\log d)\) is not properly justified by the current proof. The empirical results are unaffected, but the central theoretical claim is unsupported as stated.
+- **The privacy analysis stops short of a formal guarantee and is not benchmarked against comparable DP+compression baselines.** The "intrinsic privacy" is quantified only via reconstruction error (Lemmas 1–2) and a linear-algebraic counting argument (Appendix D). These are not cast in any standard adversarial framework (DP, information-theoretic leakage). The multi-round composition bound (Theorem 2 in Appendix D) addresses a correct point (T×m < d prevents unique gradient recovery), but it is not connected to a worst-case data-level guarantee. More importantly, the experimental comparison pits FedMPDD (which provides both compression and an obfuscation effect) against compression-only baselines (QSGD, Top-k, lp-proj, SA-FedLora) that have *no* privacy mechanism. The claim of "outperforming" these methods conflates the privacy dimension — the baselines are not designed for privacy and their high SSIM is expected. A comparison with methods providing both compression and explicit DP guarantees (e.g., DP-SGD + quantization) would be needed to substantiate the "joint" advantage.
 
-- **Privacy claims are overstated relative to what is actually shown**. The paper describes FedMPDD as providing "inherent privacy," "uniform privacy protection," and a "privacy guarantee" (e.g., Section 2, Remarks 2 and 5, Abstract). What is actually established is: (i) Lemma 1 bounds the expected *gradient* reconstruction error (not data reconstruction error), and (ii) Lemma 2 lower-bounds data reconstruction error under a Lipschitz condition whose constant may be large in practice. The rank-deficiency argument (\(\text{rank} < d\) prevents unique gradient recovery) is a genuine mechanism that makes GIA harder, but it does not constitute a formal privacy guarantee — the attacker knows the exact projection matrix \(\mathbf{U}\) (from seeds) and can optimize in input space using the observed scalar projections directly. The comparison with LDP in Remark 5 frames FedMPDD as having "consistent relative reconstruction error" independent of gradient magnitude, but this is comparing an expected error over random projections (which the adversary observes exactly each round) against LDP's noise-based error. These are fundamentally different quantities. The paper would be on stronger ground framing FedMPDD as an empirical defense against GIAs rather than claiming "privacy guarantees."
+- **Accuracy gap under constrained budgets is significant but under-discussed.** Under a 0.9 GB budget on CIFAR-10, FedMPDD (m=600) achieves 40.84% test accuracy. The paper does not report FedSGD's accuracy when unconstrained (which would likely reach 60–70% on this model/dataset), making it hard to assess the accuracy toll of the compression. The fixed-budget experiments show the method operates under severe constraints, but the accuracy degradation relative to unconstrained training is substantial and not adequately contextualized.
 
 ### Minor
 
-- **LDP baselines are not properly calibrated**. The experiments compare against FedSGD + Laplace noise with fixed variances (0.1, 0.5, 1, 10). No (\(\epsilon, \delta\))-DP budget is reported, and the noise levels are not calibrated to a standard privacy definition. This weakens the claim that FedMPDD "outperforms" privacy-preserving methods. However, the comparison still serves its purpose of showing that naive noise injection either fails to protect privacy or destroys accuracy, while FedMPDD provides a middle ground. The paper does not claim these baselines represent formal LDP with specific (\(\epsilon, \delta\)) budgets, so this is a presentation issue rather than a fatal flaw.
+- **The proof of Theorem 2 (Equation 33) mixes a high-probability bound into an expectation without handling the failure event.** Even if the JL claim were correct with probability 1−δ, the proof replaces E[‖ĝ_i‖²] with (1+ε)‖g_i‖² directly in the expectation without accounting for the δ-probability event where the bound fails. This is a technical sloppiness separate from the JL misapplication.
 
-- **Gradient inversion attack evaluation could be more thorough**. The privacy evaluation uses two attack methods (DLG and Yu et al. 2025) and reports SSIM. It is not demonstrated whether these attacks are properly tuned for the projected setting (e.g., whether the attacker exploits the known projection matrix \(\mathbf{U}\) by projecting dummy gradients before comparison). A negative result with poorly-tuned attacks does not constitute strong evidence of privacy. That said, the SSIM values are consistently low across training (Figure 1), which provides reasonable empirical support.
+- **The Lipschitz constant L_v(x) in Lemma 2 is stated but never instantiated** for any of the models used in experiments, so the numerical scale of the privacy lower bound is not evaluated.
 
-### Trivial
+- **No variance/confidence intervals across seeds** reported in the main tables, making it difficult to assess the statistical significance of the accuracy and SSIM comparisons.
 
-- The paper's conversion between its notation for the projected directional derivative and the standard gradient notation contains some redundancy (e.g., Eq. (3) is repeated with different formatting at lines 301–303 and 315–321), likely a PDF-parser artifact in the version reviewed but worth cleaning up.
+- **Table 2's presentation conflates two different experiments** (fixed budget and fixed target accuracy) in a way that may confuse readers; the "Target Acc" column uses "Used Bytes" from a different experimental configuration than the "Test Acc" column, which should be clearly separated or labeled.
 
 ## Nice-to-Haves
 
-- It would strengthen the paper to compare against a method that combines compression with formal DP (e.g., CP-SGD, DP-SignSGD, or a quantized+DP scheme with a declared (\(\epsilon, \delta\)) budget), to properly contextualize the privacy-communication trade-off.
-- An investigation of whether adding calibrated noise to the scalar projections could yield a formal LDP guarantee at lower per-dimension cost than full-vector LDP would be a natural and compelling extension.
-- Time-to-accuracy plots (wall-clock) would complement the bit-vs-accuracy curves and address concerns about per-round computational overhead of \(O(dm)\) at the server.
+- Compare against methods that jointly provide compression and DP (e.g., DP-SGD + QSGD, Amiri et al.'s compressive DP-FL) to substantiate the "joint" advantage claim.
+- Provide accuracy-vs-communication tradeoff curves across a range of m values for the CIFAR-10 CNN experiment.
+- Report FedSGD's unconstrained accuracy as an upper reference point.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- *Harsh Critic claim: "The bound \(T \times m < d\) for multi-round privacy (Remark 2) is presented as a fundamental guarantee, but it only speaks to unique gradient recovery under a static-gradient assumption, which is both unrealistic and not equivalent to data privacy."* → **Removed.** Remark 2 explicitly states "in a worst-case scenario (e.g., a static gradient)" — the paper is transparent about the assumption. Presenting a worst-case bound under stated assumptions is standard practice. The paper also notes that "the natural evolution of gradients during training provides stronger practical protection."
-
-- *Harsh Critic claim: "Lemma 2's lower bound derivation contains algebraic errors (e.g., the step where the projection error is subtracted from the Lipschitz bound without proper justification for the inequality direction)."* → **Removed.** The derivation uses reverse triangle inequality (\(\|a-b\| \geq |\|a\| - \|b\||\)) which is standard and correct. The critic's specific objection is not substantiated upon inspection.
-
-- *Harsh Critic claim: "The server must regenerate all random directions, which incurs \(O(dm)\) computation per client per round at the server."* → **Removed.** The paper explicitly acknowledges this in Remark 1 and discusses computational costs in Appendix F, including strategies to mitigate overhead (projected-forward approach). This is not a hidden cost.
-
-- *Strength Finder claim: "Comprehensive evaluation... rigorous privacy analysis."* → **Removed from strengths.** The privacy analysis is not rigorous — it provides expected-error bounds, not formal privacy guarantees. While the experimental evaluation is broad, the privacy framing is overstated (see Major Weakness).
-
-- *Strength Finder claim: "Careful analysis of distribution choice... convergence proofs are complete and well-structured."* → **Partially removed.** The Rademacher variance analysis (Lemma 3) is valid and correctly credited. However, "convergence proofs are complete" conflicts with the verified major weakness about the JL-to-expectation gap. The proof structure is clear, but completeness is compromised.
+- The criticism about "the method never attains 60% accuracy" in Table 2 is factually wrong — the 1.32 GB entry for FedMPDD (m=600) refers to a separate experiment where 60% was reached, consistent with standard fixed-target evaluation methodology.
+- The criticism about multi-round composition bound being "overly optimistic" because gradients change is incorrect — a static gradient is the worst-case for privacy composition, and the bound T < d/m is valid and conservative.
+- Various formatting/style nitpicks have been removed per instructions.
 
 ## Novel Insights
 
-The most genuinely novel observation from this reviewing process is the tension between Lemma 1's expectation bound and the JL high-probability bound. Lemma 1 shows \(\mathbb{E}[\|\hat{\mathbf{g}} - \mathbf{g}\|^2]/\|\mathbf{g}\|^2 = (d-1)/m\), which requires \(m = \Omega(d/\epsilon^2)\) to achieve relative error \(\epsilon^2\). The JL lemma suggests only \(m = O(\log d/\epsilon^2)\) suffices for norm preservation with high probability. The resolution is that the JL failure events (probability \(\delta\)) contribute disproportionately to the expectation, meaning the high-probability convergence analysis cannot be trivially converted to an expectation bound without additional work — a subtlety worth highlighting for future work on JL-based compression in optimization.
+The most interesting observation from reading these reviews together is the recurring pattern of JL lemma misapplication in FL papers. In both this paper and the anchor paper jAYHFBdQ0M.md, the authors interpret JL as providing a uniform operator-norm bound (holding for all vectors simultaneously) when JL in fact provides a per-vector bound that cannot be naively applied to d×d projection matrices. This error appears to stem from conflating the JL embedding P: ℝ^d → ℝ^m (where norm preservation is well-known) with the d×d matrix (1/m)P^⊤P (whose operator norm requires m ∝ d). The present paper's error is more severe because Lemma 6 (the stated JL lemma) is itself mathematically impossible — P^⊤P cannot approximate I_d in operator norm when m < d, as the nullspace guarantees eigenvalues of zero.
 
 ## Suggestions
 
-- **Fix the convergence proof**: Either (a) derive a high-probability convergence guarantee that explicitly carries \(\delta\) through and shows it can be made arbitrarily small without harming the rate, or (b) bound \(\mathbb{E}[\|\frac{1}{m}UU^\top\mathbf{g}\|^2]\) directly using the exact expectation (which follows from Lemma 1) and accept that \(m = \Omega(d/\epsilon^2)\) is needed for the current proof structure, then find alternative arguments to improve the dependence. The second approach would be more honest but would weaken the claimed rate.
-
-- **Recalibrate privacy claims**: Frame FedMPDD as providing "empirical defense against gradient inversion attacks" rather than "privacy guarantees." Remove language like "uniform privacy protection" that implies a formal guarantee. The rank-deficiency argument is a genuine defense mechanism; present it as such without overclaiming.
-
-- **Strengthen the attack evaluation**: Either (a) design a stronger attack that explicitly leverages the known projection matrix \(\mathbf{U}\) (projecting dummy gradients before comparison), or (b) explicitly argue why existing GIA formulations already account for this. Report attack hyperparameters (iterations, learning rates) to demonstrate fair evaluation.
+1. **Fix or remove Theorem 2.** The correct variance analysis (which the paper already has in Lemma 1) shows E[‖ĝ_i‖²] = ((d+m−1)/m)‖g_i‖². State the honest convergence rate explicitly and remove the JL argument entirely.
+2. **Reframe the contribution honestly.** The empirical results show genuine practical value: FedMPDD works well under tight budgets and provides gradient obfuscation. Present this as the main contribution rather than the unsupported convergence theory.
+3. **Add DP+compression baselines** to the experiments to make the "joint" claim properly testable.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors used:**
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/jAYHFBdQ0M.md` (JL Transforms) | 3.50 | Similar JL-based compression for distributed optimization. FedMPDD has a more novel algorithm, stronger experiments, and broader evaluation. |
-| `/home/wg25r/review_agent/human_reviews_2026/fSRmZ7P1kb.md` (Log-Bit) | 4.00 | Also compresses to scalars via projections. FedMPDD has much stronger experiments (non-convex DNNs vs. convex only), better practical applicability, and no unrealistic persistent-excitation assumptions. |
-| `/home/wg25r/review_agent/human_reviews_2026/Y6lVVJHiwN.md` (FedSGM) | 4.40 | Unified compression framework with strong theory. FedMPDD has better empirical results but weaker theory due to the proof gap. Overall comparable contribution level. |
-| `/home/wg25r/review_agent/human_reviews_2026/Hude2v2AEX.md` (Discrepancy-aware) | 5.00 | Solid communication compression paper with clear contribution. FedMPDD has similar empirical strength and adds privacy as a side benefit, though the privacy framing is less rigorous. |
-| `/home/wg25r/review_agent/human_reviews_2026/PSmakC4sw5.md` (Composite EF) | 6.00 | Strong theoretical contribution resolving a fundamental gap. FedMPDD's theoretical contribution is weaker due to the unresolved proof gap. |
-| `/home/wg25r/review_agent/human_reviews_2026/xzJrPSlMS4.md` (Diminishing Noise DP) | 2.00 | Privacy-focused FL paper with weak contribution. FedMPDD is substantially stronger in both novelty and empirical validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/jAYHFBdQ0M.md` | 3.50 | JL transforms in FL — similar JL misinterpretation leading to rejection; this paper has stronger empirical validation |
+| `/home/wg25r/review_agent/human_reviews_2026/DxAq2F0Sv9.md` | 2.50 | FL with flawed convergence claims, rejected — this paper has more empirical support |
+| `/home/wg25r/review_agent/human_reviews_2026/IqImIIMGbJ.md` | 2.00 | FL convergence paper, withdrawn — this paper has a stronger algorithmic contribution |
+| `/home/wg25r/review_agent/human_reviews_2026/Hude2v2AEX.md` | 5.00 | FL compression, accepted — correct theory, strong experiments; this paper falls short on theory |
+| `/home/wg25r/review_agent/human_reviews_2026/0KXI6lDM9C.md` | 5.50 | Distributed optimization lower bounds, accepted — rigorous theory; this paper's theory is flawed |
+| `/home/wg25r/review_agent/human_reviews_2026/7Zbe5ad3eX.md` | 6.00 | DP-FL convergence, accepted — sound theory throughout; not comparable to this paper |
+| `/home/wg25r/review_agent/human_reviews_2026/PSmakC4sw5.md` | 6.00 | Compression optimization, accepted — rigorous analysis; this paper's theory is not at this level |
 
-FedMPDD introduces a genuinely novel compression mechanism with strong empirical results. However, the main convergence theorem has a verifiable proof gap and the privacy claims are overstated. These issues are fixable in revision (tightening the proof, recalibrating privacy language). Relative to the anchor papers: it clearly outperforms the 3.50–4.00 tier in novelty and experimental quality, is comparable to the 4.40–5.00 tier but with a weaker theoretical foundation than the 6.00 paper. A score of **5.0** reflects solid contributions with significant but addressable weaknesses.
+The paper has a genuinely novel algorithmic idea and extensive empirical support, but its central theoretical claim (Theorem 2 — the O(1/√K) convergence rate with logarithmic m) is invalid due to a fundamental misapplication of the JL lemma. Lemma 6 as stated is mathematically impossible. The correct variance analysis (which the paper itself contains in Lemma 1) implies a dimension-dependent rate. Without Theorem 2, the paper's claim of "matching FedSGD's convergence rate" is unsupported. The empirical work has merit, but the overclaiming of theoretical guarantees is a significant issue at a top venue. Comparing against anchors, this paper falls between the rejected JL-transform paper (3.50) and the flawed-theory rejected paper (2.50), with stronger empirical work than both.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Score:** 3.0
+
+MY FINAL SCORE: <pineapple>3.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

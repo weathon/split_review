@@ -1,98 +1,68 @@
-Now, based on my thorough reading of the paper and cross-checking against both reviewers' claims, here is my consolidated review:
-
----
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
-
-This paper introduces VideoJudge, a bootstrapping framework that trains small (3B, 7B) MLLM-based evaluators for video understanding tasks without human annotation. The method uses an iterative generator–evaluator pipeline to synthesize rated training data, then fine-tunes Qwen2.5-VL models for pointwise and pairwise evaluation. An extension (VideoJudgeR) also generates instance-specific rubrics at test time. The authors release trained models, bootstrapped datasets, and meta-evaluation benchmarks.
+The paper introduces VideoJudge, a bootstrapping framework for training small (3B/7B) MLLM-based evaluators specialized for video understanding. The core idea is an iterative generator–evaluator pipeline that produces over 100K training examples across a 1–5 rating scale without human annotation, then fine-tunes models on this data. The paper also trains models to generate instance-specific rubrics at test time. Experiments claim that VideoJudge-7B matches or surpasses much larger models (Qwen2.5-VL-32B/72B) on several meta-evaluation benchmarks.
 
 ## Strengths
-
-- **Novel bootstrapping pipeline for video evaluation**: The iterative generator–evaluator loop with feedback-driven refinement (Algorithm 1, Section 3.1) is a conceptually clean and scalable approach to generating rated training data for video understanding evaluation, an underexplored problem. Automatic validation confirms the pipeline produces responses of progressively lower quality across rating tiers (BERTScore drops from 91.1 to 86.9, Section 5.1).
-
-- **Small judge models show competitive performance**: VideoJudge-7B achieves results competitive with models 5–10× larger across multiple benchmarks. On LongVideoBench (external), ∆(C–D) of 1.16 exceeds Qwen2.5-VL-72B's 1.06 (Table 1). On VideoJudge-Human (human-annotated pairwise), VideoJudge-7B ties Qwen2.5-VL-72B at 93.25 (Table 3). The gap between VideoJudge-3B and Qwen2.5-VL-3B on pairwise benchmarks is large (e.g., VJ: 94.00 vs. 82.60), demonstrating substantial gains from bootstrapped training.
-
-- **Instance-specific rubric generation improves evaluation**: VideoJudgeR-3B, trained to generate task-specific rubrics at test time, substantially outperforms the base 3B model (MAE 0.59 vs. 1.15, Pearson 74.2 vs. 37.85, Table 2) while matching much larger 32B/72B baselines. Both human evaluators and GPT-4o-mini prefer these rubrics over those from larger models (Figure 17).
-
-- **Comprehensive multi-benchmark evaluation**: The paper evaluates across four pointwise benchmarks (VideoJudgeLLaVA, VideoJudgeVCG, VATEX, LongVideoBench) and three pairwise benchmarks (VideoAutoArena, VideoJudge-Pairwise, VideoJudge-Human), covering short and long videos, reference-based and preference-based settings, and both bootstrapped and human-annotated ground truth.
-
-- **Robustness and practical analysis**: Frame ablation studies show training benefits up to ~240 frames and inference saturates around ~120 frames (Figure 20). Temperature robustness analysis demonstrates VideoJudge maintains or improves performance across temperatures 0.0–1.0 while the base model degrades (Spearman 0.56→0.42 vs. 0.73 peak, Figure 4). The comparison against unimodal text-only judges convincingly shows video input is necessary for reliable evaluation (Table 1).
-
-- **Release of artifacts**: Trained models, bootstrapped datasets, and meta-evaluation benchmarks are publicly released, lowering the barrier for follow-up work.
+- **Problem selection and scope are strong.** Video understanding evaluation is genuinely underexplored in the MLLM-as-Judge literature. The paper correctly identifies the lack of large-scale human-annotated evaluation resources as a bottleneck and proposes a pipeline to address it.
+- **The bootstrapping pipeline is technically well-specified.** Algorithm 1 and the accompanying equations (1–4) give a clear, formal description of the generator–evaluator loop with iterative refinement. The methodology is reproducible and could serve as a template for other modalities.
+- **Comprehensive evaluation scope.** The paper evaluates on four meta-evaluation benchmarks (two self-constructed, two independent: VATEX and LongVideoBench), a pairwise benchmark (VideoAutoArena), and a human-validated pairwise subset. This breadth is above average for the subfield.
+- **Practical ablation studies.** The analysis of maxframes during training vs. evaluation (Figure 20) and decoding temperature (Figure 4) provides actionable guidance for practitioners deploying video judges.
+- **Open release of artifacts.** The release of models, bootstrapped datasets (100K+ instances), and meta-evaluation benchmarks is a genuine contribution that the community can build on.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
-
-- **Generator and evaluator models are not identified**: The bootstrapping pipeline (Section 3, Algorithm 1) depends on a generator _G_ and an evaluator _E_, yet the paper never specifies which models serve these roles — neither in the main text nor in the appendix. The appendix mentions that GPT-4o-mini and Qwen2.5-VL-32B-Instruct are used for video description generation (§A.2) and that GPT-4o-mini is used for rubric generation (§A.3.2), but the models for _G_ and _E_ in the core bootstrapping loop remain unspecified. Since the entire training dataset and two main meta-evaluation benchmarks depend on these teacher models, this omission significantly undermines reproducibility and makes it impossible to assess whether results depend on a specific (possibly large, closed-source) teacher. This is a substantial methodological gap.
-
-- **No human validation of pointwise ratings**: The paper makes central claims about pointwise evaluation (1–5 ratings, Table 1) but provides zero human validation that these ratings align with human judgment. The only human evaluation (Section 5.2) covers 250 pairwise (2-vs-3) preference cases and validates that the higher-rated response is indeed preferred — it does not verify that a "4" means what a human would call a "4." The claim that VideoJudge "aligns with human ratings" is therefore only partially supported for the pairwise case and unsupported for the pointwise case.
-
-- **Closed-loop evaluation bias limits confidence in headline results**: Two of the four pointwise benchmarks (VideoJudgeLLaVA, VideoJudgeVCG) and one of three pairwise benchmarks (VideoJudge-Pairwise) are constructed using the same generator–evaluator pipeline that produced the training data. The paper acknowledges this in Section 7 but treats it as a minor limitation rather than a significant threat to validity. On the external, human-annotated benchmarks, results are mixed: on VideoAutoArena, VideoJudge-7B (85.49) is clearly behind Qwen2.5-VL-72B (89.80); on VATEX, VideoJudge-7B has slightly worse RMSE (1.46 vs. 1.40) but better calibration (ECE 0.64 vs. 0.79); on LongVideoBench, ∆(C–D) favors VideoJudge but PSup favors the larger model. The paper's strongest claims of outperformance rely disproportionately on the pipeline-constructed benchmarks.
+- **Circular evaluation for headline claims.** The paper's strongest results (e.g., VideoJudge-7B matching Qwen2.5-VL-72B in Spearman correlation on VideoJudgeLLaVA) come from meta-evaluation benchmarks constructed using the *same* bootstrapping pipeline (Algorithm 1, threshold α=0) that produced the training data. The paper acknowledges this as "closed-loop effects" (Section 7) but it remains a structural issue: the model has been trained to predict the output of this pipeline, and then evaluated on that pipeline's output. On independent benchmarks (VATEX, LongVideoBench), the results are more competitive but show real gaps — e.g., VideoJudge-7B achieves PSup 0.66 on LongVideoBench vs. Qwen2.5-VL-32B's 0.73. The headline claim that "small models match 10× larger models" rests primarily on the internal benchmarks, which are contaminated. The paper would be stronger if it centered the independent benchmarks in its main narrative.
+- **Unfair baseline comparison (fine-tuned specialist vs. zero-shot generalist).** All baselines in Table 1 (Qwen2.5-VL, LLaVA-NeXT, OneVision, Video-R1) are evaluated zero-shot or with prompting only. VideoJudge receives full fine-tuning on 100K+ task-specific examples. The paper does not fine-tune any large model (e.g., Qwen2.5-VL-32B) on the same bootstrapped data. This is the comparison that would actually test whether bootstrapping *itself* creates a unique advantage, versus simply showing that fine-tuning beats zero-shot (which is expected). The paper's claim should be scoped as "fine-tuned small models match zero-shot large models," not unqualified "match or surpass much larger models." The w/ FB vs. w/o FB ablation partially addresses this but does not substitute for a fine-tuned large-model baseline.
+- **Documented calibration failure undermines pointwise reliability.** The paper's own error analysis (Section 6.2) reveals that VideoJudge overestimates scores by ≥2 points in 14.8% of cases but underestimates by the same margin in only 1.5%. Only 36.9% of rating-3 responses receive the correct score (46.6% are inflated to 5), and 81.3% of rating-4 responses are incorrectly rated as 5. This is not a minor issue — a judge that cannot distinguish ratings 3, 4, and 5 on its fundamental output scale cannot produce reliable pointwise evaluations. The paper acknowledges this and suggests harder negatives as a future fix, but the results as presented (Table 1 correlations) mask this severe individual-level unreliability. The pairwise evaluations are less affected by this bias, but the pointwise claims must be interpreted with significant caution.
 
 ### Minor
-
-- **Claims of outperforming larger models are overstated on external benchmarks**: The abstract states "outperforms or is on par with larger MLLM judge baselines." On external benchmarks the evidence is mixed: VideoJudge-7B sometimes wins, sometimes ties, and sometimes loses to larger models. The claims should be recalibrated to reflect that VideoJudge is *competitive* with larger models rather than *outperforming* them on external evaluation.
-
-- **Severe overestimation bias in pointwise evaluation**: The error analysis (Section 6.2) reveals that 46.6% of rating-3 responses are inflated to a perfect 5, and 81.3% of rating-4 responses are incorrectly rated as 5. While the paper acknowledges this, the severity of the miscalibration is not given commensurate weight in the overall conclusions and substantially limits the practical utility of the pointwise judge.
-
-- **Acceptance threshold α for training data is unreported**: The paper reports α=0 for meta-evaluation benchmark construction (Section 4.2) but never states the α used during training data bootstrapping. This is an important hyperparameter for understanding the quality-control mechanism.
+- **The acceptance threshold α is never ablated.** The entire bootstrapping pipeline depends on α (set to 0 throughout), but the paper never varies this parameter to study its effect on downstream judge quality. A simple ablation would clarify whether tighter or looser acceptance changes the resulting model.
+- **The bootstrapping pipeline uses dense video descriptions (text) rather than raw video during data construction.** While this is a practical cost-saving choice, it means the training data is constructed by an evaluator that never actually sees the video. This is a departure from the claimed "video understanding" framing of the evaluation data construction, though the trained models themselves do process video.
+- **Independent human validation is limited to 250 pairwise examples at the 2-vs-3 boundary.** This is a reasonable sanity check for the hardest cases, but the paper does not validate pointwise scores on the full 5-point scale with human raters. Given the calibration issues, such validation would be important.
+- **Rubric quality evaluation (Section 6.1, Figure 3) lacks confidence intervals and significance tests.** The win rates (e.g., 74.2% vs. Qwen2.5-VL-7B) are presented without any measure of uncertainty, making it hard to assess the reliability of these preferences.
 
 ### Trivial
-
-- **Model exclusion from baselines could be better justified**: Several models (VideoLLaMA3, VideoChat-Flash, Keye-VL, SmolVLM2) are excluded because they "failed to follow instructions or produce valid scores." A brief note on what specifically failed would improve transparency, though this does not affect the paper's conclusions.
+- None that are not parser artifacts.
 
 ## Nice-to-Haves
-
-- Quantifying the closed-loop effect by directly comparing performance on pipeline-constructed vs. independent benchmarks would help readers calibrate their confidence in the synthetic benchmarks.
-- Statistical significance tests or confidence intervals for the reported results would strengthen the claims, though these are not standard in large-scale MLLM benchmarking.
-- Mitigation strategies for the overestimation bias (e.g., hard-negative sampling, targeted mid-scale training) would make the contribution more complete.
+- Fine-tuning a large baseline (e.g., Qwen2.5-VL-32B) on the same bootstrapped data to directly test the "scalable supervision" claim.
+- Independent human validation of pointwise scores on 500–1000 examples from the external benchmarks to ground-truth check the calibration issues.
+- An ablation of the feedback loop (training on bootstrapped data with vs. without the iterative refinement) to quantify the specific benefit of the self-refinement step.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **"Self-generated benchmarks invalidate the primary evaluation"**: This overstates the case. The paper uses both pipeline-constructed AND external benchmarks. The external benchmarks show competitive (though mixed) results. The closed-loop concern is real but has been moved to "Major weaknesses" with appropriate qualification rather than being presented as fully invalidating.
-
-- **"The bootstrapping pipeline's quality cannot be judged"**: Overstated. The quality is partially validated through automatic metrics (BERTScore, BLEU, VQAScore trends across ratings) and pairwise human evaluation. The opacity of the teacher models IS a major weakness (kept above), but the quality has been assessed through available means.
-
-- **"On VATEX, VideoJudge-7B has higher RMSE and lower Preference Superiority than Qwen2.5-VL-72B [therefore claims fail]"**: This selectively cites only unfavorable metrics while ignoring that VideoJudge-7B achieves better ECE (calibration) and better ∆(C-D) on LongVideoBench. The underlying concern about mixed external results is captured in the Minor weaknesses.
-
-- **Demands for large-scale independent pointwise human evaluation**: The harsh critic demands this as a minimum bar. While pointwise human validation would strengthen the paper, the field currently lacks such resources (as the paper correctly notes), and constructing one is a significant effort beyond the paper's scope. Moved the underlying concern to Major but without demanding a full-scale human annotation campaign.
-
-- **"Excluded models raise questions about prompt design and fairness"**: This is speculative. The paper states excluded models failed to follow instructions — this is a common occurrence in MLLM evaluation and not evidence of unfairness without further evidence.
-
-- **Missing appendix/proofs/formatting**: Per rules, these are parser artifacts or reviewer knowledge gaps.
+These points are flagged to be removed, treat them with caution:
+- **Criticism that "50% of all possible pairs" is unjustified.** The paper explicitly states "Due to computational limitations and while keeping the setting identical, we randomly sample 50% of all possible pairs" (line 240-241). The justification is present.
+- **Criticism about BERTScore/BLEU evaluation being weak.** The paper also uses VQAScore (Figure 16) which shows a clear gradient. BLEU is used as one of multiple metrics, and its limitations are well-known.
+- **Criticism that "the evaluator never sees the actual video" is a fatal flaw.** This describes the bootstrapping pipeline's cost-efficient design choice, not the trained VideoJudge model, which processes actual video during both training and inference. The paper is transparent about this design decision.
+- **General complaint about novelty relative to Prometheus-Vision / LLaVA-Critic.** The paper's specific contribution is the iterative bootstrapping with self-refinement applied to video — a novel combination even if individual components exist in prior work. The reviewer overstates the overlap.
+- **Pure formatting nitpicks and demands for expanded appendix content** that the PDF parser likely stripped.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews confirm that the bootstrapped generator–evaluator pipeline for video evaluation is genuinely novel. However, the reviews also surface an important caution: the framework's dependence on unspecified teacher models and the closed-loop evaluation bias represent a pattern seen in other LLM-as-a-judge papers (cf. the Preference Leakage paper, avg 6.50). The lesson for the field is that synthetic-data-driven evaluation requires transparent teacher-model specification and external validation against human judgments to be credible — a bar this paper partially meets.
+The reviews surface a tension that the paper itself does not fully resolve: the bootstrapping pipeline is presented as a method to *automatically generate high-quality training data*, but the paper's own error analysis shows that the resulting model has systematic overestimation bias and poor calibration at the top of the rating scale. This raises an interesting question that goes unaddressed — is the bootstrapping pipeline *amplifying* the evaluator model's biases through the self-refinement loop? The 46.6% of rating-3 responses being inflated to 5 suggests that the pipeline's acceptance criterion (α=0) may be insufficient to ensure clean separation between quality levels. The paper would benefit from analyzing whether the feedback loop actually improves discrimination or just reinforces the evaluator's preferences.
 
 ## Suggestions
-
-- **Specify the generator and evaluator models explicitly** in Section 3 or an early appendix section. This is the single most important revision needed.
-- **Report α for the training data bootstrapping** alongside the benchmark α.
-- **Add a small-scale pointwise human validation study** — even 100–200 human-rated examples would substantially strengthen the pointwise claims.
-- **Tone down the abstract and introduction claims** to reflect that VideoJudge is *competitive* with larger models rather than *outperforming* them, especially on external benchmarks.
-- **Give more prominence to the overestimation bias** in the conclusion and discussion, as it substantially limits practical pointwise deployment.
+1. **Re-center the evaluation narrative around independent, human-annotated benchmarks** (VATEX, LongVideoBench, VideoAutoArena). The internal benchmarks should be presented as diagnostic tools, not primary evidence for the paper's main claims.
+2. **Add a fine-tuned large-model baseline** (e.g., Qwen2.5-VL-32B fine-tuned on the same bootstrapped data) to directly test whether the bootstrapping pipeline creates advantages beyond what standard fine-tuning provides.
+3. **Ablate the acceptance threshold α** to show the sensitivity of downstream judge quality to this hyperparameter.
+4. **Address the calibration failure** either by (a) adding a calibration correction post-hoc, (b) training with harder negatives, or (c) scoping the pointwise claims to lower rating ranges and using pairwise evaluation as the primary evaluation mode.
+5. **Add confidence intervals or significance tests** to the rubric evaluation results (Figure 3).
+6. **Tone down the headline claims** from "match or surpass 10× larger models" to "competitive with much larger zero-shot models after fine-tuning on bootstrapped data."
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| Generative Universal Verifier (DM0Y0oL33T) | 8.0 (Oral) | Significantly stronger methodology, cleaner evaluation, and more comprehensive validation. VideoJudge is notably weaker. |
+| J1: Incentivizing Thinking in LLM-as-a-Judge (dnJEHl6DI1) | 6.5 (Poster) | Stronger empirical methodology with RL-based training, cleaner evaluation, and SOTA results on established benchmarks. VideoJudge has broader scope but weaker evaluation. |
+| INSPECTOR / Representation-as-a-Judge (VAISvCsrvG) | 5.5 (Poster) | Comparable quality level — both have interesting methodological ideas constrained by evaluation limitations. INSPECTOR's domain restriction is its main weakness; VideoJudge's is circular evaluation. |
+| On the Shelf Life of Fine-Tuned LLM-Judges (fVTqNpny5r) | 4.5 (Poster) | Similar score, different profile — narrower scope (math only) but cleaner methodology. Both are borderline contributions with significant limitations. |
+| Sage (JFTSZa2stt) | 5.0 (Reject) | Comparable quality concerns — both propose interesting ideas but have validation issues. The community was split on Sage (4,6,6,4). |
+| Model Editing is Over (WvRmaSD2QV) | 3.0 (Reject) | Weaker than VideoJudge — this paper overclaims and has more fundamental methodological issues. VideoJudge has clearer positive contributions. |
 
-- `/home/wg25r/review_agent/human_reviews_2026/0xMXVkiAzK.md` — "Quantitative LLM Judges," avg 4.00 (Reject): Post-hoc calibration approach with insufficient baselines/ablations. VideoJudge has substantially more novelty, broader evaluation, and stronger empirical results.
-- `/home/wg25r/review_agent/human_reviews_2026/Nk3iEsYJtd.md` — "Policy-Based Sentence Simplification with LLM-as-a-Judge," avg 4.50 (Reject): Also uses LLM-as-a-judge for data generation but with narrower scope and limited innovation. VideoJudge has a more sophisticated bootstrapping pipeline and broader contribution.
-- `/home/wg25r/review_agent/human_reviews_2026/AXNRILww9c.md` — "TIR-Judge," avg 5.50 (Accept Poster): Trains LLM judges with RL and tools; has comparable novelty level but more thorough ablations and fewer methodological gaps. VideoJudge addresses a harder modality (video) but has more significant reproducibility and evaluation concerns.
-- `/home/wg25r/review_agent/human_reviews_2026/xk8EqWDPQw.md` — "MMR-V," avg 5.50 (Accept Poster): Strong benchmark paper with careful manual annotation. Different contribution type but comparable quality bar. VideoJudge's methodological gaps place it slightly below.
-- `/home/wg25r/review_agent/human_reviews_2026/grIvSXVJ65.md` — "Preference Leakage," avg 6.50 (Accept Poster): Cleaner contribution, more thorough analysis, no significant reproducibility gaps. VideoJudge is clearly below this.
-- `/home/wg25r/review_agent/human_reviews_2026/joh5J1nYAE.md` — "HumanVideo-MME," avg 2.50 (Reject): Benchmark with model-bias concerns in ground truth generation. VideoJudge is clearly above this.
-- `/home/wg25r/review_agent/human_reviews_2026/C15sPKE4uR.md` — "Deconstructing Self-Bias," avg 5.50 (Reject): Strong paper on an important evaluation bias problem. Accepted at a different interpretation by some reviewers. VideoJudge is roughly comparable in contribution scope but has less clean methodology.
+Positioned relative to these anchors: VideoJudge is clearly not at the 6.5+ level (where papers have cleaner methodology and stronger independent validation). It is most comparable to the 4.5–5.5 range papers — it has a genuine contribution (the bootstrapping pipeline, released artifacts, problem selection) but the evaluation has structural issues (circularity, calibration, unfair baselines) that the authors partially acknowledge but do not adequately address. The paper is stronger than the 3.0 anchor (which had fundamental validity challenges) and comparable to the accepted 4.5 anchor (Shelf Life, accepted as poster) and the rejected 5.0 anchor (Sage).
 
-VideoJudge addresses an underexplored and important problem with a novel framework, releases useful artifacts, and provides comprehensive evaluation. However, the unspecified teacher models (major reproducibility gap), the absence of pointwise human validation, and the acknowledged closed-loop bias weigh against it. The paper sits between the 4.50 (Reject) and 5.50 (Accept Poster) anchors — closer to the latter due to genuine novelty and broader contribution, but pulled down by significant methodological gaps. I judge it borderline, leaning toward acceptance if the major weaknesses are addressable.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

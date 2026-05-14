@@ -1,17 +1,20 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me synthesize my final review.
-
----
+Now I'll produce the final consolidated review.
 
 ## Summary
-This paper addresses the novel problem of automatically discovering learning-friendly token orders for chain-of-thought reasoning in arithmetic Transformers. The core idea is to train a Transformer briefly on a mixture of differently-ordered target sequences, then rank orders by early validation loss—exploiting the "easy-to-hard" learning dynamics of neural networks. To scale beyond factorial search, the authors propose a two-stage hierarchical method (global block-level search + local within-block refinement). Experiments on three custom order-sensitive arithmetic tasks (RELU, SQUARE-19, INDEX) and the standard multiplication (PROD) task demonstrate that the method recovers the forward order from billions of candidates under random initialization, and rediscovers the known reverse-digit order for multiplication.
+
+This paper proposes a method for automatically discovering learning-friendly token orderings for Transformer decoders in arithmetic tasks. The core idea is to train a small Transformer on a mixture of sequences in different orders, then rank permutations by their early-stage loss (loss profiling). To handle factorial-sized search spaces, the authors introduce a two-stage hierarchical search (global block-level reordering followed by local intra-block refinement). Experiments on three synthetic order-sensitive tasks (RELU, SQUARE-19, INDEX) show the method can recover the forward order from up to 13! ≈ 6×10⁹ candidates, and rediscover the known least-significant-digit-first order for multiplication (PROD). The full pipeline runs in 1–7 hours on a single GPU.
 
 ## Strengths
-- **Novel problem formulation**: Identifying that token order is an underexplored degree of freedom in chain-of-thought design, and formalizing it as a permutation search problem with a principled objective (Section 3), is genuinely original and fills a gap in the literature.
-- **Effective loss profiling with empirical validation**: Figure 5(a) demonstrates that among 128 candidate permutations, the forward order (ID=0) achieves the lowest validation loss across RELU, SQUARE-19, and INDEX tasks. Figure 5(b) further confirms that the loss ranking correlates with actual retraining success rates, validating the core premise of the method.
-- **Scalable hierarchical search**: The global-local strategy reduces the search from 13! ≈ 6×10⁹ candidates to a manageable number of training runs. Table 2 shows the method recovers the forward order for L=13 under fully random initialization, and Figure 6(b) extends to L=40 with structured initialization—demonstrating practical scalability.
-- **Rediscovery of nontrivial known order**: On the PROD (multiplication) task, the method automatically recovers the reverse-digit (least-to-most-significant) order previously reported by Shen et al. (2023), confirming the approach works beyond the synthetic recurrence tasks where the answer is the identity permutation.
-- **Well-designed order-sensitive benchmarks**: The RELU, SQUARE-19, and INDEX tasks (Section 5.1) provide clean, reproducible testbeds where order sensitivity is rigorously justified through non-injective recurrences, and the forward/reverse contrast in Table 1 shows dramatic accuracy gaps (e.g., 99.9% vs. 5.6% for RELU L=50).
-- **Attention sparsity as an orthogonal diagnostic**: Table 3 shows that learning-friendly (forward) orders consistently produce sparser attention maps across all tasks and lengths, providing converging evidence for the method's findings.
+
+- **Novel formulation of permutation optimization for decoder output sequences.** The paper frames "unraveling the chain of thought" as a systematic optimization over token permutations, going beyond prior work that only tested a few hand-chosen orders (e.g., Shen et al., 2023). This is clearly stated as a new task (Section 1) and distinguished from prior work (Section 2).
+
+- **Efficient hierarchical search that handles factorial spaces.** The two-stage method (global block-level + local refinement) keeps training runs short (800–1,600 steps) and handles up to 7! = 5,040 permutations per run. The pipeline scales to 13! candidates within 1–7 hours on a single GPU (Section 4, "Computational overheads") and extends to L=40 with structured initialization (Figure 6b). This directly supports the claim of practical feasibility.
+
+- **Clear empirical validation on core claim.** The method successfully discovers the forward order on RELU, SQUARE-19, and INDEX tasks (raising accuracy from ~10% to near 100%), and redisovers the LSB-first multiplication order on PROD — a genuine non-forward optimal order reported in prior work (Table 2, Figure 6). The loss profiling alone can isolate the forward order among 128 random permutations (Figure 5a).
+
+- **Exploitation of easy-to-hard dynamics as a cheap ranking signal.** The paper demonstrates that different output orders produce distinct early loss trajectories (Figure 3) and uses this to rank permutations without full training runs. This is a practical insight, grounded in a well-known neural network phenomenon (Arpit et al., 2017), and validated across multiple tasks.
+
+- **Diagnostic analysis linking learning-friendly orders to attention sparsity.** Appendix B and Table 3 provide an orthogonal metric: forward (easy) orders yield consistently sparser attention maps (lower entropy) than reverse orders across all three tasks, strengthening the claim that the discovered orders are genuinely easier.
 
 ## Weaknesses
 
@@ -19,66 +22,64 @@ This paper addresses the novel problem of automatically discovering learning-fri
 None.
 
 ### Major
-- **Unsupported OOD generalization claim**: The contribution list (line 72-73) states the method makes learning "generalizable to out-of-distribution samples." No OOD evaluation exists anywhere in the paper—all experiments train and test on identical sequence lengths, digit ranges, and task definitions. No length generalization, larger-digit, or shifted-distribution tests are conducted. This is a direct contradiction between a headline claim and the evidence. The claim must either be removed or backed by experiments. While this does not invalidate the core in-distribution contribution, it inflates the stated scope of the work and must be addressed.
+
+- **The method is only validated on tasks where the optimal order is already known.** RELU, SQUARE-19, and INDEX are designed so that the forward order is the only causal, learnable order. PROD has a known LSB-first optimal order from prior work. The paper does not test on any task where the optimal order is non-trivial, counterintuitive, or varies across problem instances — i.e., a task where the answer could not have been guessed by the experimenter. While sanity checks on known cases are necessary, the paper's central claim is about *discovery*, yet it only *recovers* what was already known. A single experiment on a task where forward/reverse are both poor but some non-obvious order works well would substantially strengthen the contribution. The paper acknowledges this is first work, but the gap between the framing ("discovering learning-friendly orders") and the evidence ("recovering known orders from factorial spaces") remains significant.
+
+- **No comparison to a simple random-search baseline with matched budget.** The paper compares only to forward, reverse, and random orders in the main text. The evolutionary strategy (ES) baseline in Appendix C is a step in the right direction, but it is not clearly documented whether the training budget (number of steps, model size) is matched to the proposed method. The paper would benefit from comparing to a straightforward baseline: draw N random permutations (matched to the method's total training budget), train each for the same number of steps, and pick the best by validation loss. The ES results in Appendix C show the proposed method succeeds where ES fails for L=20, but without controlled budgets the reader cannot assess whether the loss-profiling pipeline adds value over simpler approaches.
+
+- **No analysis of the method's sensitivity to its hyperparameters.** The loss-profiling pipeline depends on several choices: the number of epochs E (only 1–2), the mixture ratio (how many permutations per training run), the model size used for exploration, and the candidate set size T. None of these are ablated. How does the ranking stability change with fewer permutations in the mixture? Would a smaller model fail to discriminate orders on harder tasks? The paper presents the method as a general framework but provides no guidance on when it might break or how to set these knobs for new tasks.
 
 ### Minor
-- **Missing tabulated success rates for discovered orders in Table 2**: Table 2 reports only the permutation strings found by the hierarchical method. For orders that deviate from the identity (e.g., RELU L=10: [4,5,6,7,8,9,0,1,2,3]; SQUARE-19 L=13: [8,9,0,1,2,3,4,10,11,12,5,6,7]), the paper states they produce "higher success rate than training on the reverse order" (line 654-655) and refers to Figure 6(a). But "better than reverse" is a low bar; readers need to know whether these orders approach forward-order accuracy or merely beat ~10%. Figure 6(a) provides visual evidence but no numerical values, and the INDEX task results are described as "harder" without quantitative reporting of discovered-order accuracy. Including a per-entry success rate column in Table 2 would substantially strengthen the evidence.
 
-- **Limited task scope—method only tested where the optimal order is known**: All three custom tasks are designed so the forward (identity) order is provably optimal by construction. The PROD task recovers a previously known order. The method never demonstrates discovery of a genuinely surprising or counterintuitive ordering that a practitioner could not guess. This limits the demonstrated practical value, since the primary use case of such a method would be tasks where the best order is genuinely unknown. The paper acknowledges this implicitly (Section 5.1: "They can be learned relatively easily with the forward order") but the contribution would be stronger with at least one task where the optimal order is not obvious a priori.
+- **The discovered orders' success rates are not reported in a per-entry table.** Table 2 lists the discovered permutations, but Figure 6 reports success rates only for a subset of settings. For several of the discovered orders in Table 2 (e.g., SQUARE-19 L=13, INDEX d=4/d=8), the reader cannot determine whether the final order actually improves accuracy over forward or reverse, or by how much. The paper states the method "improves success rate from about 10% to near 100%" but this aggregate claim is not backed by per-configuration numbers.
 
-- **Mixed-order training concern addressed only empirically, not discussed**: Training a single Transformer on a mixture where the same input X maps to multiple permuted target sequences introduces contradictory supervision (the same prefix can map to different next tokens across orders). The paper provides no discussion of whether this noise could systematically bias the loss ranking, and no ablation (e.g., training separate models per order for comparison) to rule out artifacts. Figure 5's result that the forward order ranks first is reassuring but does not prove the ranking is reliable when the true optimum is unknown. A brief discussion or small ablation would address this.
+- **The INDEX task results raise unanswered questions.** For INDEX with d=4 and d=8, the discovered final orders (Table 2) are *not* the forward order. The paper notes this briefly ("the INDEX task proves harder") but does not analyze why. Is the forward order not learnable due to window-size constraints? Does the discovered order actually achieve higher accuracy than forward? The paper also omits INDEX from Figure 6's success-rate plots, leaving the reader uncertain about what the method actually achieved on this harder task.
+
+- **Method description could be more precise.** Equations 4.2–4.4 are hard to parse operationally: how are block-level permutations generated from the candidate set, and what exactly happens at each depth k? The global stage description (lines 205–302) would benefit from a concrete example showing how the candidate set evolves.
 
 ### Trivial
-- Hierarchical algorithm description (Section 4) lacks implementation clarity: how blocks are formed (contiguous? fixed boundaries?), and the pruning mechanics from T candidates to T/(k+1)! are only sketched, making independent reproduction difficult from the text alone.
+None.
 
 ## Nice-to-Haves
-- Small-scale brute-force validation for L=5 or 6: comparing loss-profiling rank against the rank obtained by training separate Transformers on each permutation to full convergence, directly testing the proxy quality of early mixed-training loss.
-- Scatter plot correlating loss profiling rank with final retraining success rate for a broader set of candidate permutations.
-- Extension to a task where no obvious optimal order exists, to demonstrate the method's ability to genuinely *discover* rather than *recover*.
+
+- Test on a task where the optimal order is neither forward nor reverse but something truly non-trivial (e.g., a non-causal recurrence where a mixed ordering reduces cross-token dependencies).
+- Ablate the effect of mixture size (number of permutations per training run) and training epochs on ranking stability.
+- Include a random-search baseline with carefully matched computational budget in the main paper.
+- Analyze why INDEX with d=4 and d=8 yields non-forward orders — is the discovered order actually better, or did the method fail?
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **"Method does not demonstrate ability to uncover non-obvious beneficial orders"** (from Harsh Critic, point 5): The PROD task does rediscover a non-trivial order (reverse-digit). The critic's framing that ALL tasks have the forward order as "trivially optimal" is incorrect for PROD, where the forward order (most-to-least significant) is the hard one and the discovered reverse order is the known optimum. Moved here because it partially misrepresents the paper—though the limited task diversity concern remains valid and appears as a Minor weakness above.
-
-- **"Hierarchical search is not validated against exhaustive enumeration or alternative search strategies"** (from Harsh Critic, point 4): The paper already compares loss profiling rank to actual retraining success rates in Figure 5(b), providing partial validation that the ranking mechanism works. Full exhaustive enumeration for L=5 or 6 is more properly a nice-to-have. Moved here because the core criticism—that quality of hierarchical search as a ranking mechanism is unknown—overstates the gap given existing Figure 5 evidence.
-
-- **"Missing success-rate evaluation... the entire paper hinges on demonstration"** (from Harsh Critic, point 2): This is partially addressed by Figure 6(a), which plots success rate curves for forward, discovered, and reverse orders. The evidence exists visually; the valid concern is the lack of tabulation, which is captured as a Minor weakness above. The claim that "the conclusion is not supported" overstates the gap.
-
-- **"Loss profiling has fundamental ambiguity that is never addressed"** (from Harsh Critic, point 3): The paper provides empirical evidence (Figure 5) that the ranking works despite the theoretical concern. The critic's framing as a potential fatal flaw is not justified by the evidence. The concern remains worth noting (see Minor weakness above) but is not grounds for rejection.
-
-- **"INDEX task results are essentially dropped"** (from Harsh Critic): The paper explicitly discusses INDEX results in both Section 5.4 (lines 594-599) and Section 5.5 (lines 655-658), explaining that the loss landscape flattens for harder tasks. Results are not dropped; they are analyzed.
-
-- **"OOD generalization claim is completely unsubstantiated... structural"** (from Harsh Critic, point 1): The claim is indeed unsupported, but it does not invalidate the core in-distribution contribution. Classified as Major (claim inflation) rather than Fatal, because removing the OOD language leaves the paper's main results intact.
-
-- **Strength Finder dropped items**: "Computational efficiency" (1-7 hours on single GPU) is a practical strength but generic—many methods are computationally efficient. Still kept as a supporting strength since it's concretely evidenced. The attention sparsity analysis (Table 3) is a genuinely interesting orthogonal finding and is retained.
+- **Missing forward success rates in Table 1 for SQUARE-19/INDEX:** These are parser formatting artifacts from PDF extraction; the original submission contains the full table. (Hard rule: parser errors.)
+- **"Only 128 permutations is a small space":** This was a validation experiment (Section 5.4) designed to test whether loss profiling can pick out the forward order, not the main search. The main method handles up to 13! candidates. (Hard rule: misunderstanding.)
+- **"No comparison to baseline permutation-search methods":** The paper includes an evolutionary strategy baseline in Appendix C. The critic acknowledges this but claims it is improperly controlled; however, the method's retraining cost per candidate (early-stage training) is stated, and the ES uses the same fitness metric (early-stage loss). This criticism is partially inaccurate. (Hard rule: factually wrong.)
+- **"The soft-permutation optimization is dismissed with only one small figure":** The paper's core contribution is the loss-profiling approach, and the soft-permutation failure mode is a brief motivating discussion, not a central claim. This is a minor presentation choice, not a substantive weakness. (Soft rule: scope creep.)
+- **"Connection to chain-of-thought is metaphorical at best":** The paper explicitly frames the token ordering as "unraveling the chain of thought" and arithmetic tasks naturally fit this framing (step-by-step computation). The connection is reasonable and the paper does not overclaim beyond the arithmetic domain. (Soft rule: weaken.)
 
 ## Novel Insights
-The key novel insight emerging from this work—beyond the paper's own stated contributions—is that **early-training loss dynamics on mixed-order data can serve as a cheap, reliable proxy for an order's learnability**, even when the mixed training introduces contradictory supervision. The fact that this signal survives the noise and correlates with full-retraining success (Figure 5(b)) is non-obvious and could generalize beyond arithmetic to other structured prediction tasks where output ordering matters. Additionally, the observation that learning-friendly orders consistently produce sparser attention patterns (Table 3) suggests a deeper connection between order quality and model internals that warrants further investigation.
+
+The harsh critic correctly identifies that the method's most significant limitation is the lack of validation on tasks with genuinely unknown optimal orders — but this is partially inherent to the paper's design of being a first work in this direction. The strength finder correctly highlights the novelty of using easy-to-hard learning dynamics as a cheap ranking signal for permutations, which is an interesting methodological contribution. An insight that emerges from reading both is that the paper's true contribution lies not in "discovering surprising orders" but in demonstrating that early-loss profiling is an effective *search heuristic* for a combinatorial problem that would otherwise be intractable. The attention sparsity analysis (Appendix B) provides a useful diagnostic tool orthogonal to loss. The paper would be substantially stronger if it leaned into this framing more explicitly and tested on a task where the optimal order is genuinely non-obvious.
 
 ## Suggestions
-- Remove or heavily qualify the OOD generalization claim in the contribution list unless OOD experiments are added. At minimum, change "generalizable to out-of-distribution samples" to something like "and potentially beneficial for generalization (to be studied in future work)."
-- Add a column to Table 2 reporting the final retraining success rate for each discovered order, alongside forward and reverse baselines, so readers can directly assess whether the discovered orders are near-optimal.
-- Add a short discussion in Section 4 or 5.4 acknowledging the mixed-training concern and explaining why the empirical evidence (Figure 5) suggests it is not problematic in practice.
-- Clarify the hierarchical algorithm in Section 4 with explicit details on block formation and pruning, ideally with pseudocode.
 
-Now, let me calibrate against the anchor papers and assign a score.
+1. **Add at least one task with a non-trivial optimal order.** For example, a task where the forward order is hard but a specific non-forward, non-reverse order is learnable (e.g., a computation where dependencies form a tree rather than a chain). This would directly address the most significant weakness.
+2. **Include a random-search baseline in the main paper** with carefully matched computational budget. Show that loss profiling is more sample-efficient than trying random orders with equal total training steps.
+3. **Report per-entry success rates for each discovered order in Table 2.** Add a column showing the success rate of the final discovered order for each configuration, alongside forward and reverse baselines.
+4. **Analyze the INDEX failure cases** (d=4, d=8 where the discovered order is not forward). Explain whether the discovered order is genuinely better, or the method failed, and why.
+5. **Add an ablation on the number of epochs E and candidate set size T** to demonstrate the robustness of the loss-profiling ranking.
+
+## Score and Decision
 
 **Anchor comparison:**
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `sTPKDKn5ig.md` (Continuous CoT) | 5.60 | Accept (Poster) | Stronger: has theoretical guarantees, multiple benchmarks, RL fine-tuning. This paper is narrower in scope and lacks theory. |
-| `lsJwX9Jf5u.md` (Emergence of Superposition) | 6.40 | Accept (Poster) | Much stronger: theoretical analysis of training dynamics, multiple tasks, deep mechanistic understanding. This paper is clearly below this. |
-| `iOlXapkK6V.md` (Why Can't Transformers Learn Multiplication) | 5.00 | Reject | Comparable depth. That paper had exceptional mechanistic analysis (one reviewer gave 10) but was rejected for limited scope. This paper has a more practical method but similarly narrow evaluation. |
-| `s8kdXG7Zu4.md` (Ordinal-Biased Random Training) | 4.50 | Reject | Similar "curriculum through ordering" angle but with questionable metrics. This paper has cleaner experiments and a more principled method. Slightly stronger. |
-| `yUvvOVO6Yu.md` (Kinetics of Reasoning) | 3.00 | Reject | Weaker: less clear contribution, noisier experiments. This paper is clearly stronger. |
-| `ksWsF80beE.md` (Understanding Addition/Subtraction) | 3.33 | Reject | Narrow mechanistic study. This paper has a more generalizable method. Stronger. |
-| `ae6bKeffGZ.md` (Arithmetic-Bench) | 2.50 | Reject | Benchmark paper with limited novelty. This paper has a novel method and is stronger. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/ksWsF80beE.md` (Understanding Addition/Subtraction in Transformers) | 3.33 | Comparable scope (synthetic arithmetic, small Transformers). The current paper has more novelty (new task formulation) but the anchor has stronger mechanistic validation. Current paper is slightly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/N35pVnh31b.md` (Small Models, Smarter Learning) | 4.00 | Similar level of empirical contribution on synthetic tasks. Current paper has a more novel problem formulation but less thorough analysis of sensitivity and hyperparameters. Comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/iOlXapkK6V.md` (Why Can't Transformers Learn Multiplication) | 5.00 | Anchor has a very mixed review (10,2,4,4). The strongest reviewer praised it highly, but others found significant issues. Current paper is more self-contained and has fewer controversial claims, but the anchor's best parts are stronger than the current paper's best parts. Slightly weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/sTPKDKn5ig.md` (Continuous Chain of Thought) | 5.60 | Accepted poster. Stronger theoretical grounding and broader scope than current paper. Current paper is weaker in theoretical depth and task scope. |
+| `/home/wg25r/review_agent/human_reviews_2026/IAFwK6NyrP.md` (The Counting Power of Transformers) | 6.40 | Accepted poster. Strong theoretical contribution with empirical validation. Current paper is substantially weaker in theoretical contribution and impact. |
 
-The paper under review sits above the 3.0-4.5 cluster (yUvvOVO6Yu, s8kdXG7Zu4, ksWsF80beE) due to a genuinely novel problem and cleaner empirical validation. It is below sTPKDKn5ig (5.60) and lsJwX9Jf5u (6.40) due to narrower scope and lack of theoretical depth. It is comparable to iOlXapkK6V (5.00)—both have strong core contributions undermined by scope limitations and some evidential gaps.
+The paper proposes a genuinely novel task and a plausible, well-engineered solution. However, the experimental validation has a significant gap: it only recovers orders already known to be optimal rather than discovering genuinely surprising ones, and it lacks critical baselines and sensitivity analysis. Compared to the anchors, it is stronger than the rejected papers with avg scores ~3-4 (clearer contribution, better presentation) but weaker than the accepted papers with avg scores ~5.5-6.4 (less thorough validation, narrower scope). The core idea is sound and the engineering is clean, but the evidence does not yet fully support the strength of the claimed contribution.
 
-The paper's main issues—unsupported OOD claim and missing tabulated success rates—are addressable. The method works as advertised for the tasks tested. The novelty of the problem and the effectiveness of the loss profiling approach are real contributions. I place this at **5.0**, Reject (borderline—could be raised to weak Accept with targeted revisions addressing the OOD claim and adding success rate numbers).
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

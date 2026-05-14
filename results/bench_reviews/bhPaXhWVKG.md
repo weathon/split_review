@@ -1,104 +1,79 @@
-Now I have all the information I need. Here is my consolidated final review:
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-MermaidFlow proposes encoding agentic workflows as declarative Mermaid graphs (a human-readable diagram markup language) rather than directly generating Python code, and then optimizing these graphs through evolutionary programming (EP) with an LLM-in-the-loop. The Mermaid representation enables static structural validation (syntax, connectivity, type-checking) before code generation, yielding >90% valid-code rate vs. ~50% for the code-level baseline AFlow. Across four benchmarks (GSM8K, MATH, HumanEval, MBPP), MermaidFlow achieves an average solve/pass rate of 80.75%, modestly outperforming 13 baselines.
+MermaidFlow proposes a novel declarative graph representation for agentic workflows using the Mermaid markup language, where workflows are encoded as typed, statically verifiable graphs. On top of this representation, the paper develops an evolutionary programming framework with constraint-preserving operators (mutation, crossover, addition, deletion) and a generate-and-validate loop that checks structural validity via a Mermaid compiler. Empirical results across GSM8K, MATH, HumanEval, and MBPP show that MermaidFlow achieves the best average performance (80.75%) among 13 baselines, outperforming AFlow and MaAS with consistent but modest margins.
 
 ## Strengths
 
-- **Concrete, working system with sensible architecture:** The three-layer separation (Mermaid planning → Python code generation → execution) is well-motivated and yields a tangible reliability improvement over direct code generation. The >90% valid-code rate vs. AFlow's ~50% (Section 5.3) is a clear, measurable advantage of having a structured, checkable intermediate representation.
+- **Novel declarative workflow representation with built-in static verifiability.** Encoding agentic workflows as typed Mermaid graphs (Equation 1, Figure 1) with explicit type compatibility, role consistency, and connectivity checks is a genuinely useful idea. Unlike code-centric approaches where validity can only be assessed at runtime, this design enables pre-execution verification via a Mermaid parser/compiler. The concrete failure-mode taxonomy in Appendix C (unreliable if-conditions, meaningless for-loops, incorrect initialization, nonexistent imports) further motivates why a structured intermediate representation is beneficial.
 
-- **Token efficiency:** The paper reports that MermaidFlow reaches 52% on MATH using ~27K tokens versus AFlow's ~69K tokens (Section 5.3) — roughly half the cost. This is a concrete practical benefit.
+- **Consistent empirical improvement across all four benchmarks.** MermaidFlow achieves the highest average score (80.75%) across GSM8K, MATH, HumanEval, and MBPP, outperforming the strongest baseline MaAS (79.35%) and the direct competitor AFlow (78.67%) on every task (Table 1). The improvement on MATH (+2.61% over AFlow) is the most notable, and the convergence analysis (Figure 3) shows faster token efficiency (2.7e4 vs. 6.9e4 tokens to reach 52% on MATH).
 
-- **Consistent empirical gains across benchmarks:** Table 1 shows MermaidFlow ranking first across all four benchmarks. While margins are small (1.40% average over MaAS, 2.08% over AFlow), the consistency across math and code domains provides some evidence of general effectiveness.
+- **Detailed appendices with prompt templates, error analysis, and complete case studies.** The paper provides full prompt templates for workflow generation, LLM-as-judge, Mermaid-to-Python translation, and Mermaid guidance (Appendix A.3.1). The case studies (Appendix B) walk through complete workflows from Mermaid code to Python execution. The error frequency statistics (Appendix D, Table 5) and examples of common Mermaid errors (Figures 9-11) add practical value.
 
-- **Scalable with optimizer capacity:** Table 2 shows that upgrading the optimization LLM (GPT-4o-mini → GPT-4o → Claude 3.5) while keeping the execution LLM fixed yields monotonic improvements on both GSM8K and HumanEval, suggesting the search space can productively absorb stronger generators.
-
-- **Well-written and clearly illustrated:** Figures 1 and 2 effectively communicate the workflow lifecycle and the EP framework. The case study (Figure 4) provides a concrete crossover example that helps ground the approach.
+- **Failure-mode taxonomy for Python-based workflows (Appendix C).** The concrete documentation of why LLM-generated Python workflows fail—unreliable if-conditions, meaningless for-loops with temperature=0, incorrect instance initialization, nonexistent imports—is a useful contribution in its own right and provides clear motivation for the Mermaid representation.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Formal EP operators are not realized in the implemented system.** Section 4.1 defines six atomic graph operators (Node Substitution, Addition, Edge Rewiring, Deletion, Subgraph Mutation, Crossover) and Lemma 1 proves closure of the search space under them. However, Algorithm 2 (OptimizeMermaidWorkflow) does not apply these operators: it prompts an LLM to generate new Mermaid code, then runs a checker, retrying on failure. The operators serve only as conceptual descriptions of what the LLM *might* produce; there is no mechanism ensuring that a generated candidate corresponds to any specific operator, nor that Lemma 1's closure property is enforced. The paper acknowledges this gap (lines 380–386) and uses the checker as a safety net, but the core methodological claim — "safety-constrained evolutionary programming" — is substantially weaker than presented. The formal apparatus (Lemma 1, the operator definitions) is largely decorative rather than operational. This matters because the EP framework is the paper's principal claimed algorithmic contribution.
-
-- **The Mermaid representation is not isolated as the causal driver of improvements.** The comparison with AFlow confounds at least four variables: (i) representation (Mermaid vs. Python), (ii) search strategy (EP vs. MCTS), (iii) selection mechanism (LLM-as-judge vs. rollout-based), and (iv) search budget structure. There is no experiment applying the same EP logic to a Python representation with a comparable syntax/structure checker to isolate the contribution of Mermaid. The higher valid-code rate (>90% vs. ~50%) is partly attributable to the checker + retry loop (Section 4.1, Appendix A.2), not solely to Mermaid's intrinsic properties. Without this isolation, the paper's central claim that the Mermaid representation specifically enables the gains remains unsupported.
+- **Overclaiming of theoretical guarantees inconsistent with actual implementation.** Lemma 1 claims the search space is closed under the defined operators ("∀G∈S, ∀O∈O, O(G)∈S"), and the paper repeatedly uses language like "valid by construction" (Section 4, line 299-300) and "guarantee static graph-level correctness across the entire generation process" (Section 1, line 84-85). However, Section 4.1 (lines 380-386) and Algorithm 2 explicitly describe a generate-and-validate loop: the LLM generates Mermaid code, a checker filters violations, and violations trigger regeneration. The operators are *described* to the LLM via natural language prompts rather than applied deterministically. The strong formal language implies a closed, deterministic transformation, which the implementation does not deliver. This gap between the paper's strongest claims and what is actually demonstrated undermines trust in the framing. The practical approach (structured representation + checker + retry) is still reasonable, but the paper should honestly describe it as such and drop the "valid by construction" / "guaranteed" language.
 
 ### Minor
 
-- **"Safety" and "static verifiability" language overstates what is actually enforced.** The checker validates Mermaid syntax, node connectivity, type consistency, and simple structural rules (e.g., ensemble nodes must have ≥2 inputs). This is useful structural validation, but the paper repeatedly uses terms like "safety-constrained," "safe subspace," "provably safe," and "guarantee static graph-level correctness" that imply stronger properties than what the checker delivers. It does not prevent logic errors, incorrect agent coordination, or runtime failures. The paper is clearer about the checker's actual scope in Appendix A.2, but the abstract and introduction framing is misleading.
+- **No variance reporting despite small performance margins.** The paper reports results averaged over three runs (Table 1, line 489) but provides no standard deviations, confidence intervals, or significance tests. Given that the margins against AFlow are 0.64% (MBPP), 2.28% (GSM8K), 2.61% (MATH), and 2.79% (HumanEval)—all using the same base LLM (gpt-4o-mini) for execution—it is impossible to rule out that these differences arise from random noise or subtle evaluation protocol differences. This is particularly important for the MBPP result (+0.64% over AFlow), where the margin is negligible. Adding error bars or paired significance tests would substantially strengthen the empirical claims.
 
-- **No statistical significance reported.** The performance margins over the most relevant baselines (AFlow, MaAS) are small (+2.61% on MATH, +1.40% overall average). Results are averaged over three runs but no standard deviations, confidence intervals, or significance tests are reported. This is common in the field but limits confidence in whether the observed differences are reliable.
+- **LLM-as-Judge selection mechanism is used without validation.** Section 4.2 describes using an LLM to score and select among N=4 candidate workflows based on "workflow coherence, innovation, complexity balance, prompt quality, modification rationale" before any actual evaluation. The paper provides no analysis of whether the judge's preferences correlate with true performance, no comparison to alternative selection strategies (e.g., random selection, round-robin), and no ablation showing the impact of the judge. Since the judge drives which candidate gets evaluated at each round, this is a non-trivial design choice that could systematically bias the search.
 
-- **Optimal stopping point analysis lacks quantitative results.** Section 5.3 mentions using "the round index of optimal stopping points" to demonstrate Mermaid's advantages for update control, but presents only qualitative discussion without concrete numbers or plots. The claim that Mermaid-based updates are more "controllable and well-defined" is argued at the conceptual level without empirical backing.
+- **"Safety-constrained" framing is misleading.** The term "safety" is used prominently throughout (title, abstract, Section 4) to refer exclusively to *structural graph validity* (type compatibility, connectivity, node roles). This is type safety, not behavioral or alignment safety. Readers expecting safety guarantees about agent behavior or harm prevention will be misled. A more precise term would be "statically verifiable" or "structurally constrained."
+
+- **Crossover operator is underspecified.** The crossover definition (Section 4.1, line 340) says "swap subgraphs rooted at v" where v is a "common interface node (e.g., an ensemble node)." How a common interface node is identified across two workflows, what happens when none exists, and how this is robustly implemented in practice are not discussed. Since the crossover prompt in Appendix A.3.1 essentially asks the LLM to "combine effective sections from both parents," the formal operator definition and the practical implementation are disconnected.
+
+- **Missing ablation of the λ exploration/exploitation hyperparameter.** The mixed sampling distribution (Section 4.2) uses λ to balance uniform random sampling and score-weighted sampling, but no ablation studies examine the sensitivity of results to this parameter or justify the chosen value.
 
 ### Trivial
 
-- The paper claims to be "the first agentic workflow representation that leverages a graph-oriented abstract coding language" (lines 243–244). This claim is too strong given prior graph-based workflow languages in the multi-agent literature (GPT-Swarm, FlowReasoner, and industry tools like LangGraph are all cited in the paper and represent workflows as graphs, though with different degrees of formal semantics).
-- Some inconsistency in terminology: "safety-constrained" is used in the abstract/title but not precisely defined until much later in the paper.
+- The "Optimal Stopping Point Analysis" section (Section 5.3, lines 571-581) contains only a conceptual paragraph followed by an abrupt transition to the case study, with no actual analysis of optimal stopping points. The section was likely truncated during formatting.
+- The retry distribution (how many regeneration attempts per violation, how many rounds required multiple attempts) is not reported, so the claim of ">90% success rate" (Section 5.3) cannot be fully verified from the data.
+- The cost comparison (2.7e4 vs. 6.9e4 tokens) is reported for a single operating point (the point where both methods reach 52% on MATH), not as a cumulative analysis across all rounds including retries.
 
 ## Nice-to-Haves
 
-- A controlled ablation where the same EP search is applied to Python code with a comparable AST-based checker would isolate the contribution of Mermaid.
-- A fixed-template Mermaid workflow baseline (no search) to separate the contribution of the representation from the search.
-- Qualitative analysis of what structural patterns emerge from the search and how they differ from AFlow/MaAS workflows.
+- **Ablation controlling for representation vs. search framework.** The paper cannot separate the benefit of the Mermaid representation from the benefit of the evolutionary search framework itself. Comparing MermaidFlow against a version using the same evolutionary search with Python code as the representation would isolate the contribution of the Mermaid representation. The paper acknowledges a related limitation in Appendix E (rule-based Mermaid-to-Python converter) but does not run this control experiment.
+- **Validation of the LLM-as-Judge.** A straightforward experiment would compare the judge's selected workflow against the ground-truth best candidate on a held-out set, or compare full-system performance with random selection vs. judge-based selection.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-1. **Harsh critic: "The operators exist only as a conceptual description... Lemma 1 is therefore irrelevant to the actual system."** — While the gap between formal operators and LLM-based implementation is a real weakness (retained above as Major), the harsh critic's claim that the operators are *entirely* irrelevant is overstated. The operators define the intended search space and inform the prompt design; the checker verifies outputs remain in that space. The issue is a gap between formalism and implementation, not a complete divorce. The criticism has been incorporated into the Major weakness above with appropriate nuance.
-
-2. **Harsh critic: claims about missing related works.** — Removed per instructions.
-
-3. **Strength Finder: "The paper is the first agentic workflow framework to guarantee static graph-level correctness across the entire generation process."** — This directly conflicts with the verified weakness about overstated safety claims. Moved to Removed.
-
-4. **Harsh critic: "The formalism (Equation 1 and 3) is straightforward and adds little beyond standard graph + type annotation."** — This is a judgment call about novelty, not a factual error. The formalism is simple but serves its purpose in defining the search space. Removed as a strawman; the formalism is adequate for what it needs to do.
-
-5. **Harsh critic: "The choice of gpt-4o-mini-0718 for both optimization and execution confounds the effect of model scale with the representation."** — The paper explicitly addresses this with Table 2 (scaling the optimization LLM) and follows the same convention as MaAS. Weakened and moved; the ablation in Table 2 partially addresses this concern.
-
-6. **Harsh critic: "Many systems already incorporate structural validation or use domain-specific representations."** — Removed per the "missing related works" rule; this is effectively a missing-reference criticism.
-
-7. **Harsh critic on typos/formatting in the prompt appendix.** — Removed per formatting-nitpick rule. These are parser artifacts, not author errors.
-
-8. **Strength Finder: "guaranteeing correctness by construction" and "Lemma 1 proves that the defined evolutionary operators preserve membership in the valid subspace."** — While Lemma 1 is technically correct, the gap between operators and implementation (Major weakness above) limits how strongly this strength can be claimed. Tempered in the final Strengths section.
+- **"The paper does not demonstrate that Mermaid-to-Python translation suffers fewer or different failures."** The paper does report >90% success rate for generating valid Python code vs. AFlow's ~50% (Section 5.3). The case studies show successful translation. This criticism is partially addressed.
+- **"The HumanEval case study shows a hand-verified workflow, not a systematic comparison."** Case studies are by nature illustrative examples, not systematic comparisons. The systematic comparison is in Table 1. This criticism misunderstands the purpose of a case study.
+- **"The paper does not report the retry distribution."** This is a reporting detail that is accepted as a trivial weakness (moved above) rather than a substantive gap.
+- **Generic strength from Strength Finder about "well-structured ablation studies."** The ablation section is minimal (one learning curve + one optimization LLM scale table). The "Optimal Stopping Point Analysis" section appears truncated. This strength is overstated.
 
 ## Novel Insights
 
-The reviews do not surface a genuinely novel insight beyond the paper's own contributions. The most notable observation is that the checker + retry loop (rather than formal EP operators) is doing much of the practical heavy lifting in keeping candidates valid, but the paper itself acknowledges this mechanism (lines 380–386). The central tension — formal operators defined but LLM-prompted, structural validation called "safety" — is a useful diagnosis but not a novel insight.
+Beyond the paper's own contributions, one observation from cross-referencing the reviews is worth noting: the gap between formal operator definitions (Lemma 1) and the actual LLM-based generate-and-validate loop is a recurring pattern in LLM-augmented systems research. Many papers in this area define clean mathematical abstractions but implement them via LLM calls with post-hoc filtering. Reviewers are increasingly sensitive to this mismatch. The paper would be stronger by embracing the generate-and-validate nature of its approach and framing the operators as *intended* transformations rather than *guaranteed* ones. Additionally, the paper's taxonomy of Python workflow failures (Appendix C) is more convincing as motivation for structured representations than the formal closure argument—this empirical evidence of brittleness should be promoted to the main paper.
 
-## Suggestions
+## Score and Decision
 
-- Restructure the EP description to honestly present what is actually implemented: an LLM-based generator guided by operator descriptions, with a checker as a post-hoc validator. This is a perfectly reasonable design; it just shouldn't be presented as formal constrained evolutionary programming.
-- Add a controlled experiment isolating the Mermaid representation: apply the same EP loop to Python workflows validated by a comparable structural checker (AST parsing + type checking). If MermaidFlow still wins, the case for the representation is much stronger.
-- Report standard deviations and consider a simple significance test (e.g., paired bootstrap) for the key AFlow/MaAS comparisons.
-- Tone down "safety" language. "Structural validation" or "static correctness checking" more accurately describes what the checker does. Reserve "safety" for properties the system actually enforces end-to-end.
+**Calibration anchors:**
 
-## Score Calibration
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| AgentFlow (In-the-Flow) | Mf5AleTUVK.md | 7.33 (Oral) | Stronger paper with much larger empirical gains (14%+), RL-based training, and broader benchmark coverage. MermaidFlow has a more novel representation but weaker empirical evidence. |
+| Misevolve | Fd1jgQQW28.md | 5.50 (Poster) | Similar score band. Misevolve has a well-received conceptual contribution (misevolution taxonomy) despite execution concerns. MermaidFlow has comparable contribution novelty but similar weaknesses (no std, unvalidated judge). |
+| Multi-View Encoders | 7oeKDZsmWp.md | 5.50 (Poster) | Similar score band. Moderately novel predictor approach with thorough experiments. MermaidFlow has a slightly stronger novel contribution (Mermaid representation) but weaker empirical rigor. |
+| EvoMAS | 0rJUulYnow.md | 4.50 (Reject) | Similar evolutionary approach to MAS optimization. Criticized for missing std metrics and weak presentation. MermaidFlow has better presentation and a clearer contribution. |
+| JudgeFlow | HYSqpiiZlc.md | 4.00 (Reject) | Incremental over AFlow, cost concerns. MermaidFlow has more novelty (Mermaid representation) but similar issues with small margins and weak ablation. |
+| Building Learning Context | wtLyksjIdl.md | 3.00 (Withdrawn) | Weaker paper with confusing presentation and unclear contribution. MermaidFlow is clearly stronger. |
+| Beyond Generalist LLMs | Fjd2O8RIqu.md | 2.50 (Withdrawn) | Niche contribution with narrow scope. MermaidFlow is substantially stronger. |
 
-**Anchors compared:**
+**Assessment**: MermaidFlow has a genuinely novel contribution (declarative Mermaid-based workflow representation with static verification) that distinguishes it from incremental papers like JudgeFlow (4.00) or EvoMAS (4.50). The empirical results are consistent but modest, and the paper's strongest claims (Lemma 1, "valid by construction") are overstated given the generate-and-validate implementation. The absence of error bars for near-tie margins and the unvalidated LLM-as-Judge are meaningful concerns. The paper falls between the 4.00–4.50 band (Reject-quality evolutionary search papers) and the 5.50 band (Accept-quality papers with clear contributions but execution flaws). The Mermaid representation itself is a practical and well-motivated idea that the community would benefit from, but the paper would be strengthened by honest reframing and additional rigor.
 
-| Path | Paper | Avg Score | Decision | Comparison |
-|---|---|---|---|---|
-| .../1UoB7IWiku.md | Code World Models | 6.0 | Accept (Poster) | Substantially more novel core idea (LLM→executable world model), cleaner evaluation. MermaidFlow is clearly below this. |
-| .../7oeKDZsmWp.md | Multi-View Encoders (Agentic Predictor) | 5.5 | Accept (Poster) | Well-scoped, clear contribution. MermaidFlow is below this. |
-| .../I05H9RUzHB.md | MASS | 5.0 | Accept (Poster) | Similar space but more principled three-stage decomposition. MermaidFlow is slightly below. |
-| .../N32MEJqbPu.md | LogicEvolve | 5.0 | Reject | Different domain but similar pattern of good idea with execution gaps. |
-| .../0rJUulYnow.md | EvoMAS | 4.5 | Reject | Similar evolutionary approach, comparable issues (formal operators vs. actual implementation). MermaidFlow is better written but comparable overall. |
-| .../i95lcR2GN5.md | Rethinking MAS | 4.5 | Reject | Different focus but comparable quality level. |
-| .../8Bk0AMtyKf.md | AutoRAS | 4.0 | Reject | Similar level of contribution and similar weaknesses (complexity, incremental novelty). |
-| .../HYSqpiiZlc.md | JudgeFlow | 4.0 | Reject | Very similar pattern: modest gains (~1.4%), incremental over AFlow, lacks cost analysis. MermaidFlow is comparable. |
-| .../vvSrgJIdvn.md | HeGFlow | 4.0 | Reject | Similar space, comparable contribution level. |
-| .../wtLyksjIdl.md | Building Learning Context | 3.0 | Withdrawn | Significantly weaker in presentation, clarity, and experimental rigor. MermaidFlow is clearly above this. |
-| .../FYke66uUU1.md | OPT-BENCH | 3.0 | Withdrawn | Different domain, much weaker contribution. MermaidFlow is clearly above this. |
-
-MermaidFlow sits firmly in the 4.0–4.5 range. It is better than the 3.0 papers (much better written, more coherent contribution) and comparable to EvoMAS and JudgeFlow at 4.0–4.5. It is below MASS (5.0) in terms of principled design and experimental rigor. The gap between formal EP operators and LLM-based implementation, combined with insufficient isolation of the Mermaid representation, prevents it from reaching the 5.0+ tier.
-
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

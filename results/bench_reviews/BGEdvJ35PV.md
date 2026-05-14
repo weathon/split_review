@@ -1,102 +1,82 @@
-Now I have thorough knowledge of the paper and all calibration anchors. Let me now write the consolidated review.
-
----
+Now I have sufficient information. Let me write the final consolidated review.
 
 ## Summary
-
-This paper proposes DIST (DIffuse and STeer), a training-free, model-agnostic corrective sampling method for 3D molecular diffusion models. The authors formalize the "dense-concentrated" (DC) structure of molecular distributions — narrow, well-separated probability peaks — and analyze how it causes reverse diffusion trajectories to overshoot into invalid, low-density regions. DIST intervenes at an intermediate timestep by creating candidate pools (via duplication and perturbation), evaluating pilot subsets through full reverse inference, and retaining only batches whose pilot outcomes indicate alignment with valid molecular peaks. The method is tested on three backbone architectures (EDM, GeoLDM, RADM) across QM9 and GEOM-Drugs datasets, showing improvements in atom stability, molecule stability, and validity while approximately halving inference timesteps.
+This paper identifies that molecular data distributions exhibit a "dense-concentrated structure" (DC-structure) — narrow, densely packed probability peaks separated by near-zero-density regions — which makes diffusion models fragile during reverse inference. It proposes DIST, a plug-in inference-time corrective method that, at an intermediate timestep, duplicates samples into batches, evaluates a pilot subset via full reverse inference, and retains only batches whose pilot molecules are chemically valid. DIST is model-agnostic and tested on EDM, GeoLDM, and RADM across QM9 and GEOM-Drugs, showing consistent improvements in validity and stability while also reducing wall-clock time (e.g., EDM: 145→83 minutes on QM9).
 
 ## Strengths
+1. **Consistent, architecture-independent empirical improvements across multiple backbones and datasets.** Table 2 shows DIST improves molecule stability from 82.0% to 89.9% (EDM, QM9) and validity from 92.6% to 96.0% (EDM, GEOM-Drugs), with gains holding across GNN-based (EDM), latent-space (GeoLDM), and Transformer-based (RADM) models. This demonstrates the DC-structure problem is not architecture-specific and that a generic plug-in fix adds value.
 
-- **Novel conceptual framework (DC-structure):** Definition 3.1 provides a precise probabilistic characterization of why molecular data — with narrow, well-separated peaks — makes diffusion reverse inference fragile. The overshoot analysis (Eqs. 6–7) connecting small peak width σ∗ to the likelihood of stepping past valid regions is insightful and distinguishes this work from generic diffusion fragility analyses (Section 3.1, Appendix C).
+2. **Formal characterization of the DC-structure and overshoot mechanism.** Definition 3.1 provides a clean mathematical framework (peaks of scale σ\*, separation Δ, near-zero-density gaps), and the overshoot analysis (equations 6–7) gives a concrete geometric explanation for why molecular diffusion fails — the reverse step `β_t·Δ/σ\*² > cσ\*` pushes samples past thin peaks. This goes beyond the qualitative observations in prior molecular generation work.
 
-- **Training-free, model-agnostic, plug-and-play design:** DIST requires no retraining or hyperparameter changes to backbone models. It is demonstrated on three diverse architectures — equivariant GNN-based EDM, latent-space GeoLDM, and non-equivariant Transformer-based RADM — and consistently improves all of them (Table 2), confirming broad applicability independent of architectural choices.
+3. **Efficiency gain is genuine and accounted for.** The paper provides wall-clock measurements (Table 6: 43% reduction for EDM+DIST, 60% for RADM+DIST) and an analytic cost formula (Appendix G.1, equation 23) that accounts for discarded candidates via the `1/r_c` retention factor. The speedup is real, not an artifact of selective reporting.
 
-- **Large and consistent empirical gains:** Across both QM9 and GEOM-Drugs, every backbone model combined with DIST outperforms its original counterpart. On QM9, molecule stability improves by up to 7.9 points (EDM: 82.0% → 89.9%), and validity by up to 5.0 points (EDM: 91.9% → 96.9%). Results are reported over three runs with standard deviations, showing statistical robustness.
-
-- **Inference-time efficiency alongside quality improvements:** DIST reduces the average number of timesteps by nearly half (e.g., EDM+DIST uses 556.1 steps vs. 1000 for baselines on QM9, Table 3). This is an uncommon combination — corrective methods typically add computational cost, not reduce it.
-
-- **Robustness to hyperparameters:** Ablation studies (Appendix H, Tables 7–9) demonstrate that DIST performs well across a range of thresholds, intermediate timesteps, and perturbation intensities without heavy tuning.
+4. **Robustness to hyperparameter choice.** Appendix H (Tables 7–9) shows DIST performs well across a range of thresholds τ (0.82–0.88), intermediate timesteps t (200–500), and perturbation intensities λ (0–0.2), indicating the method is not brittle.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
+1. **Theory-practice gap undermines the claimed "distributional correction."** The theory (Proposition 3.1, Corollary 3.1) assumes the ideal reverse kernel and requires controlling `sup_j TV(q_{t|j}, p_{t|j})`. In practice, the "pilot score" s_j is determined by the *chemical validity of final molecules z₀*, not by any measured property of the intermediate distribution at timestep t. The paper does not establish a formal link between final-molecule validity and the TV distance at the intermediate timestep. The theoretical framework and the practical algorithm operate under different assumptions; the paper would benefit from explicitly acknowledging this gap and clarifying that the pilot score is a heuristic proxy, not an estimator of the quantities in the bound.
 
-- **Selection criterion coincides with evaluation metrics, creating a circular evaluation:** Appendix F (line 2219–2220) explicitly states that "pilot outcomes $s_j \in \mathbb{R}$ are evaluated based on the stability and validity of the final generated molecules." The main results (Table 2) then report atom stability, molecule stability, and validity as the primary evidence of improvement. Since the method selects batches whose pilot subsets produce stable/valid molecules, the kept samples will necessarily exhibit higher stability/validity. This makes the comparison against unfiltered baselines partially unfair — any rejection filter that discards chemically invalid outputs will improve these metrics among retained samples. The paper does not contain an experiment that isolates the effect of intermediate-distribution correction from this selection effect, nor does it compare against an equivalent-compute rejection-sampling baseline (e.g., generating a pool with the backbone, evaluating all samples, and keeping the best). This substantially weakens the claim that DIST "steers" the intermediate distribution in a principled sense.
+2. **Missing rejection-sampling baseline.** The core mechanism of DIST — generate candidates, evaluate their validity, discard invalid ones — is a form of rejection sampling on final outputs. The paper does not compare against the simplest such baseline: generate K× more molecules from the backbone model independently and report metrics on the first 10,000 valid ones. Such a comparison would isolate whether the *intermediate batch pooling* (the distinctive algorithmic innovation) adds value beyond pure filtering, or whether the improvements come entirely from validity-based selection. This is essential for establishing that DIST is more than "rejection sampling with a clever compute schedule."
 
-- **No empirical validation of the DC-structure in real molecular data:** Definition 3.1 posits a mixture-of-Gaussians abstraction with small σ∗ and separation Δ, and the overshoot derivation (Eqs. 6–7) depends on σ∗ being small for molecules. However, the paper provides no quantitative measurements of σ∗, peak overlap extent, or the fraction of off-manifold samples at intermediate timesteps for QM9 or GEOM-Drugs under the forward noising process. The connection between the theoretical DC-structure and the actual behavior of trained molecular diffusion models remains asserted rather than demonstrated.
-
-- **The theory-practice gap for the pilot score as a distributional proxy:** Proposition 3.1 bounds the TV distance between the corrected reverse distribution and the true distribution in terms of quantities like sup TV($q_{t|j}, p_{t|j}$). The practical pilot score (downstream stability/validity) is at best a heuristic proxy for these unobservable quantities. The paper does not argue — theoretically or empirically — that filtering by final-molecule quality leads to a $q_t^c$ with lower TV distance to $p_t$. The theoretical guarantee and the algorithm remain loosely coupled.
+3. **Efficiency framing is somewhat overstated.** The paper claims "nearly half the computational cost" but the wall-clock reduction for EDM is 43% (145→83 min), not 50%. The headline metric "average number of timesteps per accepted molecule" (556.1 vs 1000) omits the pilot evaluation cost from its direct comparison — the analytic formula does account for it, but the main text presentation could mislead a reader into thinking the reduction is larger than it is. The efficiency is a real benefit, but the framing should be more precise.
 
 ### Minor
+1. **DC-structure evidence is qualitative.** The overshoot analysis (Definition 3.1, equations 6–7) relies on constants σ\*, Δ, c that are not empirically estimated for any molecular dataset. Figure 1 is a qualitative illustration with a single molecule pair vs. an image pair. No quantitative evidence (e.g., empirical distribution of nearest-neighbor distances between molecules in latent space, estimated peak widths) is provided to confirm that the overshoot condition is actually triggered at realistic timesteps. The toy experiments (Appendix C) are helpful but use synthetic MoGs, not molecular data.
 
-- **No comparison against a matched-compute rejection-sampling baseline:** The efficiency analysis (Section 4.3, Table 3) compares DIST against baselines that always run 1000 full reverse steps. A fair efficiency comparison should include a baseline that performs early rejection with the same total compute budget (e.g., generating candidates with fewer steps and selecting the best), which would help isolate whether DIST's specific staging of duplication, perturbation, and batch-wide scoring provides any advantage beyond simple early filtering.
+2. **The DC-structure novelty claim requires tempering.** The paper states it is "the first to highlight that molecular data distributions are highly concentrated and dense" (line 89). Prior work (Hoogeboom et al. 2022, "molecular geometry is rigid"; EDM paper) already noted aspects of this challenge. The formalization (Definition 3.1) is new and valuable, but the observation itself is not entirely novel.
 
-- **Limited analysis of whether overshoot is the dominant failure mode:** The paper attributes molecular generation failures to the overshoot mechanism (Eq. 7), but does not empirically distinguish this from other failure modes (e.g., mode collapse, poor coverage of certain atom types). An analysis comparing DDPM vs. DDIM sampling with and without DIST could shed light on whether stochastic recovery (Appendix D) already mitigates overshoot, but this is absent.
+3. **GEOM-Drugs evaluation is less complete.** Standard deviations and the uniqueness component of Validity×Uniqueness are omitted for GEOM-Drugs (the paper states "consistently close to 0% and 100%" — this should be explicitly stated earlier). The omission is conventional in the field but limits the comparison strength.
+
+4. **Proposition 3.1's usefulness is limited.** The bound (equation 20) depends on `sup_j TV(q_{t|j}, p_{t|j})` and coverage terms `α, β`, which are themselves unknown without access to the ground-truth `p_t`. The confidence bounds in Appendix E.3 provide finite-sample estimates, but the critical conditional TV term remains unestimated. The bound shows *that* correction helps in principle but does not provide practical guidance for choosing τ or quantifying the improvement.
 
 ### Trivial
-
-None.
+- The DDPM update formula in Appendix C.3 and the efficiency derivations (Appendix G.1) contain formatting artifacts that make them hard to follow. This is likely a parser issue in the submitted PDF, but a cleanup would help readability.
 
 ## Nice-to-Haves
-
-- **Decouple the pilot score from evaluation metrics:** Using alternative pilot scores (e.g., round-trip residual, self-consistency, ensemble variance — all mentioned in Section 3.2 but not used) and evaluating on the standard stability/validity metrics would provide cleaner evidence that DIST genuinely corrects the intermediate distribution rather than simply filtering by the evaluation criterion.
-- **Property-based evaluation:** Evaluating DIST on chemical properties not used in the pilot score (e.g., HOMO-LUMO gap, logP distributions, drug-likeness) would strengthen the claim of distributional correction.
-- **Empirical DC-structure measurements:** Tracking inter-peak distances, peak widths, and off-manifold fractions during noising for real molecular data would ground the theoretical framework in empirical reality.
+- An empirical estimate of the DC-structure parameters (σ\*, Δ) on QM9 or GEOM-Drugs would strengthen the motivating analysis.
+- An analysis validating that the pilot validity score correlates with some approximation of `TV(q_{t|j}, p_{t|j})` would bridge the theory-practice gap.
+- An adaptive strategy for choosing the intermediate timestep t (rather than fixing it) is a natural extension mentioned as future work.
 
 ## Removed Points
-
-These points were flagged for removal; treat them with caution.
-
-- **Harsh Critic claim that "the comparison is fundamentally unfair" as a fatal structural flaw:** While the circularity concern is real (retained as a Major weakness above), the characterization as "fatal" and "invalidating the paper's contribution" overstates it. DIST filters at an intermediate timestep (t=300), not at the final output — accepted samples still undergo 300 remaining reverse steps with stochasticity. The pilot evaluation is on a subset of each batch; non-pilot samples in accepted batches were not individually evaluated. The filtering thus operates on batch-level diagnostics rather than individual-sample post-hoc rejection. This is genuinely different from trivial post-hoc filtering, though the concern remains significant enough to be a Major weakness.
-
-- **Harsh Critic claim that "the paper never provides empirical evidence that real molecular noisy intermediates actually exhibit the claimed overshoot":** Retained in modified form as a Major weakness about lack of DC-structure empirical validation.
-
-- **Harsh Critic claim that "if stochastic sampling already mitigates the problem, the marginal benefit of DIST must be weighed against a stronger baseline":** The paper acknowledges in Appendix D that stochastic samplers can recover better than deterministic ones. This is a reasonable nuance but not a fatal flaw — it suggests a missing analysis rather than an error. Retained in modified form as a Minor weakness.
-
-- **Strength Finder claim about "new state-of-the-art performance":** While the numbers are strong, the circular evaluation concern means "SOTA" claims should be qualified. The improvements are real but partially attributable to selection effects. Weakened accordingly.
-
-- **Harsh Critic criticism about missing comparison with DDPM+DIST:** This is retained as a Minor weakness ("Limited analysis of whether overshoot is the dominant failure mode") rather than a standalone fatal criticism.
-
-- **Strength Finder's generic/nonspecific strengths** (e.g., "the paper addressed an important problem"): Removed as too generic.
-
-- **All formatting, typo, or grammar nitpicks from the Harsh Critic:** Removed per standing instructions — these are parser artifacts.
+- **"The method does not steer intermediate distributions"**: The paper's description (line 468, "filtered version of q_t") and Algorithm 1 make it clear that the corrected distribution is a filtered version of the model distribution at timestep t. The method does steer by retaining only batches whose trajectories are likely to produce valid molecules. The reviewer overstates the disconnect. *Reason: Partially factually incorrect — the method does select at the intermediate timestep, albeit using a final-outcome proxy.*
+- **"Efficiency analysis is misleading; total NFE not properly accounted"**: The paper provides both the formula (eq. 23, accounting for 1/r_c retries) and wall-clock numbers (Table 6). The 556.1 figure is computed from total timestep consumption. The criticism ignores these. *Reason: Factually wrong — the paper does account for discarded candidates.*
+- **"Proposition 3.1 does not apply because TV is not measured"**: The proposition states an upper bound conditional on those quantities; it does not claim to estimate them from the pilot score. The bound is valid as a theoretical statement about what would hold under ideal conditions. *Reason: Overstates a standard theory-practice gap into a fatal flaw.*
+- **"No empirical estimates of σ\*, Δ"** → Moved to Minor (it is a reasonable weakness, but not a fatal one).
+- **Strength Finder claim about "provably better convergence"**: The TV-contraction (Corollary 3.1) is a standard property of Markov kernels (Dobrushin coefficient < 1 for Gaussians), not a novel guarantee about DIST specifically. *Reason: Overselling the theoretical contribution.*
+- **"Performance cannot be guaranteed solely by architectural choices is a straw man"**: The paper supports this claim by showing failures across diverse architectures (GNN, Transformer, latent-space). This is a reasonable empirical observation. *Reason: Paper provides supporting evidence.*
+- **Formatting and typo criticisms**: Parser artifacts. *Reason: Per instructions, these are parser errors.*
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The DC-structure formalization (Definition 3.1) and the overshoot analysis connecting peak width to reverse-step displacement (Eqs. 6–7) are the paper's own conceptual contributions and are already stated as such.
+The harsh critic makes an insightful observation that cuts to the heart of the paper's framing: the method evaluates pilot trajectories to completion (t→0) and uses the chemical validity of the *final* molecule as a filter applied back at the intermediate timestep. This means the "corrected" distribution at timestep t is defined retroactively — a batch is kept if its pilot's full trajectory ends well. This observation is important because it clarifies what DIST actually does: it is not measuring the intermediate distribution and correcting it in a forward-looking sense, but rather using *completed trajectory quality* as a selection signal to prune the intermediate distribution. The paper would be stronger if it framed DIST this way: as "trajectory pre-validation via pilot rollouts" rather than "distributional steering." This insight also clarifies why the efficiency gain is genuine — DIST avoids running the full T-step reverse on trajectories that are likely to fail, catching failures early by checking their full-path outcome on a pilot subset.
 
 ## Suggestions
+1. Add a baseline that generates K× more molecules from the backbone model (e.g., 30,000 for EDM) and reports metrics on the first 10,000 valid ones. This isolates whether DIST's batch-pooling mechanism adds value beyond simple filtering.
+2. Acknowledge the theory-practice gap explicitly: state that the bound in Proposition 3.1 holds under the ideal kernel and assumes knowledge of conditional TV, while the practical pilot score is a heuristic proxy. Discuss conditions under which final-molecule validity is a reasonable proxy for distributional alignment.
+3. Replace "nearly half" with the exact percentage (e.g., "~40-57% reduction depending on the model") in the efficiency claims. Report total NFE (including pilots and discards) explicitly alongside the "average timesteps" metric.
+4. Provide an empirical estimate of DC-structure parameters on QM9: compute pairwise distances between training molecules in latent/coordinate space and estimate σ\* and Δ to verify that the overshoot condition (equation 7) is triggered.
 
-1. **Add a rejection-sampling baseline:** For a fixed inference compute budget, compare DIST against (a) the backbone model generating N candidates with standard inference and keeping the K best by the same stability/validity criterion, and (b) the backbone model generating candidates with early stopping at t=300. Report the same metrics on kept samples under matched compute.
+## Score and Decision
 
-2. **Use an orthogonal pilot score:** Implement one of the alternative pilot scores mentioned in Section 3.2 (round-trip residual or self-consistency) and show that DIST still improves stability/validity — this would cleanly demonstrate that the method corrects the intermediate distribution rather than simply selecting for the evaluation metric.
+**Calibration Anchors:**
 
-3. **Measure DC-structure properties empirically:** For a trained EDM on QM9, compute $\sigma_*$ (effective peak width) and $\Delta$ (inter-peak distance) at several noise levels $t$, and measure what fraction of reverse trajectories land in low-density regions between peaks. This would validate that the overshoot mechanism is actually the dominant failure mode.
+| Path | Avg Human Score | Comparison |
+|------|----------------|-----------|
+| La-Proteina (RDerF20JYT) | 8.0 | Stronger paper: novel representation for protein generation, SOTA results, thorough evaluation. DIST is less ambitious (plug-in vs. new model architecture). |
+| DriftLite (l01eG3Qikl) | 6.0 | Comparable scope: inference-time correction for diffusion. DriftLite has stronger theory-practice alignment but weaker empirical gains. DIST has better empirical results but a theory-practice gap. |
+| Unification of Diffusion (1taAXRcm21) | 6.0 | Stronger theoretical contribution unifying three frameworks. DIST has more applied/empirical contribution. |
+| MELD (raVuVPbnQL) | 4.5 | Similar pattern: identifies a problem in molecular diffusion, proposes a fix. Both have significant but not fatal weaknesses. DIST has stronger cross-architecture empirical results. |
+| Soft MH (HjLv1tCGPD) | 4.0 | Also a corrective method for molecular diffusion. Soft MH received a reject largely due to cost-benefit issues and missing baselines. DIST has cleaner efficiency gains but similar theory-practice concerns. |
+| Rethinking Diffusion (OPFE1zPYbU) | 1.0 | Fundamentally flawed paper with no real empirical contribution. DIST is in a completely different tier. |
 
-4. **Ablate sampler type:** Run EDM with DDPM (stochastic) vs. DDIM (deterministic) sampling, both with and without DIST, to quantify how much DIST helps in the regime where stochasticity already provides recovery.
+**Final Assessment:** The paper contributes a well-motivated observation (DC-structure), a practical plug-in method with genuine empirical improvements, and a theoretical framework for understanding molecular diffusion fragility. The cross-architecture empirical results are strong. However, the theory-practice gap is significant — the theoretical bounds operate under assumptions that the practical algorithm does not satisfy, and the connection is not made. The missing rejection-sampling baseline is a concrete methodological gap that should be filled. The efficiency gains are real but overstated. These weaknesses are substantial but not fatal; they can be addressed in a revision.
 
----
+**Score:** 5.0
 
-## Anchor Comparison
-
-- **HjLv1tCGPD** (avg score 4.00, Reject): Soft MH correction for molecular diffusion. Similar concept (training-free corrective method for molecular generation), but suffered from ceiling effects (metrics near 100%). DIST shows larger improvements and doesn't hit ceiling effects, making its empirical case stronger despite the circular evaluation concern.
-
-- **DYjyFDn8K7** (avg score 3.33, Accept/Poster): Fine-tuning via intermediate distribution shaping. Related concept (operating on intermediate distributions), but requires retraining/fine-tuning. DIST is training-free, which is a practical advantage. DYjyFDn8K7 had theoretical limitations but was accepted.
-
-- **GGHlCO3wQV** (avg score 3.00, Reject): DEMO evolutionary optimization for molecules. Criticized for limited novelty. DIST has stronger conceptual novelty (DC-structure) and more impressive empirical results across architectures.
-
-- **AhwAsF89EG** (avg score 5.50, Accept/Poster): Test-time iterative error correction for diffusion models. Both are training-free test-time correction methods. AhwAsF89EG has cleaner evaluation and stronger theoretical grounding (proves exponential→linear error reduction), while DIST has a more novel conceptual framework and larger domain-specific gains. DIST's circular evaluation issue is a differentiating weakness.
-
-- **1bJN1EQByS** (avg score 6.50, Accept/Poster): Enhanced diffusion sampling with molecular collective variables. Stronger theoretical grounding and cleaner evaluation than DIST, but targets a different problem (enhanced sampling efficiency rather than correcting inference drift).
-
-- **3JPAkwSVc4** (avg score 7.50, Accept/Oral): Quotient-space diffusion models. Significantly stronger theoretical framework with rigorous mathematical derivations and cleaner empirical evaluation. DIST is not at this level of rigor.
-
-- **pnt8zi13lH** (avg score 4.00, Reject): Training-free Stein diffusion guidance. Similar score range, with concerns about reliability of guidance in low-density regions. DIST's empirical results are more compelling but shares the concern about theory-practice gap.
+**Decision:** Reject (borderline — the paper has genuine contributions but the theory-practice gap and missing baseline are significant concerns that cannot be fully resolved in a rebuttal. The paper would be strengthened by restructuring the theoretical claims to match the actual algorithm and adding the missing baseline.)
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

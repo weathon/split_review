@@ -1,98 +1,83 @@
-Now I have all the information needed. Let me write the consolidated review.
-
----
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper presents a pilot study on active learning for continuous-conditional flow matching models in shape design. The authors propose a piecewise-linear neural network analysis framework to reason about how individual datapoints affect model diversity and accuracy, deriving two query strategies—\(Q_D\) for diversity and \(Q_A\) for accuracy—and a weighted hybrid. Experiments on a synthetic dataset and three shape-design tasks (airfoil, flying wing, starship) show that the proposed strategies outperform discriminative-model active learning baselines (coreset, committee, anchor) on their respective metrics.
+This paper studies active learning for flow matching models in shape design tasks with continuous condition labels. It proposes a theoretical framework based on piecewise-linear neural networks and closed-form flow matching to analyze how individual data points affect model diversity and accuracy. From this analysis, the paper derives two query strategies — Q_D (for diversity) and Q_A (for accuracy) — and a weighted hybrid. Experiments on synthetic, airfoil, flying wing, and starship datasets show that the proposed strategies outperform coreset, committee, and anchor baselines.
 
 ## Strengths
 
-- **Novel problem framing**: The paper targets active learning specifically for continuous-conditional generative models (flow matching) in shape design, a genuinely underexplored intersection. Most prior work uses generative models to aid discriminative active learning, not the reverse. This is a timely and practically motivated direction.
+- **Addresses an underexplored problem**: Active learning for generative models (specifically flow matching) with continuous conditions is a novel and practically relevant direction. The paper correctly identifies that most prior active learning work targets discriminative models, and most generative+active learning work uses generative models to aid discriminative tasks rather than improving the generative model itself.
 
-- **Empirical results demonstrate the strategies work**: Across four datasets, \(Q_D\) consistently achieves the highest diversity score and \(Q_A\) achieves the highest accuracy score among compared methods (Fig. 4). The visual results (Fig. 3, 5, 6, 8) corroborate that the strategies produce measurably different generation behavior aligned with their objectives.
+- **Conceptually appealing framework**: Separating diversity and accuracy as competing objectives and designing distinct query strategies for each is a clear and useful framing. The 1D analysis (Fig. 1) provides an intuitive illustration of how adding data with the same label increases combinatorial diversity, while adding data with different labels improves accuracy.
 
-- **Practical decoupling from model retraining**: The query strategies operate on dataset-level computations (RBF-based label prediction and distance measures) without requiring intermediate retraining of the flow matching model during query selection (Section 2.4). This is a genuine practical advantage for high-annotation-cost domains like numerical simulation.
+- **Concrete, implementable query strategies**: Q_D (Eq. 4), Q_A (Eq. 6), and Q_hybrid (Eq. 7) are clearly specified and operate directly on the dataset using only an RBF network for label prediction, avoiding repeated training of the flow matching model. This decoupling is practical for annotation-budget-constrained settings.
+
+- **Real-world evaluation on non-trivial datasets**: Experiments on airfoil, flying wing, and starship shape design tasks with numerical simulation labels demonstrate the approach on realistic problems where labeling is genuinely expensive.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **The theoretical framework rests on an unvalidated assumption.** The entire analysis (Eqs. 1–3, Lemmas 1–2, and the resulting query strategy motivations) assumes that a trained flow matching network behaves as a piecewise-linear interpolator between training samples (Eq. 2). The paper acknowledges this as a hypothesis ("we hypothesize that neural networks employed in flow matching also exhibit the property of piecewise-linear interpolation," Section 2.2), but then treats it as an established "generation law" (Eq. 3) from which all subsequent claims flow. No empirical evidence is provided that actual trained flow matching networks satisfy Eq. 2 to any reasonable approximation. The closed-form flow matching model (Eq. 1) is a dataset-dependent nonparametric construction, not a trained neural network, and conflating the two is a significant gap. The paper's central analytical contribution is therefore more akin to a modeling intuition than a validated theoretical framework. The empirical results demonstrate that the strategies work, but they do not validate the theory that motivated them.
+1. **The piecewise-linear interpolation assumption is unverified, undermining the theoretical foundation.** The paper states "we hypothesize that neural networks employed in flow matching also exhibit the property of piecewise-linear interpolation" (line 146) and "we assume the flow matching model's neural network is piecewise-linear" (line 75). The entire theoretical framework — Eq. 2 (interpolation of vector fields), Eq. 3 (generated samples as interpolations of data), Lemma 1, and Lemma 2 — rests on this assumption. However, the paper provides no empirical evidence that a trained flow matching model's output for a novel condition is approximately a linear combination of its outputs at nearby conditions. The condensation phenomenon cited as motivation (lines 142–146) is studied for simple MLPs, not for flow matching models. Without validation, the theoretical analysis is speculative, and the claimed "rigorous theoretical characterization" (line 101) is not supported.
 
-- **The connection between the theoretical analysis and the concrete query strategies is loose and heuristic.** The diversity analysis is developed only for a 1D label space (\(d=1\)) via a sample-counting argument (Fig. 1). The proposed \(Q_D\) (Eq. 4) uses three terms—label-distance, cluster-entropy change, and data-space distance—none of which are rigorously derived from the 1D counting analysis. The entropy term in particular has no clear link to the sample-counting argument. The accuracy strategy \(Q_A\) (Eq. 6) maximizes distance to existing labels, but the error bound (Eq. 5) motivates *minimizing* the maximum within-subregion distance; maximizing distance to existing labels does not necessarily achieve this and can add outliers. The hybrid strategy (Eq. 7) is a simple linear combination. These are reasonable heuristics motivated by theoretical intuition, but they are not principled derivations, and the paper overclaims the rigor of this connection.
+2. **Missing random sampling baseline.** The paper compares Q_D and Q_A against coreset, committee, and anchor methods but omits random sampling — the most basic active learning baseline. Without it, the reader cannot assess whether the proposed strategies offer meaningful improvement over trivial selection. The initial round is randomly initialized for all methods, but this does not constitute a random sampling baseline for subsequent rounds.
+
+3. **Q_D outperforming the full dataset in diversity is unexplained and suspicious.** The paper reports that "Q_D achieves the highest diversity, even outperforming the model trained on the full dataset" (lines 430–431). A subset should not normally achieve higher diversity than the full dataset on a well-defined metric unless the metric is biased (e.g., favoring outlier selection). The diversity metric is average pairwise Euclidean distance, which is sensitive to extreme points. The paper does not discuss this anomaly or rule out metric artifacts, which casts doubt on the diversity comparisons.
 
 ### Minor
 
-- **No comparison to simple non-AL baselines.** The paper compares against coreset, committee, and anchor methods—all active learning strategies designed for discriminative models. While showing superiority over these is informative for a pilot study, there is no comparison against trivial baselines such as uniform random sampling of the label space or stratified sampling by label clusters. Without these, it is unclear whether the active selection itself (as opposed to any non-random selection) drives the gains.
+1. **The connection between the 1D diversity analysis and the Q_D formula is incomplete.** The 1D analysis (Fig. 1) shows that adding data with the *same* label increases diversity. The Q_D formula (Eq. 4) includes three terms: −distance(y,Y) (encouraging similar labels — derived from the analysis), Δentropy (encouraging uniform label distribution across clusters — not directly derived), and distance(x,X) (a coreset term in data space — not derived from the analysis). The ablation study (Fig. 9) shows that distance(x,X) is the most important term, while the label-similarity term is not isolated. This suggests the diversity gain may come substantially from a standard coreset heuristic rather than from the paper's theoretical insight about label-consistent data.
 
-- **The diversity metric lacks semantic validation.** Diversity is measured by average pairwise Euclidean distance between generated samples (Eq. 8). In shape design, this metric can be inflated by physically implausible or degenerate shapes (e.g., very long, thin, broken geometries). The paper provides no evidence that higher scores under this metric correspond to *meaningful* diversity in the generated designs. A qualitative study or correlation with a task-specific coverage metric would substantially strengthen this claim.
+2. **The error bound (Lemma 2) does not clearly connect to the Q_A strategy.** The bound states that error in a subregion is proportional to the maximum distance between any two points in that subregion. The paper then proposes Q_A = arg max distance(y,Y) — selecting points with labels farthest from existing ones. The logic is that this splits large subregions, reducing their maximum distance. However, adding a far-away point also creates a new subregion that may itself have a large diameter. The paper does not explain why the net effect reduces the bound, nor does it estimate the Lipschitz constant K on which the bound depends.
 
-- **The ablation study is limited.** Section 3.3 ablates the relative importance of the three terms in \(Q_D\) on a single dataset, but there is no sensitivity analysis for the weighting coefficients \(\alpha, \beta, \gamma\), the clustering method, or the distance metrics used. Given that the strategy's performance depends on these hyperparameters, this is a gap.
+3. **Label prediction accuracy is not reported.** The paper uses RBF networks to predict labels for unlabeled data (lines 260, 299) but does not report the accuracy of these predictions. Errors in label prediction could misguide the query strategies, especially for Q_A which depends entirely on predicted labels.
 
 ### Trivial
-
-- The diversity score (Eq. 8) and accuracy score (Eq. 9) are formally defined only in Section 3.1, yet the problem definition in Section 2.1 references maximizing diversity/accuracy scores without defining them. Moving these definitions earlier would improve clarity.
-
-- Details of the RBF neural network training for label prediction—architecture, training procedure, and how prediction errors propagate to query selection—are not provided. While not central to the core contribution, this affects reproducibility.
+- Some mathematical notation in the appendix (e.g., "nm...ol") appears garbled — these are formatting artifacts from PDF extraction, not author errors.
+- Figure captions could be more self-contained.
 
 ## Nice-to-Haves
-
-- A comparison against uniform or stratified random sampling of the label space would help isolate the benefit of the active selection strategy itself.
-- Visualization of what high-diversity vs. low-diversity generated samples look like under the Euclidean distance metric would help readers interpret the diversity results.
-- An empirical sanity check—e.g., measuring whether a trained flow matching network actually exhibits approximately piecewise-linear interpolation behavior on a simple test case—would either validate or appropriately caveat the theoretical framework.
+- Compare against a simple coreset in data space only (i.e., using only the distance(x,X) term) to isolate the contribution of the label-based terms in Q_D.
+- Test on a dataset with human annotation costs (e.g., medical imaging) to better align with the stated motivation.
+- Visualize the label-space partitioning or provide empirical evidence of the interpolation behavior of the trained flow matching model.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **"The theoretical framework is built on unjustified assumptions that invalidate the derived insights"** — Removed as a *fatal* claim and downgraded to *major*. The paper explicitly states the piecewise-linear interpolation as a hypothesis. The empirical results stand independently of whether the theory is fully validated. The assumption is a significant weakness but does not "invalidate" the entire contribution.
-
-- **"Q_D outperforming full dataset training is suspicious"** — Removed. It is entirely plausible that a well-chosen subset via \(Q_D\) yields higher diversity than the full dataset if the full dataset contains redundant conditions that concentrate the model's output distribution. This is not inherently suspicious.
-
-- **"The abstract overclaims by stating the analysis elucidates how data influence diversity/accuracy when the analysis is based on an unvalidated surrogate model"** — Partially removed. The abstract does overstate the rigor, but this is already captured by the major weakness about the theoretical assumption. Not a separate point.
-
-- **"Notation is sometimes sloppy (e.g., Δ_entropy not defined mathematically)"** — Removed. The paper does define Δ_entropy in prose (lines 240-243, 261-266) as classification entropy over label clusters with a distance threshold. The presentation could be crisper but is not incorrect; this is a parser-level nitpick.
-
-- **Criticism of baselines as being "designed for discriminative models" and "unsurprising to outperform"** — Partially kept as a minor point about missing simple baselines (random/stratified). The fact that the baselines are from discriminative AL is inherent to the paper's framing as a pilot study; comparing against established AL methods is a reasonable starting point. The absence of trivial baselines is the actual gap.
-
-- **"The generalization from 1D to higher dimensions is not addressed"** — Merged into the major weakness about loose theory-strategy connection; not a separate independent flaw.
-
-- **Strength Finder: "Theoretically grounded query strategy design via piecewise-linear flow matching analysis"** — Removed. As discussed in the major weakness, the theoretical grounding is assumption-dependent and the theory-strategy connection is loose. This claimed strength conflicts with verified weaknesses.
-
-- **Human Finder: missing related works** — Removed per the hard rule: do not mention missing related works without external confirmation.
+- **Criticism about "nm...ol" being a parsing artifact**: This is a PDF extraction artifact, not an author error. Per hard rules, formatting/parsing artifacts are removed.
+- **Criticism about missing appendix content**: The parser strips appendix sections from all papers; they exist in the original submission.
+- **Criticism that the anchor method comparison is unfair**: The paper compares against anchor as a baseline; this is a valid experimental choice even if the anchor method has known limitations.
+- **Criticism about not connecting to medical imaging specifically**: The paper discusses both medical imaging and numerical simulation as motivating domains (lines 43–48) and explicitly connects to numerical simulation costs in the shape design experiments.
+- **Criticism about GALISP already addressing active learning for generative models**: The paper discusses GALISP and differentiates its own setting (continuous labels across the entire condition space vs. semi-open querying on specific labels). The claimed novelty is not overstated relative to the cited prior work.
 
 ## Novel Insights
-
-The paper's observation that, from a dataset-composition perspective, label-identical data promote diversity while label-diverse data promote accuracy is an interesting reframing of the diversity-accuracy trade-off. While the theoretical derivation of this insight is assumption-dependent, the *conceptual framing* itself—thinking of diversity and accuracy as competing objectives arising from different types of data rather than from model architecture or training—is a useful lens for designing data-centric strategies for generative models. Whether this insight holds beyond the piecewise-linear model is an open question the paper does not answer, but it is a genuinely thought-provoking direction.
+None beyond the paper's own contributions. The reviews surface a tension that the paper does not resolve: the theoretical framework (piecewise-linear interpolation) is elegant but unvalidated, while the empirical success of Q_D appears to be driven substantially by a standard coreset term (distance in data space) rather than by the label-based terms derived from the theory. This gap between the claimed mechanism and the actual driver of performance is the most interesting unresolved issue in the paper.
 
 ## Suggestions
-
-- Either (a) provide empirical evidence that trained flow matching networks approximately satisfy the piecewise-linear interpolation assumption on these shape-design tasks, or (b) reframe the theoretical analysis as a simplified surrogate model that motivates (rather than derives) the query strategies. The current presentation overclaims the rigor.
-- Add at least one trivial baseline (uniform random sampling from the unlabeled pool) to establish that the active selection itself provides benefit beyond any non-random selection.
-- Include a small qualitative study showing what "high diversity" vs. "low diversity" generated shapes look like under the Euclidean distance metric, to help readers interpret the diversity results.
-- Report sensitivity to the weighting coefficients \(\alpha, \beta, \gamma\) in \(Q_D\), as these materially affect strategy behavior.
+1. Add a random sampling baseline to all experiments. This is essential for any active learning paper.
+2. Provide empirical evidence for the piecewise-linear interpolation assumption — e.g., by checking whether the trained model's output for interpolated conditions is approximately a convex combination of outputs at nearby training conditions.
+3. Explain why Q_D outperforms the full dataset in diversity, or adjust the diversity metric to avoid potential bias toward outliers.
+4. Report the accuracy of the RBF label predictions and discuss how prediction errors affect the query strategies.
+5. Clarify the logical connection between Lemma 2 and Q_A: show formally that adding a point with a label far from existing ones reduces the maximum subregion diameter.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors** (all from the human review corpus):
 
-| Anchor Paper | Avg Score | Comparison to Paper Under Review |
-|---|---|---|
-| ActiveCQ (CWpQsAubxy) | 6.50 | Substantially stronger: rigorous theoretical framework (GP+CME with posterior uncertainty), comprehensive experiments. Our paper's theory is far less rigorous and the experiments have notable gaps. |
-| DAK-UCB (nnN2TKlS5C) | 5.00 | Stronger: clearer theoretical grounding (contextual bandits with regret bounds), more comprehensive experimental ablation. Our paper has a more novel problem setting but weaker theory. |
-| GenBO (GBWkRRJrdu) | 5.00 | Stronger: novel methodology with convergence analysis, stronger theoretical contribution. Our paper shares the "heuristic motivated by theory" pattern but with weaker theoretical support. |
-| Cost-Optimal (3MqOBXtCxx) | 5.50 | Stronger: rigorous theoretical framework for cost-aware evaluation. Our paper's theory is less developed. |
-| DW-MALA (hYgoHKCscN) | 4.00 | Comparable: interesting idea, some theory, decent experiments with gaps. Our paper is slightly weaker on theoretical rigor and experimental comprehensiveness (missing trivial baselines, metric validation). |
-| Flow Matching on Unordered Sets (jL5XhAS9pf) | 4.00 | Comparable: novel direction, decent experiments, but methodological gaps. Our paper shares similar profile—novel direction with theoretical and experimental gaps. |
-| When Uncertainty... (imb1oWYpa8) | 2.50 | Our paper is clearly stronger: it has a genuine novel problem framing, working strategies, and does not present existing work as its own contribution. |
-| Role of AL (vRSTsFsl0k) | 2.00 | Our paper is clearly stronger: it proposes a novel method with empirical validation, not just an empirical comparison study. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/vRSTsFsl0k.md` | 2.00 | "Role of AL" — mostly empirical comparison without novel contribution. This paper is clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/rPmvzlHDHQ.md` | 4.00 | Deep AL with MPTS — similar quality level, both have theoretical gaps and missing baselines. |
+| `/home/wg25r/review_agent/human_reviews_2026/hYgoHKCscN.md` | 4.00 | DW-MALA active learning — similar quality, both propose novel AL methods with incomplete evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/E3JmvqoMGO.md` | 4.00 | Flow matching pathology paper — similar quality, both have theoretical assumptions that are not fully validated. |
+| `/home/wg25r/review_agent/human_reviews_2026/GBWkRRJrdu.md` | 5.00 | Generative BO — stronger execution with clearer theoretical grounding. This paper is weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/NOkjJPJIit.md` | 5.50 | Decision tree AL with provable guarantees — rigorous theory. This paper is substantially weaker on theory. |
+| `/home/wg25r/review_agent/human_reviews_2026/oBXfPyi47m.md` | 8.00 | RL with world models — strong execution and clear results. This paper is much weaker. |
 
-The paper occupies a position slightly below the 4.0 anchors. The theoretical framework—while motivating interesting strategies—is too assumption-dependent to be a strong contribution on its own, and the experimental validation has several gaps (no trivial baselines, unvalidated diversity metric, limited ablation). However, the novelty of the problem setting, the practical decoupling of query selection from model retraining, and the consistent empirical results across four datasets represent a genuine contribution. The paper reads as a promising pilot study that needs a more honest framing of its theoretical contribution and more thorough experimental validation.
+The paper has a novel problem framing and interesting ideas, but the theoretical foundation rests on an unverified assumption, the derivation from theory to strategies is incomplete, and the experimental evaluation has significant gaps (missing random baseline, unexplained diversity gain over full dataset). These weaknesses are substantial enough that the paper would need major revision. Relative to the calibration anchors, the paper sits at the same quality level as the 4.0-scored papers — interesting ideas with significant but not fatal flaws.
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

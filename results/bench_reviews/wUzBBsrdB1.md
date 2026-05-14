@@ -1,100 +1,90 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me construct the final review.
-
----
+Now I have a solid understanding of the calibration landscape. Let me write the consolidated review.
 
 ## Summary
 
-This paper demonstrates that the L0 sparsity hyperparameter in sparse autoencoders (SAEs) is not a neutral design choice: setting L0 too low causes the SAE to mix correlated features into individual latents, destroying monosemanticity. Through toy model experiments with ground-truth features, the authors show that at low L0, MSE loss actively incentivizes feature mixing (proven formally in Theorem 1), and that sparsity–reconstruction tradeoff plots can be misleading because a mixed-feature SAE can achieve better reconstruction than a perfectly disentangled one. The paper proposes decoder pairwise cosine similarity ($c_\text{dec}$) as a proxy metric whose "elbow" (sharp rise at low L0) signals when L0 is too low, validates this against $k$-sparse probing on Gemma-2-2b and Llama-3.2-1b SAEs, and surveys public SAEs on Neuronpedia to argue that most existing SAEs likely use L0 below the optimal range.
+This paper studies the effect of L0 (average number of active latents per token) on Sparse Autoencoder (SAE) feature quality. Through toy model experiments, it demonstrates that setting L0 too low causes the SAE to mix correlated features to improve reconstruction MSE at the expense of feature monosemanticity — the MSE loss actively incentivizes incorrect, polysemantic latents. The paper proposes a diagnostic metric, decoder pairwise cosine similarity (c_dec), and shows that its "elbow" aligns with peak sparse probing performance on Gemma-2-2b and Llama-3.2-1b. The central message — that L0 is not a neutral hyperparameter and that too-low L0 is harmful — is important and underappreciated.
 
 ## Strengths
 
-- **Convincing toy model demonstration that incorrect L0 ruins feature disentanglement.** The controlled experiments in Sections 3.1–3.2 (Figures 1–3) show clearly that when L0 is too low, SAE decoder latents absorb correlated features (both positively and negatively correlated), and that when L0 is too high, degenerate solutions also mix features. The finding that *every latent* is affected when L0 is too low (Section 3.2) is a striking and important observation.
+- **Clean toy-model demonstration of feature mixing under low L0**: Using a synthetic setup with known ground-truth features (Section 3.1-3.2), the paper directly shows that when SAE L0 is set below true L0, decoder latents mix correlated features together. The comparison between a ground-truth SAE and a trained SAE at identical L0 (Figure 4) is particularly striking: the trained SAE achieves MSE 2.73 while the ground-truth SAE gets 4.88, proving that the training objective actively pushes away from the correct solution.
 
-- **Formal proof that MSE loss incentivizes feature mixing (Theorem 1, Appendix A.5).** The two-feature analysis provides theoretical grounding for why a capacity-constrained SAE will mix rather than disentangle. This is a clean theoretical result that supports the empirical findings.
+- **Theoretical proof that low L0 incentivizes feature mixing**: Theorem 1 (Appendix A.5) provides a formal mathematical argument for a two-feature, two-latent toy model: when features co-occur with probability >0 and the SAE can fire at most one latent, the MSE-minimizing solution mixes the features rather than separating them. This gives rigorous grounding to the empirical observations.
 
-- **Invalidation of the sparsity–reconstruction tradeoff as an evaluation paradigm.** Section 3.4 (Figure 4) demonstrates that a ground-truth SAE achieves *worse* reconstruction than a trained SAE that mixes features. This is a crisp counterexample to the widespread practice of comparing SAE architectures purely via reconstruction fidelity at fixed L0. The point is well-made within the stated scope.
+- **Exposing the fallibility of sparsity-reconstruction tradeoff plots**: Figure 4 shows that at L0 values below true L0, a trained (incorrect) SAE achieves higher variance explained than the ground-truth SAE — meaning a standard tradeoff plot would rank the incorrect SAE as better. This is a clear, actionable warning for practitioners.
 
-- **Decoder pairwise cosine similarity ($c_\text{dec}$) as a practical diagnostic for detecting too-low L0.** The metric is simple, computationally cheap, and theoretically motivated (Theorem 2, Appendix A.6). In both toy models (Figure 6) and LLM SAEs (Figures 8–9), the sharp rise in $c_\text{dec}$ at low L0 reliably coincides with degraded $k$-sparse probing performance. The paper is honest about the metric's limitations in the Discussion (Section 6).
+- **Validation of c_dec on both toy models and LLMs with sparse probing**: The decoder pairwise cosine similarity metric is minimized at the correct L0 in toy models (Figure 6), and its "elbow" roughly coincides with peak sparse probing F1 scores on Gemma-2-2b and Llama-3.2-1b (Figure 8). The paper includes both BatchTopK and JumpReLU SAEs and multiple layers, lending generality.
 
-- **Meaningful architectural comparison between BatchTopK and JumpReLU SAEs.** Section 4.1 and Appendix A.16 show that JumpReLU SAEs handle high L0 better than BatchTopK, likely due to per-latent threshold adaptation. The decoder projection histogram analysis (Section 4.2, Figure 9) revealing that some latents can become *more* monosemantic while others degrade at intermediate L0 is a nuanced and insightful observation.
+- **Evidence that many open-source SAEs use surprisingly low L0**: Appendix A.13 surveys Neuronpedia SAEs, finding median L0 for Gemma-2-2b around 56-61, while the paper's experiments suggest the optimal L0 for this model is ~200-250. This gives the work practical urgency.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **The $c_\text{dec}$ metric does not produce a unique, reliably located minimum in all tested configurations.** For Gemma-2-2b layer 5 (Figure 8, left), the global minimum of $c_\text{dec}$ occurs at L0=2000 while peak sparse probing is near L0=200. For Gemma-2-2b layer 12 (Figure 9), BatchTopK shows a broad, shallow region with a global minimum near 200 and a secondary decline. For Llama-3.2-1b (Figure 8, right), the minimum is clearer. The paper's practical guidance thus relies on an "elbow" heuristic (the point just before $c_\text{dec}$ spikes at low L0) rather than a global minimum. The paper itself acknowledges this candidly in Section 6: "we do not view this as a perfect guide... the metric can sometimes remain nearly flat for a wide range of L0." However, the abstract's phrasing ("we present a proxy metric that can help guide the search for the correct L0... We show that our method finds the correct L0") implies more precision than the method actually delivers. The elbow is currently an empirically observed pattern, not a formalized detection procedure. This limits the standalone prescriptive power of the method in the high-L0 regime, though the metric remains reliable for flagging L0 values that are *clearly too low*.
+- **The c_dec metric does not reliably identify a unique correct L0 in real models, limiting its practical utility as a selection method.** For Gemma-2-2b layer 5 (Figure 8, left), c_dec has a long flat region from L0 ~200 to ~1750 with no clear minimum — the global minimum lies far from the "elbow" that the authors later identify as corresponding to peak probing performance. The paper resorts to identifying the "elbow just before the jump due to low L0" as the signal, but this elbow is defined post-hoc after seeing the probing results. Without a principled, quantifiable rule for detecting the elbow automatically, c_dec functions primarily as a qualitative diagnostic ("avoid very low L0") rather than a precise method for L0 selection. The paper acknowledges this limitation (Section 6: "the metric can sometimes remain nearly flat"), but this substantially weakens the claimed contribution that the metric "can help guide the search for the correct L0."
 
-- **The claim that "most commonly used SAEs have an L0 that is too low" rests on limited layer/model coverage.** The LLM experiments in Section 4 cover three layers across two small models (Gemma-2-2b layers 5 and 12, Llama-3.2-1b layer 7). The Neuronpedia survey in Appendix A.13 aggregates SAEs across many model sizes and architectures without controlling for these variables. While the paper acknowledges this limitation in Appendix A.14 ("we only investigated a few layers... as running sweeps at every layer was too prohibitively expensive"), the abstract and discussion still frame the conclusion as a general statement. The optimal L0 likely varies with model architecture, layer depth, and SAE width, and the current evidence does not fully rule out the possibility that some SAE configurations with L0 < 100 are appropriately tuned for their specific setting.
+- **The claim that "most commonly used SAEs have an L0 that is too low" is broader than the evidence supports.** The paper's own experiments determine optimal L0 (~200-250) for Gemma-2-2b and Llama-3.2-1b with 32k-latent SAEs. The Neuronpedia survey (Appendix A.13) aggregates SAEs across many model families (gemma-2b, gpt2-small, Llama-3.1-8B, gemma-2-9b) with varying dictionary widths, some as small as 8k or 16k latents. Optimal L0 likely scales with model size, hidden dimension, layer depth, and dictionary width. The paper provides no argument that L0 should be comparable across these settings. The evidence supports a narrower claim: "for 32k-latent SAEs on Gemma-2-2b and Llama-3.2-1b, many existing SAEs use an L0 that appears lower than optimal."
+
+- **The critique of sparsity-reconstruction tradeoff plots is overclaimed.** The paper argues these plots are "not a sound method of evaluating SAEs" (Section 1, Section 3.4). The toy experiment only varies L0 for a fixed architecture, showing that at low L0 a ground-truth SAE looks worse than a mixed-feature SAE. But in practice, the primary use of these plots is to compare *different SAE architectures* (e.g., TopK vs JumpReLU) at fixed sparsity levels — not to select the optimal L0 for a single architecture. The paper conflates two different uses of these plots. The core insight (reconstruction alone is insufficient) is valid, but the blanket dismissal of tradeoff plots as "misleading" goes beyond what the evidence supports.
 
 ### Minor
 
-- **Reliance on $k$-sparse probing as validation without discussion of its limitations as a proxy for feature quality.** The paper treats peak $k$-sparse probing F1 as evidence of "correct" features. While sparse probing is a standard and reasonable downstream evaluation, the paper could benefit from a brief discussion of what sparse probing does and does not validate — in particular, whether a collection of mixed latents could still support good $k$-sparse classification. This does not undermine the core contribution but would strengthen the methodological framing.
+- **Theorem 2 assumes orthonormal underlying features and a perfectly disentangled SAE 1, which is idealized.** In real LLMs with superposition, true features are not orthogonal even in the ground truth (cosine similarities are non-zero, as shown in Figure 15 left). The paper's Remark 1 acknowledges this and argues that the systematic mixing component dominates random superposition noise. The superposition toy model (Appendix A.4.1) confirms c_dec still works, but the paper does not analyze *how much* the baseline c_dec of a "correct" SAE would be elevated due to non-orthogonal true features — making it unclear how to distinguish mixing-induced non-orthogonality from unavoidable superposition noise.
 
-- **The toy model setup assumes orthogonal ground-truth features with uniform firing properties.** This is a reasonable simplification that follows the Linear Representation Hypothesis, but real LLM features may exhibit non-orthogonality, varying firing probabilities, and hierarchical structure. The paper acknowledges this scope limitation in Appendix A.14. The core phenomenon (mixing under capacity constraints) is convincingly demonstrated within this scope, but the gap between the toy model and real LLM feature geometry warrants acknowledgment in the main text, not only the appendix.
+- **The toy model experiments use h=g (equal number of latents and true features), which is unrealistic.** Real SAEs are massively overcomplete (e.g., h=32k for d=2048). The paper does not test whether the feature mixing effect persists when h >> g (the overcomplete case). The superposition toy model (Appendix A.3.3) uses only 5 features with small overlap, not the overcomplete regime.
+
+- **Only k=16 sparse probing results are shown in the main text.** k=1 results are relegated to Appendix A.12 (Figure 21). The robustness of the alignment between c_dec and probing across different k values is not well established in the main body.
+
+- **The relationship to feature hedging (Chanin et al., 2025) is noted but not clearly differentiated.** The cited work focuses on dictionary width as the cause of hedging, while the current paper focuses on L0. The paper states "We consider our work a version of feature hedging due to low L0" but does not explain how the mechanism differs or whether both width and L0 interact.
 
 ### Trivial
-
-- The abstract's phrasing of the c_dec claim is notably more confident than the Discussion's careful hedging. Aligning these would improve consistency.
-- The term "correct L0" used throughout could be refined to "well-calibrated L0" or "L0 that avoids feature mixing," since there may not be a single ground-truth L0 for a real LLM.
+- The Pytorch pseudocode in Appendix A.17 defines `index = n * dec_proj.shape[0]` in Figure 29 but the variable name `dec_proj` is a typo (should be consistent with variable naming).
+- Some figure captions contain parser artifacts (e.g., table formatting in Figure 9, 20, 22) that would need cleanup in camera-ready.
 
 ## Nice-to-Haves
-
-- A formalized elbow-detection procedure (e.g., a slope-change test or curvature criterion) would strengthen the method's reproducibility and reduce reliance on visual inspection.
-- Additional LLM layers (or at least one larger model) would strengthen the generalization claim about most SAEs having too-low L0.
-- Qualitative examples showing top-activating dataset tokens for specific latents at low vs. optimal L0 would make the feature-mixing phenomenon more tangible to practitioners.
+- A systematic comparison with existing diagnostics for feature quality (dead latent fraction, feature absorption indices from Chanin et al., 2024, or MDL-based heuristics from Ayonrinde et al., 2024) would help contextualize whether c_dec adds value beyond simpler heuristics.
+- Qualitative inspection of SAE latents at different L0s (e.g., showing that a latent tracking "Harry Potter" at L0=200 also activates on unrelated tokens at L0=50) would make the feature mixing claim concrete for practitioners.
+- Validation on additional models (e.g., Gemma-2-9b or a larger Llama model) would strengthen claims about generality.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **Harsh Critic Point about c_dec being "not formalized and lacking theoretical justification"**: The paper includes Theorem 2 in Appendix A.6 which provides exactly this theoretical justification, showing that feature mixing increases expected pairwise cosine similarity between decoder latents. The critic's claim that "Theorem 2 only shows that mixing increases c_dec, not that its minimum coincides with a unique ground-truth sparsity" is partially true — Theorem 2 does not prove a unique minimum — but this is more a limitation of the theory's scope than an absence of theory. The paper is honest about this.
-
-- **Harsh Critic Point that "sparsity–reconstruction tradeoff plots are not a sound method" is only partially justified because the ground-truth SAE is not trainable**: The paper's argument is precisely that a *fixed correct dictionary* scores worse than a learned incorrect one. This is a valid demonstration that reconstruction alone cannot distinguish correct from incorrect features. The critic demands the paper prove something about comparisons between two learned SAEs, but the paper's claim is about the evaluation paradigm itself — that reconstruction is not a reliable proxy for correctness. The toy model setup is appropriate for demonstrating this logical point.
-
-- **Strength Finder's "Extension to JumpReLU SAEs and evidence of natural threshold adaptation"**: This is a real observation but is somewhat thin — it's essentially a single figure (Figure 7) in the toy model setting. Kept as a supporting strength but would benefit from more systematic investigation.
-
-- **Harsh Critic demand for "alternative interpretability validations beyond k-sparse probing"**: This is scope creep. The paper uses sparse probing as a downstream validation benchmark, which is standard practice in the field. Demanding expert inspection or automated interpretability scores is a nice-to-have, not a weakness.
+These points are flagged to be removed, treat them with caution:
+- **Criticism about "normalization not stated for c_dec in LLM experiments"**: The paper explicitly states in Appendix A.7 that "the decoder remains normalized" for BatchTopK SAEs, and the PyTorch code in Figure 28 normalizes the decoder before computing c_dec. This is a reviewer misreading.
+- **Criticism about "tying assumption of toy model"**: The paper's Theorem 1 (Appendix A.5) explicitly uses a tied encoder for theoretical tractability. The main toy experiments (Section 3.1-3.2) use standard BatchTopK SAEs which do not require tied weights. The critic's demand to test untied encoders is about the theorem, not the core experiments.
+- **Criticism about "missing confidence intervals on benchmarks"**: Single-run evaluation on large-scale SAE benchmarks is the norm in this field. The paper provides 3 seeds per L0 point (Figure 8) and 5 seeds for toy models (Figure 6), which is standard.
+- **Several generic weaknesses from the harsh critic** about missing larger models, missing qualitative case studies, and suggestions for automatic L0 selection — these are nice-to-haves, not core weaknesses.
 
 ## Novel Insights
 
-The most genuinely novel insight emerging from this work is the observation that decoder projection histograms (Section 4.2) reveal *simultaneous* "too high" and "too low" regimes within a single SAE at intermediate L0 values — some latents appear to become cleaner while others degrade. This suggests that the "correct" L0 is not a single global optimum for all features but a compromise point, and it partially explains why JumpReLU SAEs (with per-latent thresholds) outperform BatchTopK at high L0. This nuance is underexplored but has significant implications for SAE architecture design.
+The most interesting observation beyond the paper's own contributions is the asymmetry between JumpReLU and BatchTopK SAEs at high L0 (Section 4.1, Figure 9, Appendix A.16). BatchTopK SAEs develop a "dual distribution" phenomenon at high L0 (narrow peak + hump in decoder projection histograms), suggesting some latents have too-high L0 while others have too-low L0 simultaneously. JumpReLU SAEs, by contrast, handle high L0 much better because their per-latent thresholds can adjust adaptively. This suggests that the very notion of a single "correct L0" may be an oversimplification — different latents may have different optimal firing rates, and architectures with per-latent thresholds (JumpReLU) have a meaningful advantage. The paper's toy model transition experiment (Appendix A.8), showing that starting with too-low L0 permanently damages the SAE even if L0 is later corrected, is also a practically important insight: low L0 is not just suboptimal but can create irretrievable local minima.
 
 ## Suggestions
 
-- **Temper the abstract and introduction claims about c_dec.** Replace language like "our method finds the correct L0" with more precise framing: "c_dec can reliably detect when L0 is too low, and in practice its elbow coincides with peak sparse probing performance."
-- **Add a brief discussion of sparse probing limitations** in Section 4, clarifying what sparse probing validates versus what additional evaluations (e.g., automated interpretability) might confirm.
-- **Move the limitations discussion** about layer coverage from Appendix A.14 into the main text (Section 6 or Section 4), so readers encounter the caveat alongside the "most SAEs" claim rather than buried in supplementary material.
-- **Consider a simple heuristic for elbow detection** (e.g., the L0 at which the derivative of c_dec exceeds some threshold) to reduce reliance on visual inspection. Even an imperfect automated heuristic would improve reproducibility.
+1. **Tone down the scope of the headline claims.** Replace "most commonly used SAEs have an L0 that is too low" with a more measured claim specific to the models and widths tested. Similarly, reframe the sparsity-reconstruction tradeoff critique as "reconstruction alone is insufficient, especially at low L0" rather than "these plots are not sound."
 
----
+2. **Acknowledge the ambiguity of c_dec more prominently.** The paper currently hedges (Section 6) but the abstract and introduction present c_dec as a method that "finds the correct L0" — this should be softened to reflect that c_dec is a useful diagnostic for detecting pathologically low L0, not a precise L0 selector.
 
-**Evaluation axes:**
+3. **Test the overcomplete toy model setting** (h >> g) to verify that the feature mixing mechanism still operates when the SAE has ample dictionary capacity. This is a direct and feasible experiment that would address an obvious concern.
 
-- **Originality**: The paper makes a genuine contribution by identifying L0 as a critical hyperparameter that determines feature quality, not just a sparsity knob. The demonstration that reconstruction tradeoff plots can be misleading is an original and important caution.
-- **Importance of research question**: Setting L0 correctly is directly important to anyone training or using SAEs. The findings have immediate practical implications.
-- **Support for claims**: The core claim (too-low L0 causes feature mixing) is well-supported by toy models, theory, and LLM validation. The overgeneralization about "most SAEs" is less well-supported but acknowledged as a limitation.
-- **Soundness of experiments**: Toy model experiments are clean and well-controlled. LLM experiments are appropriate but limited in scope (3 layers, 2 small models).
-- **Clarity**: Generally well-written with clear figures. The abstract overclaims relative to what the Discussion honestly acknowledges, which creates some tension in framing.
-- **Value to community**: High. The paper provides both a conceptual warning (L0 is not neutral) and a practical tool (c_dec) that SAE practitioners can immediately use.
+4. **Provide a simple heuristic for detecting the "elbow"** without downstream labels — for instance, detecting where the derivative of c_dec w.r.t. L0 exceeds a threshold, or using the L0 at which c_dec reaches some fraction of its maximum value. Even a heuristic with known failure modes would be more actionable than visual inspection.
 
----
+5. **Move the k=1 sparse probing results to the main text** to show that the alignment between c_dec and probing generalizes across k values.
 
-**Anchor comparisons:**
+## Score and Decision
 
-| Path | Avg Human Score | Comparison |
-|------|----------------|------------|
-| Feature Hedging (`7lzq9mMVxq.md`) | 3.50 | This paper is clearly stronger: it has formal proofs (Theorem 1), a concrete diagnostic metric validated on LLMs, and cleaner toy model experiments. Feature Hedging was criticized for lacking formal definitions; this paper addresses that gap. |
-| Measuring SAE Feature Sensitivity (`119qowYLUX.md`) | 3.50 | This paper has broader significance and stronger theoretical grounding. The sensitivity paper introduces a useful metric but with narrower practical implications. |
-| SAE Bimodality (`soMC0uESuz.md`) | 5.00 | This paper is stronger: more theoretical depth, better toy model experiments, and LLM validation against sparse probing. Bimodality was criticized for weak baselines; this paper's comparisons are more rigorous. |
-| Price of Amortized Inference (`33wY6AI13k.md`) | 5.00 | Comparable quality. Both identify fundamental SAE limitations. This paper has cleaner toy model evidence and a more immediately usable practical metric; the amortized inference paper has broader experimental scope across architectures. |
-| SAEs Trained on Same Data (`EjInprGpk9.md`) | 5.50 | Comparable quality. The seed-sensitivity paper has more comprehensive experiments across models/settings; this paper has more theoretical depth and a practical prescriptive tool rather than purely descriptive findings. |
-| On the Limits of SAEs (`DSOTgzeH3w.md`) | 6.00 | Slightly weaker. The Limits paper provides a more complete and polished theoretical framework with closed-form solutions and a principled remedy (WSAE). This paper's theory is more modest and its practical metric less precise, but its empirical findings are comparably significant. |
+### Calibration Anchors
 
-The paper under review is clearly above the 3.5–4.0 range (Feature Hedging, Feature Sensitivity, 3D SAE) and sits in the 5.0–6.0 band alongside comparable SAE analysis papers. The theoretical contributions and toy model clarity place it near the upper end of that band, but the overclaiming in framing and limited LLM coverage prevent it from reaching the 6.0+ tier.
+| Anchor Paper | Avg Score | Comparison |
+|---|---|---|
+| Feature Hedging: Correlated Features Break Narrow SAEs (7lzq9mMVxq) | 3.50 / Reject | Directly related; rejected for weak theory and unclear metrics. The current paper is substantially stronger — it has formal proofs, cleaner toy experiments, and validation via sparse probing. |
+| SAEs Trained on Same Data Learn Different Features (EjInprGpk9) | 5.50 / Accept | Comparable rigor; the current paper has narrower scope but deeper analysis of a single hyperparameter. Both are empirical contributions to understanding SAE limitations. |
+| On the Limits of SAEs: A Theoretical Framework (DSOTgzeH3w) | 6.00 / Accept | Stronger theory (closed-form solutions); comparable empirical validation. The current paper has better toy-model ground-truth experiments but weaker theory. |
+| The Price of Amortized Inference in SAEs (33wY6AI13k) | 5.00 / Accept | Broader analysis of SAE pathologies. The current paper is more focused on a single, underappreciated issue (L0). |
+| Bimodality of SAE Features (soMC0uESuz) | 5.00 / Reject | Similar structure (identify problem, propose fix). The current paper's toy experiments are cleaner and its theoretical backing is stronger. |
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+The paper identifies a genuine, underappreciated problem and provides clean demonstrations. The core weaknesses are (1) the c_dec metric is more of a qualitative diagnostic than a reliable L0 selection method, (2) the headline claims about "most SAEs" are overbroad, and (3) the sparsity-reconstruction critique conflates two different uses of those plots. These are addressable with revisions. Relative to the anchors, this paper sits between the rejected Feature Hedging paper (3.5) and the accepted SAE-limitations papers (5.0-6.0) — stronger than the former due to theory and validation, but with overclaiming that pulls it below the latter.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

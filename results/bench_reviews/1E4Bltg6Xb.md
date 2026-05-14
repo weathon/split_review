@@ -1,107 +1,99 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me write my consolidated review.
-
----
+Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes the Dynamics Feature Representation (DFR) framework for RL-based dynamic path planning (DPP) in urban road networks. DFR compresses high-dimensional global traffic dynamics into compact, decision-relevant features through a two-stage hierarchical refinement: (1) a policy attention mechanism extracts a task-relevant subgraph using distance-based shortest paths, and (2) n-hop neighborhoods further localize features around the agent's current position. Experiments on three real-world road networks (Nanjing, Chaoyang, Pudong) across three RL algorithms (DQN, PPO, GCN+DQN) show that DFR improves solution quality metrics (GAP, SR) while dramatically reducing input dimensionality, yielding planning-time reductions of up to 85%.
+This paper proposes a Dynamics Feature Representation (DFR) framework for RL-based dynamic path planning in urban road networks. DFR uses a two-stage hierarchical refinement: first, a pre-trained policy attention mechanism extracts a task-relevant subgraph based on the top-k static shortest paths between source and destination; second, an n-hop neighborhood method further decouples this into node-centric local features. Experiments on three real-world road networks (Nanjing, Beijing Chaoyang, Shanghai Pudong) with three RL algorithms (DQN, PPO, GCN+DQN) show that DFR consistently improves success rate and mean GAP while reducing feature dimensionality by over 94% and planning time by up to 85%.
 
 ## Strengths
 
-- **Well-motivated problem with clear framing.** The paper articulates a genuine dilemma in RL-based DPP: global dynamics are complete but computationally prohibitive, while local dynamics are efficient but risk missing critical information. The "sufficient yet compact" framing is crisp and well-justified (Section 4.1).
+- **Consistent empirical gains across multiple RL algorithms and real-world road networks.** DFR improves Mean GAP, Success Rate, and planning time for all three tested algorithms (DQN, PPO, GCN+DQN) on three distinct city graphs from OpenStreetMap. Figure 5 shows DFR-enhanced models consistently yield larger triangle areas (joint metric) than their All-Dynamics counterparts. Planning time reductions are substantial: 85.59% (DQN), 46.08% (GCN+DQN), and 79.32% (PPO). This breadth supports the claim that DFR is a general framework rather than an algorithm-specific trick.
 
-- **Consistent empirical results across diverse settings.** The paper evaluates on three real OpenStreetMap urban networks and three RL algorithms (DQN, PPO, GCN+DQN), showing DFR consistently improves mean GAP, success rate, and compactness relative to the All-Dynamics baseline (Figure 5). This cross-domain consistency reduces concern that results are environment- or algorithm-specific.
+- **The hierarchical refinement pipeline is clean and well-motivated.** The two-stage design (task-level filtering via policy attention, then agent-centric decoupling via n-hop neighborhoods) follows natural intuition — first identify which roads are topologically plausible given the origin and destination, then focus on the agent's immediate vicinity within that set. The ablation study (Section 5.3) systematically validates sensitivity to both parameters (k and n), showing that DFR configurations consistently outperform the no-DFR baseline across nearly all settings.
 
-- **Systematic ablation provides actionable insights.** Section 5.3 varies the policy attention fraction \(k\) and hop radius \(n\) across a grid, revealing that moderate \(k\) and small \(n\) are sufficient, and that increasing \(n\) beyond a point yields diminishing returns (Figure 6). This is a practically useful guide for deployment.
+- **Practical efficiency for real-time deployment.** The policy attention subgraph and n-hop neighborhoods depend only on static road topology and are computed offline, while online collection of live dynamics is restricted to the small pre-computed subgraph. The paper reports average planning times of 8.18 ms for DQN/PPO and 27.26 ms for GCN+DQN, making the approach viable for real-time urban routing.
 
-- **Substantial planning-time efficiency gains.** DFR reduces planning time by 85.59% (DQN), 46.08% (GCN+DQN), and 79.32% (PPO) relative to All-Dynamics baselines (Section 5.2), while maintaining or improving solution quality. These are meaningful practical benefits.
-
-- **Honest about limitations.** The paper acknowledges that \(k\) and \(n\) are manually tuned (Section 6) and that the distance-based policy attention is an approximation, not a provably optimal filtering mechanism (Section 4.3, lines 396–403). This candor is commendable.
+- **Thorough ablation study covering both parameters.** The heatmaps in Section 5.3 systematically explore k ∈ {0.2, 0.4, 0.6, 0.8, 1.0, -1.0} and n ∈ {1, 2, 3, 4, -1}, providing practical guidance (moderate k, smaller n) for deployment. The observation that performance plateaus as n increases (bottom of Figure 6) helps identify the point of diminishing returns.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The core claim — that hierarchical compression via policy attention and n-hop neighborhoods is an effective state representation strategy for RL-based DPP — is supported by the experimental evidence.
+None.
 
 ### Major
+None that threaten the core claims, but the following issues are significant:
 
-- **Theoretical claims via PSR are overstated.** Section 4.2 states that grounding DFR in Predictive State Representations "guarantees that the resulting representations are compact, temporally predictive, and theoretically sufficient" (line 364–365). The paper provides no formal proof linking the n-hop neighborhood construction to PSR sufficiency, nor does it demonstrate that \(W_t''\) actually predicts future observations. The PSR discussion is conceptual inspiration, not a rigorous theoretical foundation. The language of "guarantees" should be substantially softened or the gap between the conceptual appeal and the actual method should be made explicit.
-
-- **Missing baselines leave the contribution of policy attention incompletely isolated.** The primary comparison is DFR vs. AD (All Dynamics). While DFR clearly outperforms AD, this does not disentangle whether the *specific design* of policy attention is responsible, or whether any dimensionality reduction would suffice. The ablation in Section 5.3 does vary \(k\) (including \(k=-1\) to disable policy attention), but the paper does not explicitly compare (a) n-hop-only without policy attention (\(k=-1, n>0\)) against full DFR, nor (b) a random subgraph of equivalent size against the distance-based subgraph. Without these controls, the unique value of the policy attention mechanism — as opposed to mere dimensionality reduction — remains unclear.
+- **The Predictive State Representation (PSR) framing is decorative, not substantive.** The paper invokes PSR (Section 4.2) to argue that the compressed representation Wt'' is "theoretically sufficient" and preserves "all decision-relevant information." However, no formal guarantees are provided — no proof that the policy attention + n-hop pipeline satisfies the PSR sufficiency condition, no characterization of the information gap between Wt and Wt'', and no bound on how much the optimal policy degrades under refinement. The PSR reference serves as motivational framing rather than genuine theoretical grounding. The paper's empirical contribution stands on its own, but the claim of being "theoretically grounded" is overstated.
 
 ### Minor
 
-- **The distance-based heuristic may fail under certain congestion patterns, and failure modes are unexplored.** The paper acknowledges that \(\pi_d^*\) is distance-based and does not incorporate time-varying edge weights (Section 4.3). While the experiments demonstrate success under the tested dynamics, the paper provides no analysis of when this heuristic might break down (e.g., when severe congestion makes a longer-distance path systematically faster). The paper would benefit from characterizing the conditions under which the distance-based subgraph contains the true time-optimal path.
+- **The dynamics generation process is underspecified.** The paper defines edge weights via a congestion factor β(vi, vj; t) ∈ [0.1, 1.5] in Equation 9, but never describes how β evolves over time. Are edge weights temporally independent? Autoregressive? Spatially correlated? Since the entire premise of DFR is about capturing *dynamic* traffic conditions, the lack of specification for the dynamics model makes it difficult to assess what class of dynamics DFR actually helps with. This detail may exist in the released code, but it should be stated in the paper.
 
-- **Dynamics generation process is underdescribed.** Section 5.1 specifies that edge weights are parameterized by a congestion factor \(\beta \in [0.1, 1.5]\), but does not describe how \(\beta\) evolves over time and across edges (i.i.d.? correlated? does it follow realistic patterns like rush-hour waves?). The structure of the dynamics directly affects how much time-optimal paths diverge from distance-shortest paths, so this omission limits the reader's ability to assess the generality of the results.
+- **The GCN+DQN comparison does not control for model capacity.** The GCN baseline processes the full graph (AD) while GCN+DFR processes a much smaller subgraph. The paper attributes the improvement to better representation, but it could partly stem from the GCN operating on a more appropriately sized input for its capacity. A controlled comparison (e.g., matching parameter counts or FLOPs between AD and DFR variants) would strengthen the attribution.
 
-- **Ablation caps candidate paths at top-100.** Section 5.3 restricts the policy attention subgraph to the top-100 shortest paths. While this may be adequate for the subgraph sizes tested (Subgraph 1 of Nanjing), the paper does not discuss whether this cap is sufficient for larger graphs where many more alternative routes may be relevant. The generality of the ablation findings to larger-scale deployments is therefore uncertain.
+- **The core filtering assumption is not directly validated.** The paper assumes that edges along the top-k static shortest paths contain the dynamics most relevant for decision-making. A direct validation experiment — measuring what fraction of edges on the truly optimal *dynamic* path fall within the policy attention subgraph — is missing. Without this, it remains unclear whether DFR works *because* of the distance-based filtering or despite it (e.g., because the n-hop neighborhoods capture enough local information regardless).
+
+- **The ablation shows performance degradation at high k without a clear explanation.** When k increases beyond 0.6, Mean GAP sometimes increases and SR sometimes decreases. The paper attributes this to "more complex and less predictable" dynamics, but an alternative explanation is that non-shortest-path edges introduce noise. If the latter is true, it actually supports the filtering intuition — but the paper does not distinguish between these interpretations.
+
+- **The theoretical optimality claim (Equations 6-8) is stated but never checked.** The paper claims π*(vt, vg; Wt'') ≈ π*(vt, vg; Wt) but provides no empirical verification of this approximation quality. Checking this would strengthen the connection between the method and the PSR framing.
 
 ### Trivial
-
-- **The "dynamic Dijkstra algorithm" for ground-truth computation is not explained.** Section 5.1 mentions it in passing (line 462) but provides no detail on how Dijkstra's algorithm is adapted to time-varying edge weights. A brief clarification (e.g., whether FIFO is assumed, how time-dependent costs are aggregated) would aid reproducibility.
+None.
 
 ## Nice-to-Haves
 
-- **Adaptive \(k\) and \(n\) selection.** The authors themselves note that manual tuning of \(k\) and \(n\) limits practical applicability (Section 6). An adaptive mechanism — such as growing the subgraph when the agent's uncertainty is high — would be a natural extension.
-
-- **Learned compression baseline.** Comparing DFR against a generic learned compression method (e.g., an autoencoder over edge weights) would help quantify how much the task-aware design of DFR contributes beyond what a task-agnostic compressor could achieve.
-
-- **Case studies of divergence between distance-based and time-optimal paths.** Visualizing concrete instances where the distance-based subgraph excludes the true time-optimal path (and showing whether the learned policy still succeeds) would strengthen the practical validation.
+- Systematic variation of dynamics characteristics (temporally independent vs. correlated, spatially localized congestion vs. uniform) to map the regime where DFR's distance-based filtering is most beneficial.
+- A controlled experiment replacing policy attention with random subgraph selection of matched size, to directly test whether distance-based filtering provides benefits beyond dimensionality reduction.
+- Failure case analysis: scenarios where the optimal dynamic path systematically avoids all top-k static shortest paths.
 
 ## Removed Points
 
-*These points are flagged to be removed — treat them with caution.*
+- **Criticism that static distance has "nothing to do" with dynamics and that policy attention serves a "fundamentally different problem."** The paper explicitly justifies (Section 4.3, lines 395-405) why distance serves as a fundamental constraint for identifying topologically relevant edges. The critic's "anecdotal counterexample" (a road 10% longer but 3× faster) ignores that the n-hop neighborhood method captures local context around the agent regardless of shortest-path status. The criticism is overstated; the paper's logic is a reasonable heuristic.
 
-1. **Harsh Critic: "The policy attention subgraph is selected using distance-based shortest paths, which is misaligned with the objective... The entire DFR framework's claim of 'sufficiency' is unsupported."** — Partially valid as a limitation but the critic overstates the case. The paper explicitly acknowledges that \(\pi_d^*\) is distance-based only (Section 4.3, lines 396–403) and argues it as a reasonable heuristic, not a proof. The criticism that this is "fundamentally flawed" and a "fatal" error is itself an overstatement. Moved the substantive kernel to Major/Minor weaknesses above; the "fatal" framing is removed.
+- **Criticism that Mean GAP against dynamic Dijkstra is "inappropriate."** Dynamic Dijkstra with full future knowledge is the standard optimal baseline in dynamic path planning literature. Interpreting GAP improvements as evidence of better dynamics representation is standard and valid.
 
-2. **Harsh Critic: "The experimental design uses a critically weak baseline that inflates apparent improvements."** — AD is not a "trivially weak" baseline in the context of this paper's research question. The paper explicitly frames the problem as a trade-off between global completeness and local efficiency, and AD represents the global-completeness endpoint. Comparing against AD directly addresses the paper's stated goal: can we compress without losing too much information? The critic's framing that AD is "prohibitively expensive" is actually the paper's own argument for why compression is needed. The specific missing baselines (n-hop-only, random subgraph) are kept as a Major weakness.
+- **PSR "lacks proof" and is "decorative naming."** This is partially valid — the PSR framing is indeed not a formal proof — but the tone that this makes the contribution "unsupported" is too harsh. The PSR reference is a conceptual motivation, not a claimed theorem. I have downgraded this to a minor weakness (the PSR framing is overstated) rather than a fatal flaw.
 
-3. **Harsh Critic: "CR is not an independent measure of quality; it is a direct consequence of the method's design."** — CR is presented as an efficiency metric alongside quality metrics (GAP, SR). The paper never claims CR measures quality; it measures compactness, which is explicitly one of the paper's stated goals ("sufficient yet compact"). The critic's objection misreads the paper's use of the metric. Removed.
+- **"The paper never verifies that the top-k shortest paths contain the edges whose dynamics matter."** This is a missing validation experiment but not a flaw in the existing experiments. I have recorded it as a minor weakness rather than a fundamental issue.
 
-4. **Strength Finder: "The method is grounded in a principled theoretical foundation [via PSR]."** — Conflicts with the verified weakness that the PSR link is overstated. The PSR discussion is conceptual motivation, not a rigorous foundation. Kept in weakened form (acknowledged as conceptual inspiration rather than formal guarantee).
+- **Formatting/style nitpicks and grammar concerns.** These are parser artifacts.
 
-5. **Harsh Critic: "The paper cites multiple preprints... as though they are peer-reviewed work."** — Per instructions, criticism about reference status is removed. The existence of cited works is assumed.
-
-6. **Harsh Critic: "The ablation studies restrict attention to the top-100 shortest paths... This cap may be far too small."** — Kept as a Minor weakness since it's a legitimate concern about the generality of the ablation findings.
+- **Accusation that the GCN baseline is fundamentally "unfair."** The comparison GCN+DQN+AD vs. GCN+DQN+DFR uses the same architecture; the only difference is the input. The capacity-matching concern is valid but minor, not "fatal."
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The hierarchical two-stage compression idea (global task-aware filtering → local agent-centric decoupling) is a clean conceptual framework, but it is an engineering contribution rather than a fundamentally novel insight. The ablation finding that moderate \(k\) and small \(n\) suffice, and that \(k\) has a more complex and less predictable impact than \(n\), is a useful empirical observation for practitioners.
+An interesting tension emerges from the reviews that the paper itself does not fully explore: the static-distance filtering assumption is simultaneously the framework's greatest strength (computational efficiency, interpretability, offline pre-computation) and its most significant limitation (it may systematically miss edges whose *dynamic* behavior makes them optimal even though they are topologically suboptimal). The fact that DFR performs well empirically across three real-world networks suggests either that (a) optimal dynamic paths in practice rarely deviate entirely from the set of topologically plausible routes, or (b) the n-hop neighborhood provides sufficient coverage to compensate for missed edges. Distinguishing these would require an edge-inclusion analysis the paper does not provide. The reviewer correctly identified this gap but overstated it as a contradiction rather than an open question.
 
 ## Suggestions
 
-1. **Add a random subgraph baseline.** Replace the policy attention subgraph with a random subgraph of equal edge count; this would isolate whether distance-based selection specifically matters or any compression helps.
+1. **Specify the dynamics generation process.** State clearly how β(vi, vj; t) evolves over time: is it i.i.d. per timestep, autoregressive, or spatially correlated? This is essential for understanding what problem DFR actually solves.
 
-2. **Characterize the coverage of the distance-based subgraph.** For the tested dynamics, report what fraction of ground-truth time-optimal paths are fully contained within the distance-based policy attention subgraph. This would directly address the "sufficiency" concern.
+2. **Add an edge-inclusion analysis.** For the learned dynamic-optimal paths, measure what fraction of edges fall within the policy attention subgraph. If this fraction is consistently high, the distance-based filtering assumption is validated. If not, the source of DFR's improvement needs re-examination.
 
-3. **Describe the dynamics generation process.** Specify how \(\beta(v_i, v_j; t)\) evolves — is it i.i.d. per edge per timestep, or does it follow spatially/temporally correlated patterns? This is essential for readers to assess the generality of results.
+3. **Add a random-subgraph control.** Replace policy attention with random selection of the same number of edges. If DFR's distance-based filtering outperforms random selection, the assumption that distance identifies relevant dynamics is directly supported.
 
-4. **Tone down the PSR language.** Replace "guarantees" with "motivates" or "provides intuition for." The PSR framework is a useful conceptual lens but the paper does not prove formal sufficiency.
+4. **Tone down the PSR theoretical claim.** The paper should present PSR as inspiration/motivation rather than claiming the method is "theoretically grounded" by it. The empirical results are the main contribution and should be foregrounded.
 
-5. **Clarify the dynamic Dijkstra ground-truth computation.** A sentence explaining how time-dependent edge costs are handled (e.g., FIFO assumption, time-expanded graph, or stepwise aggregation) would improve reproducibility.
+5. **Control for model capacity in the GCN comparison.** Either match parameter counts or report a baseline where the GCN+AD model is given a comparable parameter budget to GCN+DFR.
 
 ## Score and Decision
 
-### Anchor comparisons
+**Calibration anchors** (all from /home/wg25r/review_agent/human_reviews_2026/):
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| RL for dynamic VRP | `bisWxwcK8D.md` | 2.50 | Rejected for limited baselines, methodological gaps, limited novelty. Current paper has clearer contributions and more systematic evaluation. |
-| RL parking path planning | `T98uLLyWiM.md` | 3.50 | Rejected mainly for weak baselines (one classical heuristic). Current paper has more baselines (3 RL algorithms × 2 conditions) and better ablation. |
-| Dynamic drone pickup/delivery | `leoXWCu6CO.md` | 3.60 | Methodological gaps, presentation issues. Current paper is better structured and more systematic. |
-| RL+VLM traffic signal control | `36xNdrIUXa.md` | 4.00 | All 4s, rejected. Current paper has stronger experimental support and clearer methodology. |
-| Neural MO routing on multigraphs | `55laGcPNZZ.md` | 5.33 | Accept (Poster). First in a new setting, clear novelty, but scalability issues. Comparable quality; current paper has less novelty but more practical focus. |
-| Koopman traffic flow prediction | `fhDqFk4DgI.md` | 6.00 | Accept (Poster). Solid methodology, all 6s. Current paper has less theoretical depth. |
-| Plan-R1 trajectory planning | `uusTA1rBhR.md` | 6.50 | Accept (Poster). Strong methodology, SOTA, clear contributions. Current paper is not at this level. |
-| Triple-BERT ride-sharing | `symgW6FhA6.md` | 6.50 | Accept (Oral). Innovative architecture, strong results. Current paper's contribution is more modest. |
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| izL9UiBziW (DQN-path-planning) | 2.00 | Much weaker: single simple grid, no real graphs, no multi-algorithm eval. Current paper is clearly superior. |
+| bisWxwcK8D (RL-VRP-dynamic) | 2.50 | Weaker: limited baselines, unclear benchmarking. Current paper has cleaner evaluation. |
+| MKM8iEaowV (diffusion-RL-trajectory) | 3.00 | Weaker: methodology issues, unclear contribution. Current paper is more coherent. |
+| DbrefyDn8R (state-abstraction-RL) | 4.00 | Comparable: both have clean ideas with clear limitations. Current paper has more practical relevance (real graphs) but less theoretical depth. |
+| 38ioKDbyP7 (DP-Nav) | 4.00 | Comparable: both have real experiments with some missing controls. Current paper has broader algorithmic coverage. |
+| mCpq1GCKxA (simplicial-embeddings) | 5.50 | Stronger: cleaner experimental design, deeper analysis. Current paper is weaker on theoretical framing and validation depth. |
+| tHmiydOQhn (spectral-Bellman) | 6.00 | Stronger: substantive theoretical contribution, solid experiments. Current paper lacks comparable theoretical depth. |
 
-The paper makes a solid, well-executed engineering contribution — a hierarchical compression framework that demonstrably improves RL-based DPP across multiple settings. The experiments are systematic (3 cities × 3 algorithms) and the ablation is informative. However, the theoretical claims are overstated, key baselines are missing, and the dynamics generation process is underdescribed. These issues are substantive but addressable.
+The paper is stronger than the 2-3 range papers (real graphs, multiple algorithms, clear problem framing) and comparable to the 4.0 range papers. It is weaker than the 5.5-6.0 papers on theoretical rigor and validation depth. The primary contributions are the clean hierarchical framework and the consistent empirical gains across algorithms and graphs. The main limitations are the overstated PSR theoretical framing, the underspecified dynamics model, and the lack of direct validation of the core filtering assumption. The paper makes a genuine contribution to an important problem, but the gap between theoretical claims and evidence is notable.
 
-The paper is stronger than the rejected 2.5–4.0 anchors (which had severe methodological gaps or very limited evaluation), but falls short of the 6.0+ accept anchors (which have clearer novelty or more thorough evaluation). It lands in the borderline region comparable to the 5.33 multigraph routing paper.
+**Score:** 5.0 — A solid paper with clear contributions and adequate experiments, held back by overstated theoretical claims and missing validation details. Appropriate for a poster.
 
-**Overall assessment:** The contribution is genuine but its scope is narrower than the framing suggests. With the missing baselines and softened theoretical claims, this could be a solid poster. In its current form, the combination of overstated theory and incomplete baseline isolation brings it to the borderline.
+**Decision:** Accept
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL DECISION: <orange>Accept</orange>

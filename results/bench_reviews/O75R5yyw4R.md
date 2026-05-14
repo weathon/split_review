@@ -1,18 +1,19 @@
-## Summary
+Now I have all the information needed. Let me produce the consolidated review.
 
-This paper introduces IterRef, a test-time scaling method for discrete diffusion models that uses reward-guided noising–denoising transitions within a Multiple-Try Metropolis (MTM) framework to iteratively refine intermediate states during the denoising trajectory. The method is evaluated across three discrete diffusion backbones (MDLM, LLaDA-8B, MaskGIT) on diverse language and image reward tasks, consistently outperforming prior baselines (FK, SVDD, SoP, BoN) under equal compute budgets.
+## Summary
+This paper proposes **IterRef**, an inference-time framework for reward-guided generation in discrete diffusion models. The key idea is to iteratively refine intermediate states (at a given denoising timestep) via a Multiple-Try Metropolis (MTM) kernel that noisifies and then denoises, enabling the correction of misaligned tokens. The paper provides a convergence guarantee (Proposition 1), demonstrates consistent gains over BoN, FK, SoP, and SVDD across two modalities (text: MDLM, LLaDA-8B; image: MaskGIT) and multiple reward functions, and includes a user study confirming that reward improvements translate to human preference.
 
 ## Strengths
 
-- **Novel and well-motivated algorithmic contribution.** The use of a noising–denoising kernel as the MTM proposal within discrete diffusion sampling is a genuinely new idea. Designing the transition as forward-noising then backward-denoising to enable exploration while preserving the MTM framework's detailed-balance structure is creative and practically motivated (Section 3.1, Eq. 2).
+- **Consistent empirical superiority across diverse settings.** IterRef outperforms four baselines on 4 language tasks with 2 diffusion backbones (MDLM, LLaDA-8B) AND on image generation with MaskGIT (Table 1, Figure 2). The breadth — two modalities, three backbones, multiple reward functions — convincingly shows the approach generalizes.
 
-- **Strong, broad empirical results.** IterRef consistently outperforms strong baselines (FK, SVDD, SoP, BoN) across three model backbones (MDLM, LLaDA-8B, MaskGIT) and five reward types (Toxicity, CoLA, Sentiment, Perplexity, CLIPScore). On MDLM with Toxicity reward, IterRef reaches at 4T NFEs what FK needs 32T NFEs to achieve — roughly an 8× speedup in scaling (Section 4.2, Figure 2a). Gains are most pronounced at low compute budgets, an important practical regime.
+- **Novel and well-motivated methodological contribution.** The idea of using the noising–denoising structure as an MTM proposal kernel is clever: it explicitly addresses the irreversibility problem of discrete diffusion (tokens become fixed once generated) by injecting noise to enable exploration and then denoising to restore consistency. This is qualitatively different from existing trajectory-search methods (SoP, SMC variants).
 
-- **Persuasive ablation on iteration vs. particles.** Table 3 (and Figure 4) cleanly demonstrates that increasing refinement iterations _k_ consistently yields larger gains than increasing parallel candidates _N_ (e.g., on LLaDA-8B, k=8/N=4 achieves Toxicity 54.0 and CoLA 85.3 vs. k=1/N=32 at 3.3 and 8.7). This validates the core "iterative refinement" philosophy and distinguishes the method from simple particle-broadening approaches.
+- **Human evaluation confirms practical utility.** Table 5 shows IterRef achieving 42.1% goal alignment preference vs. at most 18.4% for baselines, demonstrating that the CLIPScore/toxicity improvements are not artifacts of reward hacking but reflect genuine human judgment.
 
-- **Valuable insight into discrete diffusion dynamics.** The effective-timestep analysis (Section 4.4, Table 2) reveals that IterRef is far more effective at later denoising stages (e.g., 0.1T yields 37.6% Toxicity gain vs. 7.0% at 0.9T), which is the opposite pattern from continuous diffusion. This provides actionable guidance for where to concentrate compute.
+- **Interesting scientific finding about discrete diffusion dynamics.** Table 2 shows that IterRef applied at later denoising stages (0.1T) consistently outperforms earlier-stage application — contrasting with continuous diffusion where early steps dominate. This is a genuinely new observation about discrete diffusion.
 
-- **Practical cost-management strategies.** The use of the effective timestep set _U_, the balancing function choice (λ=1) that eliminates backward auxiliary proposals, and pool reuse are well-motivated optimizations (Section 3.3) that make the method computationally viable.
+- **Ablation study isolating the value of iteration count vs. particle count.** Table 3 systematically varies k and N under a fixed compute budget, showing that increasing iterations (k) yields greater reward gains than increasing particles (N). This cleanly demonstrates the value of iterative refinement over simply generating more candidates.
 
 ## Weaknesses
 
@@ -20,74 +21,79 @@ This paper introduces IterRef, a test-time scaling method for discrete diffusion
 None.
 
 ### Major
-- **Gap between convergence claim and algorithm scope.** Proposition 1 proves convergence to the optimal intermediate distribution _p*(xt)_ under stated assumptions. However, the abstract and introduction (lines 14–15, 52, 105–106) describe this as "convergence to the target/reward-aligned distribution" without qualification — which in the paper's own problem setup (line 189) is _p*(x0)_. The algorithm follows MTM refinement with an unguided denoising step _xt−1 ∼ pθ(·|xt)_ (Algorithm 2, line 10), which is not the optimal transition kernel (Eq. 1). The paper does not establish that composing MTM-converged intermediate distributions with standard denoising yields _p*(x0)_, nor does it discuss this gap. This is not fatal — the empirical results are strong and Proposition 1 itself is correctly scoped — but the paper should explicitly acknowledge the gap between the local (per-timestep) convergence guarantee and the global (final-sample) objective.
+
+- **Theory-practice gap in the convergence guarantee.** Proposition 1 asserts convergence under the MTM framework using the exact transition kernel K (Eq. 2, which sums over all intermediate states x_s) and exact evaluation of p(x_t). In practice: (1) the sum over x_s is approximated by sampling a single noising-denoising path (never explicitly stated; Algorithm 2 Line 6 samples from K(xt,·) without clarifying how the intractable sum is handled); (2) the reward r(xt) is approximated via predicted x₀ (acknowledged on line 293–294); (3) the pool reuse strategy (Section 3.3) reuses candidate sets across iterations, which means proposals are not fresh i.i.d. draws from the current state's kernel when states have actually changed. The paper claims the pool "remains a valid proposal set" because candidates were "drawn i.i.d. from the same transition kernel" (lines 422–424), but this is only true when the chain state has not moved. If the chain accepted even one proposal in a previous iteration at this timestep, the current state differs from the one that generated the pool. The paper never discusses this subtlety. **While theory-practice gaps are common in applied ML papers, the gap here is significant because the convergence proof relies on detailed balance under the exact MTM machinery, and the practical algorithm departs from that machinery in multiple unaccounted ways.**
+
+- **No reporting of acceptance rates or chain diagnostics.** The MTM acceptance step (Eq. 3, line 9 of Algorithm 2) is central to the method's theoretical justification, yet the paper never reports empirical acceptance rates. Without knowing whether the chain accepts most proposals (β≈1, making MTM equivalent to random perturbation) or frequently rejects (β<1, meaning the reward signal is actively used), the reader cannot assess whether the MTM machinery is actually mixing or merely cosmetic. Acceptance rates, trace plots of intermediate reward over refinement iterations, and effective sample size would all strengthen the empirical case.
 
 ### Minor
-- **The reversible-kernel assumption is an approximation, not an identity.** The symmetry of λ (Appendix D.4) and consequently the simplified acceptance ratio (Eq. 3) rely on the assumption that _q_ and _pθ_ form a reversible Markov kernel (Proposition 1). In practice, _pθ_ is a learned approximation to the time-reversal of _q_, so detailed balance holds only approximately. The paper is transparent about making this assumption, and it is a standard kind of idealization in diffusion theory. Still, the practical impact of the approximation error on the MTM chain's stationary distribution warrants brief discussion.
 
-- **NFE metric conflates model scales.** The paper's own complexity analysis (Section 3.3, lines 444–448) acknowledges that aggregating large diffusion-model calls and small reward-model calls into a single NFE is problematic — the paper itself recommends reporting them separately. The main experiments nonetheless use combined NFE. This is mitigated by the wall-clock analysis in Appendix C.4, which shows that IterRef's practical runtime is competitive at higher budgets, though slower at low budgets on LLaDA-8B.
+- **Error bars are confined to the appendix.** Standard deviations for Figure 2 are reported in Appendix C.3 (Tables 9–11), not in the main figures. Table 3's results (k vs. N on LLaDA) lack standard deviations entirely. For a paper making quantitative scaling claims, plotting error bars directly on the main figures is expected.
+
+- **Missing ablation that would isolate the source of improvement.** The paper never compares against a simple "noise-and-denoise without reward-based acceptance" baseline — i.e., at each refinement step, randomly remask and denoise, and keep the result regardless of reward. This would isolate whether the gains come from the perturbation-correction mechanism itself or from the MTM reward-based selection. Given that the paper claims the MTM formalism is important, this ablation is directly relevant.
+
+- **The "8× faster" claim requires careful reading.** Figure 1(b) shows "8× faster" in the schematic, which is based on a specific comparison (IterRef at 4T NFE matching FK at 32T NFE on Toxicity with MDLM, lines 574–575). While the paper explains this, the schematic without the qualifiers could mislead a casual reader. The wall-clock analysis (Tables 12–13) tells a more nuanced story: IterRef is competitive for MDLM but consistently slower for LLaDA-8B.
 
 ### Trivial
-- The characterization of prior methods in the abstract ("assume the current state is already aligned with the reward distribution") is slightly imprecise. Methods like SVDD and FK use importance sampling/resampling to approximate the optimal intermediate distribution — they do not literally "assume" alignment, though they are single-pass rather than iterative.
+- The handling of the intractable sum over x_s in Eq. 2 (the transition kernel) should be explicitly stated: does the implementation draw a single x_s via ancestral sampling, or use multiple samples?
 
 ## Nice-to-Haves
-- A control experiment replacing the unguided denoising step after MTM refinement with a guided transition (e.g., importance sampling as in SVDD) would help quantify how much the unguided step limits alignment to _p*(x0)_.
-- A formal discussion or bound on the error propagation from the unguided denoising step to the final distribution.
-- Sensitivity analysis of the acceptance ratio to errors in the approximate intermediate reward _r(xt)_.
+- Sensitivity analysis for the KL regularization strength α (currently fixed at 0.1 in most experiments).
+- Comparison to a non-MTM iterative refinement baseline (e.g., "noise-denoise; accept if reward improves, else revert").
+- Trace plot of intermediate reward as a function of refinement iterations k at a single timestep, showing whether refinement saturates.
+- Examples where the proposal was rejected, to visually illustrate the acceptance mechanism.
 
 ## Removed Points
-These points were flagged by the reviewers but are not substantiated or are parser artifacts. Treat them with caution.
 
-- **"The derivation rests on an unverified and likely incorrect assumption" (harsh critic).** The paper explicitly states the reversibility assumption in Proposition 1. It is a standard and reasonable idealization for well-trained diffusion models. This is an acknowledged assumption, not a hidden error. Kept as a minor weakness about approximation rather than incorrectness.
+The following criticisms from the harsh critic were removed after cross-checking against the paper:
 
-- **"Missing experiments: evaluation of how closely the final distribution matches p*(x0)" (harsh critic).** The paper includes diversity metrics (Appendix C.1, Table 6) showing IterRef maintains or improves diversity, and a human evaluation (Appendix C.1, Table 5) confirming benefit to human preference. A formal KL divergence to p*(x0) would be ideal but is computationally infeasible for these model scales and is not standard in this literature. Moved to Nice-to-Haves.
+1. **"Framing implies IterRef is the first to refine intermediate states"** — Removed as factually wrong. The paper explicitly cites Wang et al. (2025) for remasking-based refinement and explains how IterRef differs (lines 1072–1089).
 
-- **"The method proposed does not sample from p*(x0)" (harsh critic).** This is true of essentially all practical reward-guidance methods for diffusion — no existing baseline (FK, SVDD, SMC) provably samples from p*(x0) either at finite particle counts. The harsh critic's framing of this as a fatal structural error is disproportionate. Proposition 1 correctly scopes the guarantee to p*(xt), and the overall algorithm inherits the same asymptotic limitations as all particle-based methods. Kept as a major weakness about claim precision, not a fatal error.
+2. **"Pool reuse violates the i.i.d. assumption and invalidates the theoretical framework"** — Removed as overstatement. The paper states pool reuse applies *when a proposal is rejected* (line 422). When the chain state has not changed, proposals drawn from K(xt,·) remain valid draws from the same kernel. The criticism conflates rejection-with-reuse with acceptance scenarios. A more nuanced concern (that the paper doesn't discuss states that *have* moved) is already covered under the Major weakness above.
 
-- **"Comparisons that isolate the effect of the denoising step" and "Integrate MTM into a proper particle-based framework" (harsh critic).** These are reasonable suggestions for future work but demand the paper address problems outside its stated scope. The paper's core contribution is the MTM refinement of intermediate states; hybridizing with SMC is explicitly mentioned as possible (lines 381–383). Moved to Nice-to-Haves.
+3. **"Figure 1(b) uses 8× faster with no direct experimental backing"** — Removed. The paper provides the experimental basis on lines 574–575 (4T NFE vs. 32T NFE comparison on Toxicity with MDLM). The schematic is a summary of this result.
 
-- **"Overclaim the convergence" (harsh critic).** Partially valid — the abstract/intro language could be more precise. Kept as a major weakness about precision, but the harsh critic's claim that this invalidates the entire theoretical backbone is an overstatement. Proposition 1 is correctly scoped and technically valid.
+4. **"Missing error bars entirely"** — Removed as factually inaccurate. Appendix C.3 (Tables 9–11) provides standard deviations for the main results. The issue is that these are not shown *in the main figures*, which is already covered under Minor weaknesses.
 
-- **"Formal analysis of the bias introduced by the base denoising step" (harsh critic).** This is a useful theoretical extension but not required to validate the paper's core empirical claims. Moved to Nice-to-Haves.
+5. **Proposition 1 proof assumes reversible Markov kernel but practical kernel is not exactly reversible** — Absorbed into the broader Major weakness above; the paper's theory assumes ideal conditions that don't fully match practice.
 
-- **"Sensitivity to the reward model's quality" (harsh critic).** A reasonable ablation to suggest but not a weakness of the current contribution. The intermediate reward approximation is standard practice in this literature (used by SVDD, FK, etc.).
-
-- **Strength Finder claim about "principled convergence guarantee."** The guarantee is correctly scoped to p*(xt) at the intermediate level and stated with assumptions. This is a genuine theoretical contribution, but the strength finder's framing glosses over the gap to p*(x0). Retained as a strength with appropriate qualification.
+6. **Criticism about missing appendix sections** — Removed as parser artifact. The paper has full appendix content including proofs and derivations.
 
 ## Novel Insights
-The effective-timestep analysis (Section 4.4) provides a genuinely novel observation about discrete diffusion dynamics: refinement is most effective at late denoising stages, which is the opposite of continuous diffusion where early steps dominate content. This finding, combined with the _k_ vs. _N_ ablation showing iteration trumps breadth, suggests that discrete diffusion sampling is more amenable to in-place correction than continuous diffusion, likely because the discrete state space creates "lock-in" effects where early token decisions cannot be easily overridden by later steps.
+None beyond the paper's own contributions. The observation that later denoising timesteps (0.1T) are more impactful for refinement in discrete diffusion (contrary to continuous diffusion where early steps dominate) is genuinely interesting and could guide future work in discrete diffusion guidance design.
 
 ## Suggestions
-- Revise the abstract and introduction to be precise: the convergence guarantee applies to the intermediate distribution p*(xt) at each refined timestep, not to the final sample distribution p*(x0). Use language like "convergence to the reward-aligned intermediate distribution" or "converges to the optimal distribution at each refined timestep."
-- Add a brief discussion (one paragraph) in Section 3 or the limitations section about the gap between per-timestep MTM convergence and the overall denoising trajectory, acknowledging that the unguided denoising step may introduce bias relative to the optimal transition.
-- In the NFE reporting for future work, consider showing generative-model calls and reward-model calls as separate axes as the paper itself recommends, or at minimum note this limitation more prominently in the main text.
+1. **Be transparent about the theory-practice gap.** State explicitly that the convergence proof applies to the idealized MTM-with-exact-kernel, while the practical algorithm uses sampled approximations. Qualify Proposition 1 accordingly.
+2. **Report acceptance rates** across tasks. This single addition would substantially strengthen the empirical case that the MTM mechanism is actively used.
+3. **Add a "noise-denoise without reward" ablation** to isolate the contribution of the reward-based acceptance step.
+4. **Move error bars to the main figures** (or at least Table 3).
+5. **Explain how the sum over x_s in Eq. 2 is approximated** in the implementation — single sample, multiple samples, or something else.
 
 ## Score and Decision
 
-**Originality:** High. The combination of MTM with a noising–denoising proposal kernel for discrete diffusion refinement is novel and well-motivated. The effective-timestep analysis also yields original insights.
+### Calibration Anchors
 
-**Importance:** The problem of test-time scaling for discrete diffusion is timely and important as these models gain traction. The method addresses a genuine gap.
+| Paper | Avg Score | Comparison |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/OPFE1zPYbU.md` | 1.00 | Fundamentally flawed paper with no sound contribution and no experiments. IterRef is far stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/CHtLFyDbZp.md` | 2.50 | Deterministic denoising paper with weak empirical support. IterRef has substantially more evidence. |
+| `/home/wg25r/review_agent/human_reviews_2026/DBlMothexq.md` | 3.50 | Most similar paper — also uses MH for discrete diffusion guidance. That paper had no error bars at all, no convergence diagnostics, and less comprehensive experiments. IterRef is stronger empirically (multiple modalities, user study, diversity analysis) but shares similar theory-practice gap issues. |
+| `/home/wg25r/review_agent/human_reviews_2026/GDYaNzxt9T.md` | 3.50 | Scaling laws paper with extrapolation concerns and missing downstream evals. IterRef has clearer empirical contribution. |
+| `/home/wg25r/review_agent/human_reviews_2026/N1RYhOg6ib.md` | 4.50 | Accepted Poster on discrete guidance. Similar level — clean method with solid experiments but not groundbreaking. IterRef is comparable in contribution breadth. |
+| `/home/wg25r/review_agent/human_reviews_2026/7wbrFQvfdH.md` | 6.00 | SMC-based framework with strong theory and comprehensive experiments. IterRef has comparable experimental breadth but weaker theoretical connection to the actual algorithm. |
+| `/home/wg25r/review_agent/human_reviews_2026/9nxCJP4q0i.md` | 6.00 | RL fine-tuning for discrete diffusion with strong results. IterRef addresses a different problem (inference-time, not training-time) and has comparable empirical coverage. |
 
-**Claims supported:** Strongly supported by experiments. The theoretical claim about convergence to p*(x0) is slightly overbroad but Proposition 1 itself is correctly scoped and valid.
+**Positioning relative to anchors**: IterRef is clearly stronger than the rejected papers (avg 1.0–3.5) — it has a well-defined contribution, broad experiments, and a user study. It is comparable to the borderline-accepted Discrete Guidance Matching paper (avg 4.5). It falls short of the clearly-accepted SMC and RL papers (avg 6.0) because of the unresolved theory-practice gap and missing empirical rigor (acceptance rates, error bars in main paper). This places it in the **borderline range**.
 
-**Soundness:** Generally sound. The reversible-kernel assumption is idealizing but standard. Experiments are thorough.
+**Originality**: Moderate. MTM has been applied to diffusion before, but the specific noising–denoising kernel design and application to discrete diffusion intermediate states is novel.
 
-**Clarity:** Good overall. The abstract could be more precise about the scope of the convergence claim.
+**Quality of claims**: Experimentally well-supported but theoretically overclaimed. The convergence guarantee applies to an idealized version of the algorithm.
 
-**Value to community:** High. The method is practical, effective, and the insights about discrete diffusion dynamics are useful beyond this specific method.
+**Soundness**: The experiments are sound in design (controlled compute budgets, multiple seeds in appendix). The theoretical claims need qualification.
 
-### Anchor comparison:
+**Clarity**: Well-written and easy to follow. The distinction between exact theory and approximate practice could be clearer.
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/7wbrFQvfdH.md` (SMC for discrete diffusion) | 6.00 | Comparable: both have novel methodology + strong experiments. IterRef has broader model coverage and a clean ablation story, but the SMC paper's theory-to-practice gap is smaller. |
-| `/home/wg25r/review_agent/human_reviews_2026/DBlMothexq.md` (MH discrete diffusion) | 3.50 | IterRef is substantially stronger: cleaner theory, broader experiments, proper baselines, better ablations. |
-| `/home/wg25r/review_agent/human_reviews_2026/N1RYhOg6ib.md` (Discrete guidance matching) | 4.50 | IterRef is stronger empirically and has a cleaner algorithmic contribution, though both have theoretical approximations. |
-| `/home/wg25r/review_agent/human_reviews_2026/QqgGE3mvrF.md` (Langevin refinement) | 2.50 | IterRef is far stronger in every dimension: experiments, baselines, theoretical grounding, scope. |
-| `/home/wg25r/review_agent/human_reviews_2026/wbNXoqcaSi.md` (Inference-time scaling for flow matching) | 3.50 | IterRef has much stronger empirical validation and a more principled algorithmic framework. |
-| `/home/wg25r/review_agent/human_reviews_2026/l01eG3Qikl.md` (DriftLite) | 6.00 | Both are strong inference-time scaling methods. DriftLite has stronger theory, IterRef has broader empirical coverage. Comparable. |
+**Value**: The method is practically useful — it works across tasks and backbones. The finding about later timesteps being more important is a genuine contribution to understanding discrete diffusion.
 
-IterRef sits comfortably at the 6.0 level — comparable to the accepted SMC discrete-diffusion paper (7wbrFQvfdH) and DriftLite (l01eG3Qikl), with strong empirical results that outweigh the minor theoretical imprecision.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,96 +1,90 @@
-Now I have all the material I need. Let me construct the final review.
-
----
+Now I have good calibration context. Let me construct the final review.
 
 ## Summary
 
-This paper presents OML, a brain-inspired neural network for online multimodal learning. The architecture is hierarchically modular with feature, unimodal-association, and multimodal-association layers connected by ascending, descending, and lateral pathways. Two key algorithmic contributions are: (1) a reference-extraction function that uses the coefficient of variation of descending signals to identify which feature dimensions a word refers to (e.g., distinguishing that "red" refers to color, not shape), and (2) a conflict-detection procedure that checks consistency between ascending and descending activations and queries a human user when conflicts arise. Experiments on small fruit/home-object datasets with vision-audition and vision-audition-taste modalities show that OML avoids catastrophic forgetting in open-environment settings and outperforms prior online methods (ART, AEN) on cross-modal retrieval.
+This paper proposes OML, a brain-inspired neural architecture with ascending, descending, and lateral pathways for online multimodal learning. The system is designed to continuously learn new multimodal concepts without forgetting, detect conflicts with previously learned knowledge, interact with users via questions, and extract precise feature referents of words (e.g., color vs. shape). Experiments on Fruits, HomeF, and extended datasets evaluate retrieval accuracy, reference extraction, and modal extension (adding a taste channel).
 
 ## Strengths
 
-- **Genuine algorithmic novelty in reference extraction**: The coefficient-of-variation-based method in Section 3.4 for identifying which feature dimensions a word refers to is a concrete, well-motivated solution to an underexplored problem in online multimodal learning. Table 2 demonstrates that this mechanism yields consistent accuracy gains when color-referring words are added — OML maintains retrieval accuracy while offline methods degrade and online baselines (ART, AEN) cannot distinguish name words from attribute words.
+- **Novel architecture for online multimodal learning.** The hierarchical modular design with ascending, descending, and lateral pathways (Sections 3.1–3.3) is genuinely novel. The use of Fourier transforms for frequency-based signal routing and multiple neuron types (FNs, UANs, MANs) with distinct activation modes (OIAM/ODAM) goes well beyond standard multimodal fusion approaches.
 
-- **Consistent empirical advantage in online settings**: Across all three experiment types (baseline, precise referring, modal extension), OML outperforms the two closest online competitors (ART and AEN) in open-environment settings (Tables 1–3), demonstrating robustness to catastrophic forgetting. The modal-extension experiment (Table 3) in particular shows that frequency-based pathway routing successfully prevents cross-modal interference, a problem that causes AEN to confuse taste-referring and vision-referring words.
+- **Reference extraction algorithm is an elegant contribution.** The coefficient-of-variation based mechanism (Section 3.4, Eq. 7) that autonomously identifies which part of a feature vector a word refers to (e.g., color vs. shape) is validated in Table 2, where OML significantly outperforms ART and AEN on the E-Fruits and E-HomeF datasets (e.g., 87.8% V→A on E-Fruits open vs. AEN's 84.1%). This addresses a real limitation of prior online multimodal methods.
 
-- **Integrated system with multiple interacting capabilities**: The paper combines online concept acquisition, cross-modal recall, reference disambiguation, and conflict detection with human-in-the-loop correction into a single architecture. This integration of capabilities — each addressing a concrete limitation of prior online multimodal methods — is a meaningful step beyond prior work (Xing et al. 2019, 2021; ART).
+- **Modal extension capability is convincingly demonstrated.** Table 3 shows OML outperforms AEN across all six retrieval tasks when a new taste modality is added (e.g., 91.7% T→A on VAT open vs. AEN's 89.0%). The frequency parameter λ provides a principled mechanism for routing signals to the correct modality pathway.
+
+- **Addresses an important and underexplored problem.** The combination of online learning, reference extraction, conflict detection, and human-in-the-loop interaction in a unified system targets a real gap in multimodal learning research.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **No quantitative evaluation of conflict detection and human-in-the-loop interaction**: The paper's second claimed attribute is that the network "can detect conflict between the current input and the learned ones [and] ask the user appropriate questions." The only experimental evidence is one sentence: "when we randomly add 10% of word-image or word-taste data pairs with incorrect matches, OML is able to detect all conflicts and raise appropriate questions." There is no precision/recall measurement, no ablation over different mismatch ratios, no evaluation of whether the questions raised are actually appropriate, and no analysis of how user answers affect downstream task performance. The user simulation (default "yes" after timeout) is also unrealistic and biases the system toward accepting all associations. This leaves a core claimed contribution substantially unevaluated.
+1. **Conflict detection and human-in-the-loop interaction are claimed but completely unsubstantiated.** The paper's second key contribution — detecting conflicts and asking appropriate questions — receives zero quantitative evaluation. The sole evidence is a single sentence in Section 4.1: "when we randomly add 10% of word-image or word-taste data pairs with incorrect matches, OML is able to detect all conflicts and raise appropriate questions." No precision, recall, F1, accuracy of question posing, comparison to any baseline, or even a single table entry is provided. Given that this is framed as one of the paper's two central attributes alongside online learning, the absence of evidence is a fundamental gap.
 
-- **The method stores rather than learns representations**: Feature-neuron weights are set directly to input feature vectors (Section 3.5, case 1), association neurons are added with hard-coded connectivity when novel inputs arrive, and the only parametric adaptation is the incremental computation of running means and variances (Eq. 8). There is no gradient-based optimization, no training objective, and no mechanism for learning features that generalize beyond memorized instances. The method is functionally an online growing associative memory with similarity-based generalization through lateral connections. While this is a legitimate paradigm (akin to ART-based systems), the paper would benefit from acknowledging these limits explicitly and discussing what "learning" means in this context versus representation learning in standard ML.
+2. **No standard continual learning metrics.** The paper claims to solve catastrophic forgetting but reports only retrieval accuracy. Standard CL metrics — forgetting measure, backward transfer, forward transfer — are completely absent. The "open environment" test (four disjoint class splits) is a weak proxy for a controlled CL evaluation, and no comparison against methods designed for continual learning (e.g., EWC, GEM, A-GEM, DER++) is provided. Without these, the claim of "learning continuously without forgetting" is inadequately supported.
 
-- **Experiments are limited to two small datasets with hand-crafted features**: The Fruits and HomeF datasets use Fourier descriptors, color means, and MFCCs extracted by fixed backbones. There is no demonstration with learned feature extractors (e.g., a CNN), raw data, or any dataset beyond these two domain-specific collections. This limits confidence in the method's generality across modalities, feature types, and problem scales.
+3. **The open-environment comparison with offline methods is asymmetric and overclaimed.** Offline methods (DAE, DBM, DJSRH, NRCH, FUME) are tested in a streaming setting where they see only one partition of data — precisely the setup they are not designed for. Their resulting accuracy drops are then presented as evidence of OML's superiority. A proper comparison would retrain offline methods cumulatively on all available data, or (better) compare against methods actually designed for continual learning. As presented, the headline results in Tables 1–2 are manufactured by design.
 
 ### Minor
 
-- **No ablation study isolating the reference-extraction mechanism**: The paper does not report what happens when the `re()` function is disabled. Without this ablation, we cannot determine how much of OML's advantage in Table 2 comes from the reference-extraction component versus other architectural differences from ART/AEN. An ablation comparing OML with and without reference extraction would substantially strengthen the paper.
+4. **No statistical significance or variance reported.** All tables present single numbers with no error bars, confidence intervals, or mention of multiple runs. For comparative claims, this is a serious omission by modern standards.
 
-- **Comparison with offline methods in the open environment is expected but overemphasized**: The offline methods (DAE, DBM, DJSRH, etc.) are trained sequentially on class-disjoint data splits — a protocol they were never designed for. Their performance collapse confirms they are not continual-learning methods, which is already known. While this serves as a sanity check, it does not provide meaningful evidence for OML's superiority. The comparison with ART and AEN is the informative one.
+5. **No ablation studies.** The architecture has multiple interacting components (lateral connections, reference extraction, frequency-based pathways, conflict detection), yet none are ablated. It is impossible to tell which components drive performance. The reference extraction threshold \(r=0.5\) and other hyperparameters (\(\theta, \vartheta, T\)) are given single values with no sensitivity analysis.
 
-- **No hyperparameter sensitivity analysis**: Key thresholds (*θ*, *ϑ*, *r*) are set to fixed values with no sensitivity study. For a method that relies heavily on hand-set thresholds for activation gating, similarity matching, and reference extraction, reporting how performance varies with these parameters is important for assessing robustness.
+6. **Missing contemporary continual learning baselines.** Only two online baselines are compared (ART, AEN), both from the same research group. Standard CL methods (EWC, GEM, A-GEM, DER++, BiC, LwF) are absent, as are recent multimodal CL approaches. The paper's comparison to offline methods in an online setting does not fill this gap.
+
+7. **Method description lacks algorithmic clarity.** While the architecture is described in detail with equations (Eqs. 1–8), the learning algorithm is presented only as a narrative description of four scenarios (Section 3.5). No pseudocode, algorithm summary, or training loop is provided. Given the system's complexity, this makes reproduction unnecessarily difficult.
 
 ### Trivial
 
-- The mathematical notation is dense in places (particularly Eqs. 1, 5, 6) and would benefit from clearer indexing conventions and intuitive explanations alongside the formal definitions. This is a readability issue, not a correctness problem — the accompanying natural-language descriptions generally convey the intended meaning.
-
-- The anthropomorphic framing ("makes our method do learning like the way humans do") is an overclaim. The connection to human learning is metaphorical and not supported by behavioral or neuroscientific evidence. This is a presentation issue that inflates reader expectations unnecessarily.
+8. The phrase "All the designs make our method do learning like the way humans do" (Abstract and Conclusion) is an overclaim not supported by any evidence in the paper.
 
 ## Nice-to-Haves
 
-- Testing the method with a learned visual backbone (e.g., a small pretrained CNN) instead of hand-crafted Fourier descriptors and color means would demonstrate that the approach does not depend on engineered features.
-- A visualization of the mean/variance evolution for example words (e.g., "red," "apple") as more samples are learned would make the reference-extraction mechanism more interpretable.
-- Quantitative measurement of forgetting (e.g., how performance on earlier classes degrades as new classes are added) would complement the open-environment protocol.
+- A proper continual learning evaluation on standard benchmarks (e.g., split CIFAR-100 or multimodal variants) with standard CL metrics (forgetting, BWT, FWT) and appropriate CL baselines.
+- Quantitative evaluation of conflict detection: precision, recall, and F1 on a held-out set with known mismatches, plus accuracy of question posing.
+- Human-in-the-loop simulation experiments showing how interaction affects subsequent accuracy.
+- Pseudocode for the main learning algorithm to aid reproducibility.
+- Ablation studies isolating the contributions of lateral connections, reference extraction, frequency-based pathways, and conflict detection.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-- **Harsh Critic: "The comparison in Table 2 is uninformative because ART/AEN metrics are inflated."** — REMOVED per hard rules. The paper explicitly states that returning all features (shape + color) is counted as correct for ART/AEN, which inflates *baseline* performance. This asymmetry favors the baselines, not OML. The comparison is thus conservative in OML's direction.
-
-- **Harsh Critic: "There is no gradient-based optimization, no training objective — not a machine learning model."** — WEAKENED and reframed. The paper operates in the ART / self-organizing neural network paradigm, which is a legitimate subfield of neural-network-based machine learning. The criticism has been reframed as a Major weakness about the method's representational limitations rather than a dismissal of the paradigm.
-
-- **Strength Finder: "Biologically inspired hierarchical architecture with ascending, descending, and lateral pathways."** — Dropped as generic. The architecture description is accurate but every brain-inspired paper claims this; it is not an evidenced strength.
-
-- **Strength Finder: Generic praise about "interesting problem" and "plausible architectural template."** — Dropped as superficial. These are descriptions, not specific, evidenced strengths.
+- **"Reference extraction evaluated indirectly and without proper controls"** — The paper explicitly states it counts "all features (shape and color) of red objects" as correct for baselines, which is generous to them. The asymmetry favors baselines (not the author's method), so per the hard rule this criticism is removed.
+- **"The close vs. open environment distinction is confused"** — This reflects a misunderstanding. Close environment (random samples from all classes) vs. open environment (disjoint class splits) is a standard distinction in continual learning evaluation.
+- **"Table 2: OML's drop not marked with ↓"** — OML drops ~2 points (e.g., 89.2→87.3) while offline methods drop 10+ points. The paper marks "significant drops," and labeling OML's small drop would be misleading. Pure formatting nitpick.
+- **"The paper does not explain why AEN's numbers differ from Xing et al. 2021"** — The paper follows the experimental setup of Xing et al.; re-implementation differences are standard and expected.
+- **"Method under-specified to the point of irreproducibility"** — The paper provides equations, thresholds, architecture diagrams, and narrative description of the four learning scenarios. While a pseudocode summary would help, the method IS specified — just complex. The claim that "how new neurons are created" is missing is factually wrong (Section 3.5 explicitly describes initialization for all four cases).
+- **"No statistical significance or variance"** was already listed as Minor above; the harsh critic's framing as "unacceptable" is overwrought for this paper's community norms (single-run evaluation is common in multimodal retrieval literature).
 
 ## Novel Insights
 
-The paper's use of the coefficient of variation of descending signals to autonomously identify which feature dimensions a word refers to is genuinely novel. The insight that attribute-referring words produce stable signals in their target feature dimensions (low variance) while varying in irrelevant dimensions (high variance) is intuitively appealing and algorithmically operationalized. This addresses a real problem — distinguishing object names from attribute words — that prior online multimodal methods (ART, AEN) simply ignore by treating all word types identically. While the experimental validation is limited, the core idea is sound and could inspire further work in grounded language learning.
+None beyond the paper's own contributions. The reviews surface the standard tension between an architecturally novel system and an evaluation that does not match the breadth of its claims, but do not contribute new analytical insights beyond those observations.
 
 ## Suggestions
 
-1. Add a quantitative evaluation of conflict detection: report precision and recall at multiple mismatch ratios (e.g., 5%, 10%, 20%), test with different simulated user policies (always-yes, always-no, random), and measure the downstream effect on retrieval accuracy.
+1. **Reframe the paper's contributions honestly.** Drop or heavily qualify the conflict detection / human-in-the-loop claim, since it is evaluated with zero evidence. The architecture and reference extraction algorithm are themselves a sufficient contribution.
 
-2. Include an ablation where the `re()` function is disabled (or replaced with an all-features baseline) on the E-Fruits / E-HomeF datasets to isolate the contribution of reference extraction.
+2. **Re-do the experimental evaluation.** Replace the asymmetric offline-baseline comparison with proper continual learning baselines (EWC, GEM, A-GEM, DER++) on standard CL benchmarks, report forgetting and backward/forward transfer metrics, and include error bars over multiple runs.
 
-3. Report hyperparameter sensitivity for *θ*, *ϑ*, and *r*, or at minimum justify the chosen values with a brief empirical motivation.
+3. **Add ablation studies.** At minimum, ablate lateral connections, reference extraction, and the frequency-based routing mechanism to validate their individual contributions.
 
-4. Replace the anthropomorphic claims ("learning like humans") with more precise language about what the system does: online associative memory with structural plasticity, reference disambiguation, and consistency-based conflict detection.
+4. **Provide pseudocode.** The learning algorithm (Section 3.5) should be summarized as a clear algorithmic listing to enable reproduction.
 
-5. Discuss the scope of "learning" explicitly — acknowledge that the method stores instances and adapts connectivity rather than optimizing a loss function or learning feature transformations, and clarify why this design is appropriate for the targeted online multimodal setting.
+## Score and Decision
 
----
+### Calibration Anchors
 
-**Anchor comparison for score calibration:**
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/6Kfbi3ngT1.md` | 2.67 | Lower-quality paper with weaker novelty; current paper has stronger architecture but similar evaluation gaps. Current paper is stronger overall. |
+| `/home/wg25r/review_agent/human_reviews_2026/eCrvaO0WVF.md` | 4.50 | Comparable profile — novel idea with evaluation gaps. Dynamic Alignment paper had stronger ablation and more standard baselines but narrower scope. Current paper is slightly weaker in evaluation rigor. |
+| `/home/wg25r/review_agent/human_reviews_2026/pBb25np2bD.md` | 5.00 | Better-evaluated paper with clear experiments on standard benchmarks. Current paper has more architectural novelty but substantially weaker evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/P05rwPJ7sS.md` | 3.50 | Similar score band. Novelty comparable, evaluation quality comparable. Current paper is slightly more innovative in architecture. |
+| `/home/wg25r/review_agent/human_reviews_2026/F4dntnOqDE.md` | 5.50 | Better-evaluated brain-inspired CL architecture with ablation studies, multiple metrics, and standard benchmarks. Current paper is less rigorously evaluated. |
+| `/home/wg25r/review_agent/human_reviews_2026/l13qyPJyUF.md` | 3.60 | Similar profile — novel setting but missing baselines and evaluation gaps. Current paper has comparable issues. |
 
-| Anchor | Avg Score | Comparison to paper under review |
-|--------|-----------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/BNZnqTlQjZ.md` | 2.50 | Same research lineage (Xing et al.), similar hierarchical architecture. Our paper adds reference extraction and conflict detection — genuine algorithmic contributions beyond that work. Both share limitations of small datasets and hand-crafted features. This paper is clearly stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/6Kfbi3ngT1.md` | 2.67 | Multimodal continual learning with CLIP. More modern infrastructure but criticized for minimal novelty. Our paper has more concrete algorithmic novelty (reference extraction, conflict detection) but less modern methodology. |
-| `/home/wg25r/review_agent/human_reviews_2026/Mn6Q4LWyiv.md` | 4.00 | Brain-inspired multimodal emotion recognition. Similar level of neuroscience-inspired framing and some concerns about superficial borrowing. Our paper has more concrete algorithmic contributions and is roughly comparable in quality. |
-| `/home/wg25r/review_agent/human_reviews_2026/KjxS4AgFol.md` | 5.00 | Bio-inspired continual learning (MSCN), accepted as poster. Much more comprehensive experiments (4 benchmarks, SNN+ANN variants). Our paper has narrower experimental scope and less rigorous validation. This anchor is stronger than our paper. |
-| `/home/wg25r/review_agent/human_reviews_2026/pBb25np2bD.md` | 5.00 | LMM continual learning with extensive experiments across model families and benchmarks. Much stronger experimental validation than our paper. |
-| `/home/wg25r/review_agent/human_reviews_2026/eCrvaO0WVF.md` | 4.50 | Dynamic alignment for multimodal CL. Withdrawn but had mid-range scores. More standard ML methodology, comparable novelty. Our paper is slightly weaker in experimental rigor. |
-| `/home/wg25r/review_agent/human_reviews_2026/F4dntnOqDE.md` | 5.50 | NeuMoSync — neuromodulatory control for CL. Rejected despite strong scores. More principled approach with clearer mechanism. Our paper is weaker. |
+The paper has genuine architectural novelty and an elegant reference extraction mechanism, but two of its central claims (conflict detection/interaction and forgetting-resistance) are either unevaluated or evaluated through unfairly asymmetric comparisons. The paper sits in the 3–4 range on the ICLR scale: contributions are real but the evaluation does not support the breadth of the claims.
 
-The paper makes real, concrete contributions (reference extraction, conflict-detection mechanism) that advance a specific research niche, with consistent but limited experimental support. It is clearly stronger than the 2.50–3.00 anchors, comparable to the 4.00 anchor (Mn6Q4LWyiv), but falls meaningfully short of the 5.00+ anchors in experimental scope and rigor. The insufficient evaluation of the conflict-detection claim and the hand-engineered nature of the system are the main limiting factors.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

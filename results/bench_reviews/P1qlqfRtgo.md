@@ -1,113 +1,94 @@
-Now I have a thorough understanding of the paper and good calibration anchors. Let me write the consolidated review.
-
----
+Now I have a thorough understanding of the paper and calibration anchors. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper compares three neural network architectures — a plain MLP, a DeepONet-style two-stream model, and a U-Net-like residual network — for approximating thermal explosion kinetics in a hydrogen–air mixture. Training data is generated from a stiff ODE solver across wide ranges of temperature, pressure, and timestep, and models are trained with multi-step recursive prediction (30 steps). The U-Net-like architecture achieves substantially lower MSE than the alternatives, and the paper argues that architecture choice is critical for combustion surrogate modeling.
+This paper compares three neural network architectures — a plain MLP, a "U-Net–like" residual network (essentially a residual MLP with local and global skip connections), and a "DeepONet–style" two-branch network — as surrogate models for the thermal explosion dynamics of a hydrogen–oxygen–air mixture governed by stiff chemical kinetics. The models are trained on a dataset covering wide parameter ranges (T∈[250,5000] K, p∈[10⁴,2×10⁷] Pa, Δt∈[10⁻¹⁰,10⁻⁵] s) with a multi-step recursive loss over 30 timesteps. The U-Net–like model achieves a mean MSE of 0.0013 with non-overlapping 95% CIs versus the MLP (0.0202) and DeepONet (0.0181), and its trajectories remain better phase-aligned with the reference on challenging test cases.
 
 ## Strengths
 
-- **Well-motivated problem**: The paper tackles a genuine computational bottleneck — stiff ODE integration consumes ~90% of simulation time in reactive flow CFD — and frames the architecture comparison around a physically realistic dataset with extreme parameter ranges (T: 250–5000 K, p: 10⁴–2×10⁷ Pa, Δt: 10⁻¹⁰–10⁻⁵ s). This is a more demanding testbed than the fixed-timestep, preselected-instant setups common in prior operator-learning studies (Section 3).
+- **Statistically significant empirical improvement on a real-world problem**: The U-Net–like model achieves a mean MSE of 0.0013 with 95% CI [7.7×10⁻⁴, 1.98×10⁻³], which does not overlap with the MLP's CI [1.84×10⁻², 2.22×10⁻²] or the DeepONet's CI [1.65×10⁻², 1.97×10⁻²] (Table 1). The absolute reduction in MSE (~15–20×) is large, and the use of CIs provides some statistical grounding.
 
-- **Sensible training protocol**: Training with 30-step recursive prediction (Equation 4) to account for error accumulation is an appropriate design choice for integrator surrogates. It goes beyond naive single-step training and exposes models to the compounding error dynamics they would face in deployment.
+- **Phase-aligned predictions on challenging trajectories**: In both low-MSE and high-MSE test cases, the U-Net–like model's output stays synchronized with the reference — capturing sharp ignition peaks, decay phases, and plateaus at the correct times — while the MLP and DeepONet predictions drift and accumulate phase lag (Figures 3 and 4). This demonstrates that the architectural choice affects not just raw error but physical consistency.
 
-- **Physically motivated constraints**: All three architectures explicitly copy the time increment Δt and inert species concentrations (N₂, Ar) from input to output, preserving physically invariant quantities. This is a simple but well-justified inductive bias (Sections 4.1–4.3).
+- **Practically relevant, wide-range dataset**: The training data spans temperature 250–5000 K, pressure 10⁴–2×10⁷ Pa, and timesteps 10⁻¹⁰–10⁻⁵ s, covering regimes from slow reactions to abrupt autoignition (Section 3). This goes beyond the narrow-range scenarios common in prior work on neural operator surrogates for kinetics.
 
-- **Honest assessment of limitations**: The paper acknowledges that large error spreads persist even for the best model and that "the problem remains unresolved," avoiding the overclaiming common in architecture comparison papers (Abstract, Section 5).
+- **Multi-step recursive training**: The loss function (Eq. 4) forces models to account for error accumulation over 30 autoregressive steps, which is a practical requirement for surrogate models used in time-stepping simulations (Section 4.4).
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Insufficient experimental breadth for the claims made**: The paper evaluates only three architectures on a single problem (thermal explosion of one H₂–air mixture). All three architectures are shallow fully-connected networks (3–5 layers, 100–120 units) differing mainly in skip-connection topology and input routing. The central claim — that architecture choice is critical for combustion surrogate modeling — is supported by exactly one pairwise comparison (U-Net > MLP ≈ DeepONet-style) on one dataset. This falls well short of establishing a generalizable principle. For context, comparable architecture-benchmark papers in the calibration set (e.g., RLBenchNet, which evaluated 6 architectures across 12 RL tasks) were considered too narrow and rejected at score 2.0. Here, with N=3 architectures and N=1 problem, the evidential basis for the claimed insight is thin.
-
-- **No ablation isolating the active architectural ingredient**: The U-Net-like model differs from the MLP in having skip connections (both local and global). The DeepONet-style model differs from the MLP in having a two-stream multiplicative fusion. But the paper never ablates which *specific feature* of the U-Net — local skips, global skips, or both — drives the improvement. Without this, the paper cannot explain *why* U-Net outperforms, only *that* it does. The conclusion that skip connections help is already well established in deep learning; the paper does not contribute new understanding about combustion-specific architecture design.
-
-- **Missing analysis connecting accuracy to the motivating engineering metric**: The paper's introduction (Section 1–2) motivates the work by noting that stiff ODE solving consumes ~90% of simulation time and that neural surrogates should accelerate this. Yet the paper reports no wall-clock timing, no FLOP counts, and no integration-step comparison against the baseline ODE solver at equivalent accuracy. The paper claims the U-Net achieves better performance "without increasing computational cost" (Section 5) but provides zero computational cost measurements. A model could achieve perfect MSE and still be useless if each forward pass is slower than the stiff solver it replaces. Without connecting accuracy to the actual engineering metric, the paper cannot support its motivating claim about practical relevance.
+- **Unclear data splitting procedure raises data leakage concerns**: The paper states only that "50,000 training, 15,000 validation, 5,000 test samples" are used (Section 3), but does not specify whether the split respects trajectory boundaries (i.e., whether all time points from a given trajectory are kept in a single split). If samples from the same trajectory appear across training and test sets, the model could be evaluated on states correlated with those seen during training, inflating reported performance. This is a critical methodological omission that undermines confidence in all quantitative results.
 
 ### Minor
 
-- **Statistical reporting quality needs attention**: The standard deviations for all models are substantially larger than their means (U-Net: std ≈ 17× mean; MLP: std ≈ 3.4× mean), indicating highly non-normal error distributions. The paper uses normal-approximation 95% confidence intervals without discussing whether this approximation is valid under such skew. Additionally, the CI bounds in Table 1 for U-Net ([7×10⁻⁴, 1×10⁻³]) do not contain the reported mean (1.3×10⁻³), though the in-text CI ([7.692×10⁻⁴, 1.980×10⁻³]) does — suggesting a formatting truncation in the table. The core statistical conclusion (non-overlapping CIs between U-Net and the others) survives this issue, but the reporting should be cleaned up and the CI methodology justified given the distribution.
+- **Architecture naming is imprecise**: The "U-Net–like" architecture (Section 4.2) is a residual MLP with two skip connections — no down/up sampling, no convolutions, no encoder–decoder structure. While the paper consistently uses qualifiers ("-like", "-style", "-inspired"), the term "U-Net" carries specific connotations in the literature that this architecture does not satisfy. Similarly, the "DeepONet–style" model (Section 4.3) is a non-standard implementation: the trunk receives a scalar Δt rather than query coordinates, and the branch receives the 12 state variables rather than encoding an input function sampled on a sensor grid. This reduces the DeepONet comparison to a comparison against a particular two-branch MLP, rather than a test of operator-learning capabilities. The claim that the paper compares "operator-learning architectures" is overstated.
 
-- **Only two qualitative examples, no distributional error analysis**: The paper shows one "good" trajectory (bottom 10% MSE) and one "difficult" trajectory (upper quartile). There is no per-species error breakdown, no analysis of which operating regimes (high T? low p? large Δt?) are hardest, and no distribution of errors across the test set beyond aggregate mean and std. The claim that U-Net "captures both transient peaks and long-term plateaus" (Section 5) is supported by two anecdotes, not systematic evidence.
+- **No control for model capacity or ablation of skip connections**: Parameter counts are not reported, and no experiment isolates whether the U-Net's improvement comes from its specific architectural design (e.g., skip connections) versus simply having more effective capacity or favorable initialization. An ablation removing the skip connections from the U-Net would be the natural control, but is absent. The paper's central claim — that "architecture" is responsible for the improvement — would be strengthened by this evidence.
 
-- **Overclaiming in conclusions**: The conclusion states that "the choice of architecture can be as critical as the size or the diversity of the dataset" — a claim about relative importance that was never tested (no architecture was evaluated across varying dataset sizes). The promise of "interpretable, accurate, and robust tools" is unsupported, as no interpretability analysis was conducted.
+- **Evaluation relies solely on MSE with no physically interpretable metrics**: The paper reports only MSE on normalized variables (Table 1) and shows illustrative trajectory plots (Figures 3, 4). For combustion kinetics, practitioners care about quantities such as ignition delay time error, peak temperature error, species peak concentrations, or time-to-equilibrium. Without connecting the MSE improvement to any physically meaningful quantity, the practical significance of the U-Net's lower MSE is unclear, and the claim that it "preserved the correct qualitative dynamics" remains anecdotal.
 
-- **Architecture naming is imprecise**: The "U-Net" is a dense network with skip connections (more accurately described as a residual network or ResNet), not the convolutional encoder-decoder with spatial downsampling/upsampling that the U-Net name conventionally implies. The "DeepONet" uses a two-stream multiplicative fusion that is inspired by but does not fully implement the DeepONet framework (the branch does not encode the entire input function). The architectures are clearly described in the text, so this does not affect reproducibility, but the naming overstates the architectural novelty.
+- **The DeepONet and MLP perform indistinguishably**: The CIs for MLP and DeepONet overlap substantially (Section 5), meaning the DeepONet-style architecture offers no benefit over a plain MLP. This weakens the narrative of comparing "operator learning" versus "hierarchical" architectures, as the supposed operator-learning baseline fails to demonstrate any operator-learning advantage. The paper would benefit from testing a properly implemented operator-learning baseline (e.g., a standard DeepONet with sensor-point function encoding, or a Fourier Neural Operator).
 
 ### Trivial
 
-- The relationship between the learned mapping (state at t → state at t+Δt) and the governing ODE (Equation 1) is stated but never analytically discussed. The paper could clarify whether the model is learning the flow map of the ODE or something else.
-- Only 100 training epochs with batch size 5,000 on a dataset of 50,000 samples — training dynamics (convergence, overfitting) are not discussed.
+- The paper does not report how confidence intervals were computed (e.g., bootstrap or analytical formula).
+- The selection criteria for "representative" trajectories in Figures 3 and 4 (lowest 10% and upper quartile) are noted but no median case is shown.
+- Runtime or FLOP measurements to support the claim that the U-Net "does not increase computational cost" are absent.
 
 ## Nice-to-Haves
 
-- **Wall-clock timing comparison** against the stiff ODE solver (Novikov, 2007) at equivalent accuracy thresholds would connect the accuracy results to the stated engineering motivation.
-- **Per-species error breakdown** would reveal which chemical species (e.g., radicals vs. inert species) drive the MSE differences and whether the models preserve physical invariants.
-- **Ablation isolating skip connections** (local-only, global-only, both) would transform the paper from "U-Net works better" to "here is which architectural feature matters and why."
-- **Error characterization across Δt regimes** — since the models take Δt as input, analyzing whether errors increase predictably with Δt would inform whether the learned mapping respects the stiffness of the underlying ODE.
-- **Comparison against a simple interpolation baseline** (e.g., ISAT from Pope, 1997, which is already cited) would contextualize whether any neural approach is warranted.
+- An ablation removing skip connections from the U-Net to isolate their effect.
+- Reporting physically relevant metrics: ignition delay time error, peak temperature error, and time-to-equilibrium error for each architecture.
+- A properly implemented operator-learning baseline (standard DeepONet or FNO) to support the claimed comparison.
+- Validation on trajectories with initial T/p outside the training distribution.
+- Error bar or violin plots showing per-trajectory error distributions.
+- Error accumulation as a function of recursive step number (steps 1–30).
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed, treat them with caution.
 
-- **"The evaluation framework is circular" (Harsh Critic, Point 1)**: The harsh critic claimed training on multi-step MSE and evaluating on MSE is circular. This is standard practice — training and testing use the same metric family, evaluated on disjoint data splits. The circularity concern is unfounded. The legitimate part of this criticism (missing wall-clock timing) is retained above as a Major weakness.
+1. *Strength Finder's claim that "ablative architectural comparison isolates the effect of skip connections"* — This conflicts with the verified weakness that no ablation of skip connections was performed. The comparison between MLP and U-Net does not isolate the effect of skip connections because the architectures differ in multiple ways beyond skip connections.
 
-- **"The DeepONet baseline is not a proper DeepONet, invalidating the comparison" (Harsh Critic, Point 2)**: The paper explicitly calls the model "DeepONet-style" and "DeepONet-inspired" (not "DeepONet"), and clearly describes the architecture in Section 4.3. The design — separating processing of the evaluation coordinate (Δt) from the state representation and combining them multiplicatively — is genuinely inspired by DeepONet's branch–trunk decomposition. The comparison is fair and the naming is honest. The harsh critic's claim that this "invalidates the central comparative claim" is an overstatement.
+2. *Harsh Critic's claim that "the 'U-Net–like' architecture... invalidates the claimed comparisons"* — The paper consistently uses qualifiers ("U-Net–like", "U-Net–style", "U-Net–inspired") and describes the architecture transparently (Section 4.2). While the naming is imprecise, it does not invalidate the comparison — it merely means the comparison is between a residual MLP, a plain MLP, and a two-branch network, which is a weaker but still valid finding.
 
-- **"95% confidence intervals are computed incorrectly / the mean lies outside its own CI" (Harsh Critic, Point 3)**: The table's CI [7×10⁻⁴, 1×10⁻³] appears to be a formatting truncation artifact. The in-text CI [7.692×10⁻⁴, 1.980×10⁻³] (line 361) does contain the mean (1.3×10⁻³), and the non-overlap with MLP/DeepONet CIs holds under either rendering. A legitimate methodological concern about normal-approximation CIs under high-variance distributions is retained as a Minor weakness above.
+3. *Harsh Critic's claim that the paper "overstates results" in the abstract* — The abstract's claim that "the problem remains unresolved" coexists with the U-Net's lower MSE; this simply acknowledges that even the best model has large error variance, which is a reasonable statement.
 
-- **"The problem remains unresolved" is a damaging admission (Harsh Critic, Section-by-Section notes)**: This is honesty, not a weakness. Many papers oversell marginal improvements; acknowledging limitations is a strength.
-
-- **"Parameter ranges produce unphysical combinations" (Harsh Critic, Section 3)**: The dataset is generated by an actual stiff ODE solver that computes valid physical trajectories from whatever initial conditions it receives. Every trajectory in the dataset is therefore physically consistent. The critic's concern about independently sampled initial conditions producing unphysical states misunderstands how the data is generated.
-
-- **"U-Net is not a U-Net — it's a ResNet" (Harsh Critic, Section 4)**: Addressed in the Minor weakness about imprecise naming. The architecture is clearly described; the naming issue is minor.
-
-- **"Missing comparison against ISAT baseline" (Harsh Critic, Missing Experiments)**: ISAT is a tabulation method, not a neural network. The paper's scope is comparing neural network architectures, not neural networks vs. classical methods. This is outside scope.
-
-- **"Equation (1) is never used again" (Harsh Critic, Section 2)**: Trivial. The equation states the problem; the paper then proceeds empirically.
-
-- **Strength Finder: "Systematic architectural comparison under realistic combustion conditions"**: Retained as a strength but qualified — the comparison is systematic within its narrow scope. The term "systematic" overstates what is ultimately a three-model comparison on one problem.
-
-- **Strength Finder: "Rigorous evaluation with multi-step forecasting and statistical significance"**: Partially retained. Multi-step training is a genuine strength. The statistical significance claim is qualified due to CI methodology concerns.
-
-- **Strength Finder: "Critical engagement with prior operator-learning studies"**: Dropped. The engagement with Goswami et al. (2024) is brief (one paragraph) and the critique of fixed-timestep training applies equally to this paper, which also uses a fixed training set rather than learning a continuous-time operator.
+4. *Criticism about missing regularization details (dropout, weight decay)* — These are hyperparameter choices not standardly required for every architecture comparison paper.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews converge on the observation that while the paper asks a reasonable question, the answer is thin: a residual network beats a plain MLP on this specific problem, which confirms a known property of skip connections rather than revealing anything new about combustion surrogate modeling.
+None beyond the paper's own contributions. The reviews surface a tension: the paper's core empirical result (residual skip connections in an MLP substantially reduce MSE on stiff chemical kinetics) is practically interesting, but the reviewers correctly identify that the experimental design — especially the non-standard baseline implementations, missing data-splitting details, and lack of capacity control — prevents this finding from being cleanly attributed to the claimed architectural comparison. The main novel observation across the reviews is that the work's value would be significantly strengthened by (a) clarifying the data split protocol, (b) implementing the baselines in a way that genuinely tests the stated hypothesis (operator learning vs. hierarchical architectures), and (c) connecting MSE improvements to physically meaningful combustion metrics.
 
 ## Suggestions
 
-- **Run the ablation that would make this paper publishable**: Compare (a) plain MLP, (b) MLP + local skips only, (c) MLP + global skip only, (d) full U-Net-like (both skips). This would isolate the active ingredient and transform the contribution from "U-Net wins" to "here is which architectural feature matters for stiff kinetics and why."
-- **Add a second problem or dataset**: Even one additional kinetic mechanism (e.g., methane–air) would substantially strengthen the claim that architecture choice matters *in general* rather than for this one specific system.
-- **Report per-species errors and per-Δt-regime errors**: This would provide practical guidance on which species or regimes are hardest and whether certain architectures handle stiff regimes better.
-- **Add at least a rough wall-clock comparison**: Even a simple inference-time measurement vs. the ODE solver on a few representative trajectories would connect the accuracy results to the motivating engineering claim.
-
----
+1. **Clarify the data splitting procedure**: Explicitly state whether the train/validation/test split is trajectory-based (all time points from a single trajectory in one split) or random-sample-based. If the latter, re-run experiments with trajectory-level splits and report whether results change.
+2. **Rename the architectures**: Call the U-Net–like model a "residual MLP with skip connections" and the DeepONet–style model a "two-branch network" to avoid overclaiming architectural provenance.
+3. **Add an ablation**: Train the U-Net–like model without the skip connections to isolate the effect of those connections vs. the effect of overall capacity/depth.
+4. **Report parameter counts**: Show the number of parameters for each architecture and, ideally, plot performance vs. parameter count to rule out capacity confounds.
+5. **Add physically interpretable metrics**: Report ignition delay time error, peak temperature error, and time-to-peak error for each architecture. If the U-Net preserves these correctly while others do not, this would be a much stronger result.
 
 ## Score and Decision
 
-### Anchor comparison
+**Calibration Anchors** (returned from `calibration_search`; all listed, including those read in full):
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/2hTLJEgCbv.md` (VAE architecture comparison) | 1.00 | Reject | Our paper is substantially stronger: real scientific domain, better data generation, multi-step training. |
-| `/home/wg25r/review_agent/human_reviews_2026/3u5Ti1CfzE.md` (RLBenchNet) | 2.00 | Reject | Similar genre (architecture benchmark). RLBenchNet had more architectures (6) and more tasks (12), yet was rejected for lack of novelty and limited scope. Our paper has fewer architectures (3), fewer problems (1), and no actionable guidelines beyond "use skip connections." |
-| `/home/wg25r/review_agent/human_reviews_2026/kIT1aA8SbY.md` (HC-PINN) | 3.00 | Reject | HC-PINN had systematic ablations, theoretical analysis, and 7 benchmarks. Our paper has no theory, 1 problem, and no ablations isolating architectural features. Our paper is weaker. |
-| `/home/wg25r/review_agent/human_reviews_2026/d4gzLgGl7I.md` (ShockCast) | 5.00 | Accept (Poster) | ShockCast proposed a novel two-phase framework with multiple architectural innovations. Our paper is a pure empirical comparison with no methodological novelty. Substantially weaker. |
-| `/home/wg25r/review_agent/human_reviews_2026/Ro282CMb1O.md` (U-Bench) | 5.00 | Reject | U-Bench evaluated 100 U-Net variants across 28 datasets with statistical rigor. Our paper's 3-architecture, 1-problem scope is incomparably smaller. |
-| `/home/wg25r/review_agent/human_reviews_2026/3VdSuh3sie.md` (Frozen-PINN) | 7.00 | Accept (Oral) | Frozen-PINN had genuine methodological novelty, 9 benchmarks, orders-of-magnitude improvements. Our paper is in a different league. |
-| `/home/wg25r/review_agent/human_reviews_2026/4jMeUvcO26.md` (Rayleigh-Bénard surrogate) | 5.33 | Reject | Novel equivariant architecture + autoencoder for 3D convection. Much stronger methodological contribution. |
-| `/home/wg25r/review_agent/human_reviews_2026/iBLHGdBImw.md` (GNN CFD surrogates) | 2.50 | Reject | Similar genre (surrogate modeling). Failed on generalizability concerns. Our paper has similar scope limitations but better experimental design. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|--------------------------|
+| /home/wg25r/review_agent/human_reviews_2026/2hTLJEgCbv.md (VAE architectures, MNIST) | 1.00 | **Much weaker** — single dataset, zero methodological novelty, far less practical relevance. This paper is substantially stronger. |
+| /home/wg25r/review_agent/human_reviews_2026/GXAsUKNyqN.md (Droplet dynamics benchmark) | 3.50 | **Comparable** — both have practical real-world problems and reasonable datasets but suffer from thin analysis and methodological gaps. |
+| /home/wg25r/review_agent/human_reviews_2026/79nfkvRzH1.md (MW-Net) | 3.00 | **Comparable** — incremental architecture contribution with limited novelty but broader experimental evaluation. Both papers struggle to justify their contribution level. |
+| /home/wg25r/review_agent/human_reviews_2026/4jMeUvcO26.md (Equivariant surrogate, 3D Rayleigh-Bénard) | 5.33 | **Stronger** — more technically rigorous (equivariance theory, controlled experiments), clearer contribution, though also limited to a single PDE system. |
+| /home/wg25r/review_agent/human_reviews_2026/248ysaRatx.md (Quantum RNN universality) | 8.00 | **Much stronger** — rigorous theoretical proofs, clear and novel contribution, excellent technical depth. This paper is far below this quality bar. |
+| /home/wg25r/review_agent/human_reviews_2026/2hTLJEgCbv.md (also returned in low-score queries) | 1.00 | See above. |
+| /home/wg25r/review_agent/human_reviews_2026/OPFE1zPYbU.md (Diffusion model in high dimension) | 1.00 | **Much weaker** — unfounded claims, no empirical support. This paper at least has real data and results. |
+| /home/wg25r/review_agent/human_reviews_2026/NEDh1WmsgO.md (CIL forgetting explanation) | 5.00 | **Somewhat stronger** — more systematic analysis, though in a different domain. |
+| /home/wg25r/review_agent/human_reviews_2026/qO1cJBh5BX.md (Probabilistic DiffusionNet) | 5.00 | **Stronger** — more sophisticated methodology, uncertainty quantification. |
+| /home/wg25r/review_agent/human_reviews_2026/3VdSuh3sie.md (Frozen-PINN) | 7.00 | **Much stronger** — novel method with strong empirical results across 9 PDE benchmarks. |
+| /home/wg25r/review_agent/human_reviews_2026/wAb8vtEZfM.md (Data efficient DL) | 1.20 | **Much weaker** — essentially no valid contribution. |
+| /home/wg25r/review_agent/human_reviews_2026/1CR1MTIgmq.md (False statements in TPAMI) | 0.00 | Not comparable — non-standard submission. |
 
-This paper is a competent but narrow empirical study. It addresses a real and important problem, uses sensible training methodology, and reports results honestly. However, the experimental scope (3 similar architectures, 1 problem, 1 dataset), the absence of mechanistic ablations, and the lack of connection to the motivating engineering metric (computation time) mean the contribution is too thin for acceptance at a top-tier venue. The paper reads as a preliminary experimental report that could become a solid contribution with (a) ablations isolating the active architectural features and (b) broader evaluation across multiple kinetic mechanisms.
+The paper occupies the 3–4 range on the ICLR scale. It identifies a practically relevant problem and provides a preliminary empirical result that residual connections improve surrogate accuracy for stiff chemical kinetics. However, the experimental design has several gaps — potential data leakage, non-standard baseline implementations, no capacity control, no ablation studies, and evaluation metrics disconnected from physically meaningful quantities — that prevent the results from cleanly supporting the paper's claims. These issues are fixable in principle, but in its current form, the paper does not meet ICLR's bar for contribution quality and evidential support.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

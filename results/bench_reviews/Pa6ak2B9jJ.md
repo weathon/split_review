@@ -1,104 +1,98 @@
-Now I have a solid picture of the paper and calibration. Let me compose the final review.
-
----
+Now I have a thorough understanding of the paper, the reviews, and the calibration anchors. Let me write the consolidated final review.
 
 ## Summary
 
-AUTO-RT proposes a reinforcement learning framework for automated jailbreak strategy discovery that decouples strategy generation from prompt rephrasing. The framework introduces Dynamic Strategy Pruning (DSP) to terminate unpromising branches early and Progressive Reward Tracking (PRT), which uses a downgrade model selected via the novel First Inverse Rate (FIR) metric to shape sparse rewards. Evaluation spans 16 white-box and 2 black-box LLMs from diverse families, with AUTO-RT achieving the highest attack success rate on 15/16 white-box models and demonstrating improved strategy diversity.
+This paper proposes AUTO-RT, a reinforcement learning framework for automatic jailbreak strategy exploration in LLMs. The key ideas are: (1) decomposing the attack model into a strategy generator (AM_g) and strategy rephrasing model (AM_r) for hierarchical exploration beyond static templates; (2) Dynamic Strategy Pruning (DSP) to terminate redundant exploration branches early; and (3) Progressive Reward Tracking (PRT) using downgraded target models and a novel First Inverse Rate (FIR) metric to smooth sparse rewards. Experiments across 16 white-box models and 5 black-box/commercial models show that AUTO-RT consistently outperforms strategy-level baselines (Few-Shot, Imitation Learning, RL) on ASR, semantic diversity, and defense generalization diversity.
 
 ## Strengths
 
-- **Broad and rigorous empirical evaluation across 18 models from 8+ model families** (Vicuna, Llama 2/3, Mistral, Yi, Gemma 2, Qwen 1.5/2.5, R2D2), covering both strong safety-aligned models (Llama 2 Chat) and adversarially trained ones (R2D2). AUTO-RT achieves highest ASR_tst on 15/16 white-box models (Table 1), with large margins on safety-aligned targets (e.g., Llama 2 7B Chat: 13.50 vs. 0.50 RL; Gemma 2 2B: 48.15 vs. 6.15 RL).
+1. **Novel hierarchical decomposition of the attack model** — Splitting the attack model into AM_g (strategy generation) and AM_r (strategy rephrasing) is a clean formalization (Eq. 2) that enables strategy-level exploration beyond fixed templates. The paper demonstrates this works: AUTO-RT achieves the highest ASRtst on 14 of 16 models in Table 1 against strategy-level baselines, with gains like 31.95→56.40 on Vicuna 7B and 6.15→48.15 on Gemma 2 2B.
 
-- **Ablation study (Table 2) cleanly demonstrates that DSP and PRT each contribute independently** to attack effectiveness, semantic diversity, and defense generalization diversity, with the full AUTO-RT outperforming RL alone by substantial margins (e.g., Vicuna 7B: 56.40 vs. 31.95 ASR_tst).
+2. **FIR metric for calibrated downgrade model selection** — The First Inverse Rate is a principled approach to identifying when a weakened model becomes unreliable for reward shaping. Figure 4 shows across 6 models that selecting the model before the FIR spike yields optimal attack performance, and over-weakening degrades results. This addresses a genuine challenge in reward shaping for red-teaming.
 
-- **The FIR metric provides a principled, data-driven criterion for selecting the downgrade model.** Figure 4 shows across six target models that selecting the last model before a sharp FIR increase yields optimal attack performance, and further weakening degrades guidance. This replaces ad-hoc selection with a replicable procedure.
+3. **Strong defense generalization diversity (DeD)** — AUTO-RT consistently and significantly outperforms all baselines on DeD, including AutoDAN (38.19 vs 17.88). This metric captures an important real-world property: whether a red-teaming method can continue finding effective attacks after its known strategies are defended against. The ablation study confirms PRT is the key driver of this benefit.
 
-- **Learned attack strategies exhibit non-trivial transferability** (Appendix Table 6): strategies trained on Vicuna 7B achieve 25.82 ASR on Vicuna 13B without re-optimization, and cross-family transfer is observed (e.g., Qwen → Vicuna). This is a practically valuable property for black-box red-teaming.
+4. **Extensive experimental evaluation across diverse model families** — The paper evaluates on 16 white-box models (Llama 2/3, Mistral, Yi, Gemma, Qwen 1.5/2.5, R2D2) plus 2 self-hosted black-box models and 3 commercial APIs (GPT-4.1, Gemini-2.5-Pro, Claude Sonnet 4). The ablation studies (Table 2, Appendix F) systematically disentangle the contributions of DSP and PRT across all 16 models, showing complementary roles.
 
-- The paper tackles a timely and important problem — automated discovery of diverse, reusable jailbreak strategies — and the RL formulation with strategy-level exploration is a natural and scalable framework.
+5. **Transferability analysis (Appendix C.2) and commercial model results (Appendix G)** — Strategies trained on one model transfer to others with non-trivial ASR (e.g., Vicuna 13B→Qwen1.5 7B at 25.50%). On commercial models, AUTO-RT beats AutoDAN convincingly (GPT-4.1: 22.38% vs 6.34%; Claude Sonnet 4: 12.45% vs 7.00%; Gemini-2.5-Pro: 7.30% vs 3.34%). These results, buried in appendices, are among the paper's strongest evidence.
+
+6. **Reward model robustness (Appendix C.1)** — The paper tests AUTO-RT with two different reward classifiers (LlamaGuard vs HarmBench-cls) and shows consistent performance, demonstrating the method is not brittle to the choice of safety judge.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The Defense Generalization Diversity (DeD) metric is insufficiently defined for reproducibility.** The paper provides only one sentence: "assessed by first attacking the target model, then constructing defenses based on the successful attacks, and evaluating the ASR_tst of second-round attacks on the defended model" (Section 3.1). Appendix D (Evaluation Metrics) defines SeD in full but contains no further DeD specification. The paper never states what constitutes a "defense," how it is constructed, or how the second-round evaluation is configured — yet DeD appears prominently in Tables 1, 2, 3, 4, and 8 and supports key claims (e.g., "PRT exhibits a more substantial impact" on DeD, Section 3.3.1). Without this specification, an entire evaluation dimension is unreproducible, and conclusions drawn from DeD comparisons cannot be independently assessed.
+1. **Framing mismatch: AUTO-RT underperforms AutoDAN on open-source ASR but the paper minimizes this.** Table 3 shows AutoDAN achieves 55.23% average ASRtst across all models vs AUTO-RT's 38.38% — a ~30% relative deficit. The paper states that AUTO-RT "not only achieves a high success rate in the first round of attacks (ASR_tst)" in Section 3.3.3 without acknowledging that AutoDAN substantially outperforms it. This is not a methodological flaw but a serious presentation/claim-accuracy problem. The paper's abstract and introduction claim AUTO-RT "significantly improves success rates" — this is true against strategy-level baselines (FS, IL, RL) in Table 1, but the paper never qualifies that this claim does not extend to template-evolution methods like AutoDAN on open-source models. The paper would be strengthened by honestly characterizing where AUTO-RT excels (DeD, commercial models) and where it does not (open-source ASR vs AutoDAN), and by explaining the nuanced picture (e.g., why AutoDAN dominates on average but AUTO-RT wins on GPT-4.1).
 
-- **The ASR_tst definition in the text is ambiguous and potentially implies test-set overfitting.** The text states ASR_tst is "the average ASR of the top 100 strategies with the highest ASR on T_tst" (Section 3.1), which reads as selecting the best-performing strategies based on test-set evaluation. However, Algorithm 2 (Appendix B) describes a different procedure: for each test intent, 100 strategies are sampled from the trained model AM^g_θ, and all are evaluated. If the text description reflects the actual procedure, the evaluation is invalid; if Algorithm 2 is correct, the text must be corrected. This ambiguity must be resolved, as it directly affects the credibility of the paper's main quantitative comparisons.
-
-- **No comparison to text-feedback-based automated red-teaming methods (PAIR, TAP, Rainbow Teaming).** These methods are discussed in related work (Section 4) and represent a major class of automated jailbreak approaches. The paper argues that numerical-feedback methods require more exploration (line 851-852), but without head-to-head comparison, this remains an untested claim. The gap is particularly relevant for the black-box setting (Section 3.3.4), where PAIR and TAP are natural competitors. The current baselines (FS, IL, RL, plus human-template methods AutoDAN, Human Template, Past-Tense) are insufficient to calibrate the claimed improvement over the broader state of the art. Adding these comparisons would substantially strengthen the paper, but their absence does not invalidate the demonstrated improvements over the included baselines.
+2. **The exploitability-vs-severity framing is never operationalized.** The introduction defines exploitability ("how easily a normal prompt can trigger a flaw") and severity ("how much harm results"), positioning AUTO-RT as addressing exploitability. However, the evaluation never measures exploitability directly — there is no experiment controlling for prompt complexity, user effort, or the ease with which an end user could trigger discovered vulnerabilities. Diversity (SeD, DeD) and transferability are reasonable proxies but the paper never argues why, and the framing is invoked once after the introduction and then dropped. This disconnect between the motivating narrative and the actual evaluation weakens the paper's coherence.
 
 ### Minor
 
-- **The exploitability/severity framing from the introduction is not directly operationalized in the method.** The paper draws a careful distinction between exploitability (ease of triggering) and severity (harmfulness of output) and argues that existing methods overlook exploitability. However, the optimization framework maximizes ASR, which captures whether the attack succeeds (a combination of both), without separately modeling or measuring exploitability. This is a conceptual mismatch between the motivating problem statement and the technical approach, though the method may still implicitly produce more exploitable attacks through strategy-level exploration.
+3. **Per-model breakdown for the Table 3 comparison against AutoDAN/HT/PT is missing.** Table 3 aggregates across all 16 models, masking which models favor which method. Given that the commercial model results (Appendix G) tell a different story than the aggregate (AUTO-RT beats AutoDAN on GPT-4.1, Gemini-2.5-Pro, Claude Sonnet 4), a per-model breakdown is essential for readers to understand the method's niche. For example, is AutoDAN's advantage concentrated on older/weaker models?
 
-- **Table 3 (comparison with human-based approaches) aggregates results across all 16 models into a single row per method**, hiding model-level variance. Per-model breakdowns are presented for other comparisons (Table 1); their absence here makes it impossible to assess whether AUTO-RT's advantage over AutoDAN, Human Template, and Past-Tense is driven by a subset of models. The paper should report per-model results for this comparison.
+4. **The DeD metric is underspecified.** The paper defines DeD as "constructing defenses based on the successful attacks, and evaluating the ASRtst of second-round attacks on the defended model" but does not specify how defenses are constructed. This is critical for reproducibility and for understanding what DeD actually measures. Are the defenses adversarial training on the successful attack queries? Fine-tuning with safety data? The appendix should detail this protocol.
 
-- **On Mistral 7B Instruct, IL (54.88) slightly outperforms AUTO-RT (52.65)** (Table 1), contradicting the claim that AUTO-RT "consistently achieves the highest ASR_tst across a wide range of models" (line 503). While AUTO-RT is best on 15/16 models, this exception should be acknowledged rather than glossed over.
-
-- **Black-box evaluation is limited to two models** (Llama 3 70B, Qwen 2.5 72B) and the improvement over RL is modest (RL 4.99 → AUTO-RT 14.88 for Llama 3 70B). The paper acknowledges the ICL-based downgrade model may be weaker, but stronger claims about black-box applicability require more evidence.
+5. **The FIR selection heuristic is validated on only 6 models.** The rule "select the last model before a sharp increase in FIR" is applied heuristically. While Figure 4 shows it works consistently across the 6 models tested, the paper does not provide an automated procedure (e.g., threshold on first derivative) and does not validate on a larger set. This is a minor methodological gap.
 
 ### Trivial
 
-- No statistical tests or confidence intervals are reported, though this is common practice for large-scale benchmark evaluations in this subfield.
+6. Table 1's formatting is dense and hard to parse — the three-way split (ASRtst, SeD, DeD) across 16 models in a single table is visually overwhelming. Breaking this into separate sub-tables (as done in the ablation appendix) would improve readability.
+
+7. The claim "by up to 16.63%" in the abstract appears to be a specific number, but the paper never explicitly states which model and baseline produce this exact figure, making it hard to verify.
 
 ## Nice-to-Haves
 
-- A comparison against at least one text-feedback-based method (e.g., PAIR) under matched query budgets would calibrate the numerical-feedback vs. text-feedback trade-off the paper discusses in related work.
+- **Controlled experiment measuring exploitability directly:** For instance, comparing the perplexity, length, or stylistic complexity of attack prompts from AUTO-RT vs. baselines, or measuring how many random mutations of a successful prompt still elicit harmful content, would directly support the exploitability framing.
 
-- A sensitivity analysis of the FIR heuristic across variations in toxic data composition, degradation method, and number of downgrade steps would strengthen confidence in FIR as a general-purpose selection criterion.
+- **Include the commercial model results (Appendix G, Table 10) in the main paper.** The AUTO-RT vs AutoDAN comparison on GPT-4.1 (22.38% vs 6.34%) and Claude Sonnet 4 (12.45% vs 7.00%) is arguably the paper's strongest attack-effectiveness evidence and should not be relegated to an appendix.
 
-- Reporting per-model breakdowns for the human-template comparison (Table 3) would improve transparency.
+- **Per-training-stage ASR plot comparing AUTO-RT vs AutoDAN** (not just AUTO-RT vs RL as in Figure 3) to show whether AUTO-RT's continual improvement pattern is unique or shared by template-evolution methods.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed; treat them with caution.
 
-- **"The method's core motivation (exploitability vs. severity) is disconnected"** — partially kept but downgraded to Minor. The disconnect exists as a conceptual framing issue but does not invalidate the method; the paper's argument that strategy-level exploration inherently produces more exploitable attacks is a reasonable (if unverified) claim.
+- **"44% relative deficit"** — The harsh critic states a 44% relative deficit (55.23 vs 38.38). The actual calculation is (55.23-38.38)/55.23 ≈ 30.5%, not 44%. The underlying point (AutoDAN outperforms AUTO-RT on ASR) stands but the number was overstated.
 
-- **"The paper does not discuss the cost of constructing downgrade models and whether this overhead is included in efficiency comparisons"** — removed. The paper evaluates efficiency using ASR_tst at fixed training stages with a shared 9,000-episode budget (Section 3.1), comparable across methods. The downgrade model construction is a one-time cost outside the RL loop, and including it would conflate setup cost with per-episode efficiency. This is similar to not counting pre-training cost of the base model in any RL paper.
+- **"The baselines in Table 1 are insufficient and unrepresentative"** — The paper explicitly separates two evaluation paradigms: Table 1 compares against strategy-level methods (FS, IL, RL), which is appropriate for evaluating the hierarchical decomposition contribution. Table 3 compares against template-based methods (AutoDAN, HT, PT). This organizational choice is reasonable and not inherently deceptive.
 
-- **"SeD values are extremely small differences"** — removed. The SeD metric ranges from 0 (all identical) to 1 (all orthogonal). Values in the 0.45–0.70 range reported in Table 1 represent meaningful differences. A difference of 0.10 in cosine similarity corresponds to a non-trivial angle difference. This criticism reflects unfamiliarity with the metric scale, not a paper flaw.
+- **"RL is not a published method but the authors' own instantiation"** — The paper clearly describes the RL baseline as PPO applied to Eq. 2 (Section 3.1, Appendix B). Publishing the exact instantiation is standard for baselines that need to be adapted to a new setting.
 
-- **"The introduction overstates novelty of strategy-level exploration"** — removed. The paper explicitly cites Rainbow Teaming, Purple Teaming, PAIR, and GPTFuzzer in related work (Section 4) and positions itself relative to them. The claim that "most existing methods rely on fixed attack templates" is supported by the related work discussion which distinguishes numerical-feedback methods (AUTO-RT's category) from text-feedback and template-based approaches.
-
-- **"The justification for why hierarchical separation improves generalization is asserted rather than demonstrated"** — removed. The empirical results (Tables 1-2) showing improvements in ASR_tst, SeD, and DeD over non-hierarchical baselines (RL, IL, FS) serve as the demonstration. The paper does not claim theoretical justification for the hierarchy; it presents it as an architectural choice validated empirically.
-
-- Formatting/style nitpicks — removed per instructions.
-
-- Missing appendix content concerns — removed per instructions (parser strips appendix).
+- **"The PRT theoretical justification assumes unsafe region containment without proof"** — The paper acknowledges this assumption with Figure 2 (conceptual illustration) and the FIR metric is explicitly designed to detect and handle violations of this monotonicity assumption. Section C.3 discusses exactly this issue and explains why FIR is needed precisely because monotonicity does not always hold.
 
 ## Novel Insights
 
-The FIR metric (Section 2.3.3, Figure 4) is a genuinely novel observation: the point at which a downgraded model's safety boundary becomes unstable (sharp FIR increase) reliably identifies the optimal model for reward shaping. The empirical finding that further weakening beyond this point degrades rather than helps attack performance is counterintuitive (one might expect "weaker = more signals = better") and provides useful guidance beyond this paper's specific method. This insight could transfer to other settings that use model degradation for reward shaping or curriculum learning.
+The most interesting pattern across the reviews is that AUTO-RT's relative performance is **setting-dependent in a structured way**: it underperforms AutoDAN on open-source models in aggregate (Table 3) but outperforms it on all three commercial models tested (GPT-4.1, Gemini-2.5-Pro, Claude Sonnet 4). This suggests that the hierarchical strategy exploration approach may be particularly valuable against models with stronger safety filters that can resist template-based attacks, while template-evolution methods like AutoDAN may be more efficient against less robust open-source models. If this pattern holds, it reframes the contribution: AUTO-RT is not a universally superior attack method but a complementary approach that excels in precisely the settings that matter most for practical safety evaluation (testing the strongest deployed models). The paper does not make this argument, but the data supports it.
 
 ## Suggestions
 
-- **Define the DeD protocol concretely.** Specify: what defense mechanism is applied (e.g., fine-tuning on discovered attacks, adding a guard model, input filtering), how it is configured, and how the second-round evaluation is conducted. Without this, the DeD column is not reproducible.
+1. **Restructure the narrative to honestly characterize the contribution.** Lead with what AUTO-RT does best (Defense Generalization Diversity, commercial model attacks) rather than making broad "outperforms existing methods" claims that are contradicted by the paper's own data (Table 3 vs AutoDAN). The technical contributions (DSP, PRT, FIR) are strong enough to stand on their own merits.
 
-- **Resolve the ASR_tst text/algorithm discrepancy.** If Algorithm 2 reflects the actual procedure (random sampling of 100 strategies per intent), correct the main text to say "100 sampled strategies" rather than "top 100 strategies with the highest ASR on T_tst." If selection is involved, redo the evaluation using a proper train/validation/test split.
+2. **Add a per-model breakdown for Table 3** (AUTO-RT vs AutoDAN/HT/PT across all 16 models). Move the commercial model results (Appendix G) into the main paper. This gives readers a complete picture of where each method excels.
 
-- **Add PAIR or TAP as a baseline** in both white-box and black-box settings under matched query budgets. This would substantiate the claim that AUTO-RT advances the state of the art and would address the most significant comparison gap.
+3. **Operationalize the exploitability framing or drop it.** Either add a direct exploitability experiment (prompt complexity analysis, mutation robustness test) or remove the exploitability terminology and frame the contribution around diversity, coverage, and defense generalization — which are genuinely measured.
 
-- **Report per-model results for Table 3** instead of (or in addition to) the aggregate.
+4. **Detail the defense construction protocol for DeD** in the main text or appendix to ensure reproducibility.
+
+5. **Automate the FIR selection rule** (e.g., gradient-based threshold on the FIR curve) and validate on a larger set of models.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors** (all from human reviews at /home/wg25r/review_agent/human_reviews_2026):
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| STAR (c2BygWVqag) | 5.50 | Accept (Poster) | Most comparable paper — strategy-level jailbreak exploration with decoupled generation. AUTO-RT has broader evaluation (16 vs 7 models) and more principled RL framework, but has DeD definition issues STAR lacks. Roughly comparable quality. |
-| Automatic Dialectic Jailbreak (ilnKzaQSCh) | 5.50 | Accept (Poster) | Similar strategy-level approach. AUTO-RT's empirical evaluation is more extensive; ADJ has better-defined metrics but narrower model coverage. Comparable. |
-| Morpheus (11z2ZV85eV) | 5.00 | Reject | Different paradigm (multi-turn metacognition). AUTO-RT has far broader evaluation (16 vs 10 models on 50 behaviors) and clearer technical contributions (DSP, PRT are specific algorithmic techniques vs. prompt engineering). AUTO-RT is stronger. |
-| Active Attacks (aWt2SkfVhq) | 4.67 | Reject | Similar RL-based approach. Both lack comparison to text-feedback SOTA, but AUTO-RT's evaluation breadth and ablation rigor are substantially better. AUTO-RT is stronger. |
-| Evaluating off-the-shell LLMs (10gpXxro8z) | 2.67 | Reject | Clearly weaker paper with limited contributions. AUTO-RT is substantially stronger. |
-| Attacker Moves Second (7B9mTg7z25) | 6.00 | Reject | Higher-scoring but different focus (defense evaluation). Has stronger novelty but was rejected for methodological issues. AUTO-RT is weaker on novelty but stronger on evaluation clarity. |
+| Path | Avg Score | Comparison to AUTO-RT |
+|------|-----------|----------------------|
+| STAR (c2BygWVqag.md) | 5.50, Accept (Poster) | Topically similar (strategy-driven jailbreak). STAR has stronger novelty claim (activation space) but weaker evaluation (7 models vs 18). AUTO-RT has comparable technical contribution with more thorough experiments but a more significant framing issue. Slightly below STAR. |
+| RedTopic (terdVfnoc5.md) | 5.50, Reject | Both propose RL-based red-teaming with diversity objectives. RedTopic criticized for unclear separation of algorithmic novelty vs engineering. AUTO-RT has cleaner technical contributions but similar evaluation issues. Comparable quality. |
+| Morpheus (11z2ZV85eV.md) | 5.00, Reject | Multi-agent jailbreak. Criticized for limited originality (prompt engineering). AUTO-RT has stronger technical novelty but shares some presentation issues. Slightly above Morpheus. |
+| Active Attacks (aWt2SkfVhq.md) | 4.67, Reject | RL red-teaming with adaptive environments. Active Attacks has a clever idea but limited SOTA comparisons. AUTO-RT has more thorough evaluation. Above Active Attacks. |
+| Capability-Based Scaling (1InFGGz1D5.md) | 5.00, Accept (Poster) | Empirical study, not a method paper. Different contribution type but same venue tier. AUTO-RT has stronger novelty as a method paper. Comparable quality. |
+| The Attacker Moves Second (7B9mTg7z25.md) | 6.00, Reject | Different contribution (defense evaluation critique). Higher avg score but rejected due to extreme score variance. Not directly comparable. |
+| Various low-scoring papers (avg ≤3) | 0.67–3.00 | Clearly weaker: flawed methodology, trivial contributions, or poor execution. AUTO-RT is substantially stronger than these. |
 
-AUTO-RT presents a solid RL-based framework for jailbreak strategy exploration with two well-motivated technical contributions (DSP, PRT) and an impressively broad empirical evaluation. The DeD metric being undefined and the ASR_tst text ambiguity are genuine issues requiring author attention, and the missing comparison to text-feedback-based methods limits the paper's positioning against the full state of the art. These issues are significant but fixable — they do not invalidate the core contributions. Relative to the calibration anchors, AUTO-RT is comparable to STAR and ADJ (both 5.50, accepted as posters) and clearly stronger than Active Attacks (4.67) and Morpheus (5.00).
+The paper makes genuine technical contributions (hierarchical decomposition, DSP, PRT, FIR) and presents extensive experiments across 18+ models. However, the major framing issue — claiming superior attack effectiveness while Table 3 shows AutoDAN substantially outperforms AUTO-RT on the same metric — is a real flaw that undermines the paper's narrative honesty. The paper would benefit from restructuring to accurately characterize its contribution (excelling at DeD and commercial model attacks rather than raw open-source ASR). The exploitability framing is also unfulfilled.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+Relative to the anchors, this paper sits in the same band as STAR and RedTopic (5.0–5.5), with genuine technical contributions that are not fatally flawed but accompanied by significant presentation issues that need addressing.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,77 +1,68 @@
-Now I have a thorough understanding of the paper and all anchor papers. Let me write the consolidated review.
-
----
+Now I have all the information I need. Let me synthesize the final consolidated review.
 
 ## Summary
-This paper proposes F²SA-*p*, a class of fully first-order methods for nonconvex-strongly-convex stochastic bilevel optimization. The key insight is reinterpreting the prior F²SA method as using a forward-difference approximation to the hypergradient, then generalizing to *p*-th order finite differences. This yields an SFO complexity bound of Õ(*p* ε^{-4-2/p}) under *p*-th order smoothness in the lower-level variable **y**, improving from the prior Õ(ε⁻⁶) for *p*=1 and approaching the nearly-optimal Õ(ε⁻⁴) when *p* is large. The paper also proves an Ω(ε⁻⁴) lower bound via a clean separable construction, establishing near-optimality in the highly-smooth regime.
+This paper proposes F²SA-p, a class of fully first-order stochastic methods for bilevel optimization that interprets hypergradient approximation as finite differences and generalizes it to arbitrary p-th order. By using p-th order central difference formulas, the algorithm achieves SFO complexity Õ(pκ^{9+2/p}ε^{-4-2/p}), improving the best-known Õ(ε⁻⁶) for first-order smooth problems (p=1). When p is large enough (p = Ω(log(κ/ε)/log log(κ/ε))), this reduces to Õ(κ⁹ε⁻⁴), matching HVP-based methods. The paper also provides a clean Ω(ε⁻⁴) lower bound via a separable construction.
 
 ## Strengths
-- **Novel finite-difference interpretation with genuine generalization.** The paper reinterprets F²SA as a forward-difference approximation (Eq. 9) and generalizes to *p*-th order central differences via Lemma 3.1, yielding the F²SA-*p* family. This is a principled, elegant design that directly improves hypergradient approximation error from *O*(ν) to *O*(ν^p), which drives the entire complexity improvement.
-
-- **Improved complexity bounds approaching near-optimality.** Theorem 3.1 establishes Õ(*p* κ^{9+2/p} ε^{-4-2/p}) SFO complexity, generalizing prior Õ(ε⁻⁶) bounds and reaching Õ(ε⁻⁴) in the highly-smooth regime (Remark 3.4). Combined with the Ω(ε⁻⁴) lower bound (Theorem 4.1), this demonstrates near-optimality when *p* = Ω(log ε⁻¹/log log ε⁻¹).
-
-- **Clean lower bound construction.** Theorem 4.1 uses a fully separable construction (*f*(**x**,**y**) ≡ *f*_U(**x**), *g*(**x**,**y**) ≡ *g*(**y**) = μy²/2) that embeds the single-level hard instance from Arjevani et al. (2023) into the bilevel setting while satisfying all required smoothness conditions. This avoids technical pitfalls of prior bilevel lower bounds and cleanly inherits the Ω(ε⁻⁴) rate.
-
-- **Tighter Lipschitz analysis for *p*=2.** Lemma 3.2 provides an *O*(κ⁵ L̄)-Lipschitz bound for the cross-derivative, tightening the prior *O*(κ⁶ L̄) bound (Remark 3.2), which yields a factor-of-κ improvement for *p*=1 and strengthens the foundation for *p*=2.
+- **Novel finite-difference interpretation of F²SA and generalization to arbitrary p**: The paper reinterprets the existing F²SA method as forward-difference hypergradient approximation and systematically extends it to higher-order finite differences (Lemma 3.1). This is a conceptually clean insight that opens a principled design space for fully first-order bilevel methods.
+- **Improved ε-dependence from ε⁻⁶ to ε^{-4-2/p}**: Theorem 3.1 establishes the bound Õ(pκ^{9+2/p}ε^{-4-2/p}), strictly improving on the best-known Õ(ε⁻⁶) for first-order smooth problems (Kwon et al., 2024a; Chen et al., 2025b). For large p, the ε-exponent approaches the optimal 4.
+- **Tighter Lipschitz bound for p=2 (Remark 3.2)**: Lemma 3.2 implies an O(κ⁵L̄) bound for the mixed third derivative of ℓ_ν, improving the prior O(κ⁶L̄) bound in Chen et al. (2025b, Lemma 5.1a). This tightening is of independent interest for Hessian convergence analysis.
+- **Clean Ω(ε⁻⁴) lower bound (Theorem 4.1)**: The construction is fully separable (f(x,y) ≡ f_U(x), g(x,y) = μ‖y‖²/2), avoiding smoothness violations present in prior bilevel lower bounds (Dagréou et al., 2024; Kwon et al., 2024a). It extends the single-level bound of Arjevani et al. (2023) cleanly to bilevel.
+- **Transparency about limitations**: The paper explicitly acknowledges the κ⁹ gap between upper and lower bounds as an open problem (Table 1, Section 6), and honestly discusses the normalized gradient step design choice.
 
 ## Weaknesses
 
-### Fatal
-None. The theoretical contributions are sound and well-supported.
-
 ### Major
-None. No issue threatens the core theoretical claims.
+- **Weak experimental validation**: Experiments report only one dataset (20 Newsgroups) for one problem (learn-to-regularize logistic regression). There are no error bars, no multiple random seeds, and no discussion of variance across runs. The inner-loop length K=10 is fixed without justification. The plots show test accuracy vs. outer iterations rather than total SFO calls or wall-clock time, making it difficult to assess practical efficiency. For a paper targeting a top venue, this level of empirical support is insufficient even for a predominantly theoretical contribution.
 
 ### Minor
-- **Experiments report against outer-loop iterations, not total SFO.** The paper's main theoretical contribution is an improvement in total SFO complexity, yet Figure 1 plots test accuracy against outer-loop iterations. Since F²SA-*p* for *p*>1 runs *p*+1 inner SGD subroutines per outer iteration (vs. 2 for F²SA), plotting against outer iterations does not reflect the actual computational cost. The asymptotic theory predicts higher-*p* methods should be more SFO-efficient overall, but the fixed-budget experiment does not validate or illustrate this. The paper should replot against total SFO calls or at minimum discuss the per-iteration SFO cost difference explicitly in the experimental section. This is a presentation flaw that weakens the empirical section but does not undermine the theory.
+- **Near-optimality claim overstates the κ-dependence**: The abstract and conclusion state that F²SA-p is "nearly optimal" when p = Ω(log ε⁻¹/log log ε⁻¹), but this claim only holds when κ is treated as a constant. The lower bound (Theorem 4.1) is Ω(ε⁻⁴) with no κ-dependence, while the upper bound carries a κ^{9+2/p} factor. The paper does acknowledge this gap as an open problem (Section 4, line 671-672; Table 1; Section 6), so the issue is one of framing rather than deception, but the abstract's unqualified claim is misleading.
+- **Normalized gradient step deviates from standard practice**: The outer loop (Algorithm 1, line 14) uses a normalized gradient step x_{t+1} = x_t − η_x Φ_t/‖Φ_t‖. The paper acknowledges this in Remark 3.1 and expresses belief that results hold for standard gradient steps with a more involved analysis, but the current theory does not cover the standard parameterization. The step size schedule η_x ≍ εν²/(L₁κ³) depends on ε in a way typical of normalized methods. This weakens the direct applicability of the analyzed algorithm.
+- **Comparison with HVP-based methods uses a different oracle model**: The experiments compare F²SA-p against stocBiO, MRBO, and VRBO, which use Hessian-vector-product oracles rather than the fully first-order setting of F²SA-p. While the paper also includes F²SA (same oracle model) as a baseline, the inclusion of HVP methods in the main comparison is not an apples-to-apples evaluation. This is not a fatal flaw (comparing against SOTA across oracle types is informative), but it undermines the claim of practical superiority.
 
 ### Trivial
-- Hyperparameter search ranges and batch size *S* are not explicitly stated in the experimental section. The paper mentions logarithmic-scale search for ηx, ηy, ν but does not give ranges, and the batch size *S* used in experiments is not specified in Section 5 (though it appears in Theorem 3.1's parameter settings).
+- None
 
 ## Nice-to-Haves
-- Including variance estimates (error bars) in Figure 1 would strengthen the empirical evidence, though this is not standard for large-scale bilevel benchmarks.
-- A discussion of how finite-difference noise amplification (linear combination of *p* stochastic gradient estimators) interacts with variance and batch size *S* would provide useful intuition beyond the formula in Theorem 3.1.
-- An ablation on the normalized gradient step (Remark 3.1) versus an un-normalized variant would clarify the practical role of this design choice.
-- Explicit discussion of the κ⁹-to-κ⁴ gap between the upper bound and recent lower bounds (Ji, 2025; Chen & Zhang, 2025) would strengthen the paper's treatment of open problems.
+- Report experiments with multiple random seeds and error bars, or at minimum multiple runs.
+- Include a comparison in terms of total SFO calls or wall-clock time, not just outer iterations.
+- Provide ablations on the choice of K (inner-loop length) and ν (finite-difference step size).
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-
-1. **"No batch size, hyperparameter search ranges...given"** — The paper gives search methodology (logarithmic scale, base 10) and lists which hyperparameters were tuned. The specific ranges are a documentation detail, not a substantive gap. Partially addressed already.
-
-2. **"Only one dataset is used"** — The main text explicitly references additional experiments on a 5-layer MLP with ReLU in Appendix F. The parser strips appendices; this experiment exists in the original submission.
-
-3. **"Missing fair comparison" regarding HVP-based methods** — The comparison includes HVP-based methods (stocBiO, MRBO, VRBO) which use strictly more expensive oracles per iteration than F²SA-*p*. This asymmetry favors the baselines, so any concern about fairness is invalid per the review guidelines.
-
-4. **"No variance estimates" as a critical methodological gap** — Confidence intervals are not standard for large-scale bilevel benchmarks of this type. This is a nice-to-have, not a substantive gap.
-
-5. **Strength Finder claim about "empirical demonstration of acceleration"** — This conflicts with the verified weakness about the x-axis metric. The experiments show higher accuracy for higher *p* at fixed outer iterations, but the absence of SFO normalization means this does not cleanly demonstrate the claimed complexity improvement. I have dropped this strength.
-
-6. **Pure formatting/style nitpicks and parser artifacts** — The garbled table in the PDF extraction (lines 783-835) is a parser artifact. The original submission does not have this issue. Removed.
+These points were flagged by the harsh critic but are removed per the review guidelines:
+- **Criticism about Lemma 3.2 assumptions being insufficient (Point 2)**: The reviewer complained that the proof relies on the Faà di Bruno formula and is "deferred to Appendix, unavailable for verification." Per policy, weaknesses about missing appendix proofs are removed — the appendix exists in the original submission. The reviewer's speculation that "the entire complexity improvement collapses" is unfounded without having verified the proof.
+- **Criticism about the introduction "overstating the gap"**: The paper's introductory framing comparing the bilevel complexity to the single-level lower bound is standard practice to motivate the problem. The paper then independently proves an Ω(ε⁻⁴) lower bound for bilevel, validating the comparison.
+- **Claim that Assumption 2.5 "may also be strong"**: This is a generic criticism applicable to any assumption in any paper, without specific evidence that the assumption is unreasonable for the claimed applications (logistic regression, softmax-based problems).
+- **Strength 7 from Strength Finder (empirical validation)**: Dropped because it conflicts with the verified weakness about weak experiments. The experiments, as presented, do not provide reliable evidence for practical effectiveness.
 
 ## Novel Insights
-The reinterpretation of penalty-based bilevel methods through the lens of finite-difference approximations is genuinely illuminating: F²SA's penalty formulation is not merely a computational trick but corresponds to a forward-difference approximation of the derivative ∂²ℓ_ν/(∂ν∂**x**)|_{ν=0} = ∇φ(**x**). This reframing unlocks a direct pathway to acceleration via higher-order finite differences — a connection that was previously unexplored in the bilevel optimization literature and that Chayti & Jaggi (2024) only established for the symmetric (central difference) case in meta-learning. The paper thus opens a bridge between classical numerical analysis (finite-difference stencils) and stochastic optimization algorithm design.
+None beyond the paper's own contributions. The key insight — that F²SA can be interpreted as forward-difference hypergradient estimation and generalized via higher-order finite differences — is the paper's own contribution.
 
 ## Suggestions
-- **Replot Figure 1 with total SFO calls on the x-axis.** This is the single most important fix. It would directly illustrate whether the theoretical SFO complexity gains translate to practice, and would eliminate the current disconnect between the paper's theoretical claims and its empirical presentation.
-- **Add a brief paragraph discussing the variance amplification of higher-order finite differences.** Since Φ_t is a linear combination of *p* or *p*+1 stochastic gradient estimators, its variance scales roughly as Σ α_j². Providing intuition for how the batch size *S* in Theorem 3.1 compensates would strengthen accessibility.
-- **Consider adding a hypergradient approximation error figure.** A plot comparing ||Φ_t - ∇φ(**x**)|| for F²SA vs. F²SA-*p* at a fixed **x** as a function of ν would directly illustrate the *O*(ν) vs. *O*(ν^p) gap that drives the entire improvement.
+1. **Strengthen the experimental section**: Add error bars, report total SFO calls, include at least one additional problem (the authors already have MLP experiments in the appendix — move them to the main text), and justify the choice of K.
+2. **Qualify the near-optimality claim in the abstract**: Add a brief caveat such as "up to a κ⁹ factor in the condition number dependence" to avoid misleading readers.
+3. **Either remove the normalized gradient step or analyze standard gradient steps**: If the authors believe the analysis extends, a sketch of why in the main text (even without full proofs) would significantly strengthen the contribution.
+4. **Add an ablation on ν and p**: Show how the choice of ν and p affects empirical convergence to validate the theoretical prediction that larger p yields better ε-dependence.
 
 ## Score and Decision
 
-### Anchor comparison
+**Calibration anchors** (1 batch call, all results listed):
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| hMxlumpguU | 2.50 | Claims acceleration but prior work already achieves the same rate; lacks novelty. Our paper's finite-difference insight and improved bounds are genuinely novel. |
-| JR1emTWT1D | 3.00 | Trilevel optimization; limited theoretical depth. Our paper has a matching lower bound and near-optimality result. |
-| RawXXTYZCw | 3.33 | Constrained bilevel; Õ(ε⁻⁶) complexity with no lower bound. Our paper achieves Õ(ε⁻⁴) near-optimal. |
-| HDqO1nHLmd | 4.67 | Sharper analysis of existing AID/ITD methods; no new algorithm. Our paper proposes a novel method family with new complexity bounds. |
-| GxKb08oD67 | 4.50 | First-order CSBO with Õ(ε⁻⁶); no lower bound. Our paper has stronger theory (near-optimal Õ(ε⁻⁴) + lower bound). |
-| dJgb3ngAvT | 5.00 (Accept) | Novel LLUC problem class; no matching lower bound. Our paper also introduces a novel smoothness hierarchy but additionally provides a clean lower bound establishing near-optimality. |
-| vHaBLrq7OE | 6.00 | Different topic (Lagrangian/ALM equivalence). Our paper's theoretical depth (upper + lower bounds) is comparable. |
+| dJgb3ngAvT.md (Bilevel with Uniform Convexity) | **5.0** (Accept Poster) | Similar theory+bilevel paper with weak experiments; present paper's theoretical contribution (finite-difference generalization) is more novel, experiment weakness comparable |
+| HDqO1nHLmd.md (Sharper Analysis of Single-Loop) | **4.67** (Reject) | Incremental theory improvement; present paper has more algorithmic novelty |
+| GxKb08oD67.md (Fully First-order CSBO) | **4.50** (Reject) | Weaker complexity result (ε⁻⁸, ε⁻⁶ vs ε^{-4-2/p}); present paper has stronger theory |
+| RawXXTYZCw.md (Constrained Bilevel) | **3.33** (Reject) | Poor presentation, unclear correctness; present paper is well-written and clear |
+| hMxlumpguU.md (Acceleration under Hölder) | **2.50** (Withdrawn) | Lacked novelty vs prior work; present paper has clear novelty |
+| JR1emTWT1D.md (Trilevel optimization) | **3.00** (Withdrawn) | Mechanical extension of bilevel methods; present paper has genuine algorithmic innovation |
+| Ahdsg2nkNH.md (Multilevel Control Functional) | **8.00** (Accept) | Significantly stronger paper overall; not directly comparable topic |
+| 39GLKT8ZBy.md (Bayesian Optimization for Bilevel) | **5.00** (Reject) | Different methodology; comparable score but rejected due to different criteria |
 
-The paper under review has stronger theoretical contributions than all the rejected bilevel papers (2.50–4.67). It is stronger than the dJgb3ngAvT accept (5.00) due to the matching lower bound and more elegant finite-difference insight. The experimental section, while flawed in presentation, is supplementary to a primarily theoretical contribution and can be fixed. I assess this as a clear accept with a score above the 5.00 and 6.00 anchors.
+The paper's theoretical contribution is solid and novel — cleaner than several accepted theory papers in this space. The main deficit is the weak experimental validation, which is a common weakness for optimization theory papers. Compared to the most similar anchor (dJgb3ngAvT.md, avg 5.0, accepted poster), this paper has a more substantial theoretical innovation but comparable experiment limitations.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Score: 5.5**
+**Decision: Accept**
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

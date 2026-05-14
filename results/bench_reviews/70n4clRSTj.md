@@ -1,15 +1,18 @@
-Now I have a thorough understanding of the paper and the anchor papers. Let me compose the final review.
-
----
+Now I have sufficient calibration. Let me construct the final consolidated review.
 
 ## Summary
-This paper introduces SpookyBench, a synthetic benchmark that encodes visual content (text, objects, dynamic scenes) purely through opposing-motion noise patterns in video, such that individual frames appear as random noise but content emerges through temporal integration. The benchmark is designed to isolate pure temporal reasoning from spatial feature extraction. The authors evaluate 15 state-of-the-art video VLMs (including GPT-4o, Gemini, and numerous open-source models) and find 0% accuracy across all models, in stark contrast to 98% human accuracy. An FPS ablation shows that models fail at all frame rates (1–30 FPS), and fine-tuning on the benchmark also fails, pointing to a fundamental architectural inability rather than a data or sampling issue.
+
+This paper introduces SpookyBench, a synthetic benchmark where visual content is encoded exclusively through motion patterns in dynamic noise — individual frames contain no spatial information, making content perceptible only through temporal integration. The key finding is striking: 15+ state-of-the-art video-language models (from 2B to 78B parameters, including GPT-4o and Gemini 2.0 Flash) achieve 0% accuracy across all categories, while human participants reach 98% accuracy. Additional experiments (frame-rate ablation, chain-of-thought prompting, fine-tuning on the benchmark data) confirm the failure is robust across conditions, pointing to a fundamental architectural limitation in how current VLMs process purely temporal information.
 
 ## Strengths
-- **Genuinely novel benchmark design**: The core idea — encoding information exclusively through opposing motion of noise patterns so that individual frames are meaningless — cleanly isolates temporal from spatial reasoning. This is distinct from prior temporal benchmarks (TemporalBench, TVBench, etc.) that still retain frame-level spatial cues, and the design is motivated by real-world temporal communication phenomena (bioluminescence, Morse code). Sections 3.1–3.2 and Algorithms 1–2 provide fully deterministic, reproducible generation procedures.
-- **Striking and consistent empirical result**: All 15 VLMs tested — spanning open-source and closed-source, 2B–78B parameters, video-specialized and general-purpose — achieve exactly 0% accuracy across both direct and chain-of-thought prompting (Table 1). This uniformity across architectures and scales makes the finding unusually robust for a benchmark paper.
-- **Human baseline validates task solvability**: Six participants achieve 98.0% weighted accuracy with mean perceptibility ratings ≥4.3/5 (Section 4.2, Table 3). The high human performance confirms the stimuli genuinely encode perceivable information through temporal dynamics, ruling out the possibility that the task is simply impossible.
-- **FPS ablation is a strong control experiment**: Section 4.3 (expanded in Appendix D) tests humans and four VLMs at 1, 5, 10, 20, and 30 FPS. Humans degrade gracefully (95.6% → 0%), while VLMs stay at 0% at all frame rates, including 30 FPS with full temporal resolution. This effectively rules out temporal undersampling as the explanation for the performance gap.
+
+- **Novel benchmark design that genuinely isolates temporal reasoning**: SpookyBench's core innovation — encoding content through opposing-motion noise patterns where individual frames are pure noise — is clever and unprecedented. Unlike existing temporal benchmarks (TemporalBench, TVBench, MVBench) that still permit spatial shortcuts, SpookyBench forces models to derive meaning solely from temporal dynamics. This clean isolation is validated by the fact that even fine-tuning on 400 in-distribution videos yields 0% test accuracy (Section 4.4), confirming the failure is architectural rather than a distribution mismatch.
+
+- **Comprehensive evaluation across model families and conditions**: The paper tests 15+ models spanning open-source (VideoLLaMA, Qwen-VL series, InternVL series) and closed-source (GPT-4o, Gemini 2.0 Flash) systems, including models specifically designed for temporal understanding (TimeChat, Momentor). All achieve 0% under both direct and chain-of-thought prompting (Table 1). The frame-rate ablation (1–30 FPS, Section 4.3) rules out temporal undersampling as an explanation — humans degrade gracefully while VLMs stay at 0% across all rates.
+
+- **Human baseline establishes task feasibility**: Despite the small sample size, the human results are remarkably consistent (98.9% Text, 98.2% Images, 94.3% Dynamic Scenes; Table 3), confirming the task is solvable by biological vision and that the 0% model performance reflects a genuine machine limitation rather than a broken benchmark.
+
+- **Fine-tuning experiment moves beyond simple evaluation**: The decision to fine-tune two models (InternVL2.5-8B, Qwen2-VL-7B) on 400 SpookyBench videos directly addresses the "out-of-distribution" explanation for failure. The persistent 0% test accuracy after 10 epochs of targeted training strengthens the case for an architectural limitation.
 
 ## Weaknesses
 
@@ -17,55 +20,82 @@ This paper introduces SpookyBench, a synthetic benchmark that encodes visual con
 None.
 
 ### Major
-- **Main evaluation methodology under-documents frame processing**: Section 4.1 states "We input sequences of multiple video frames simultaneously for models that do not directly support video input" but never specifies how many frames were fed to each model. For video-native models, the actual number of frames processed during inference (which may be limited by context windows or model-specific frame budgets) is not reported. While the FPS ablation (Section 4.3) shows that frame rate does not affect VLM performance for the four tested models, that experiment covers only a subset of models and videos. The main Table 1 evaluation on all 15 models and the full dataset lacks this documentation. This is a significant methodological gap that a reader needs to assess whether models genuinely received enough temporal information.
-- **Fine-tuning experiment is under-specified** (Section 4.4): The paper reports that InternVL2.5-8B and Qwen2-VL-7B were fine-tuned on 400 videos for 10 epochs using LlamaFactory and achieved 0% test accuracy, but omits: which parameters were trained (vision encoder? projector? LLM?), whether training accuracy exceeded 0% (i.e., could the model overfit at all?), and what hyperparameters were used. Without these details, alternative explanations (frozen vision backbone, insufficient training, poor hyperparameters) cannot be ruled out. The experiment is presented as ruling out domain-mismatch explanations and supporting the architectural-limitation claim, but in its current form it is too weak to carry that weight.
+
+- **Finetuning results lack convergence verification (Evidential)**: Section 4.4 reports that both finetuned models maintain 0% test accuracy, but the paper provides no training-set accuracy, loss curves, or any evidence that finetuning actually learned anything. If the models cannot even overfit 400 training examples, the 0% test result could reflect optimization failure (e.g., learning rate, capacity bottleneck) rather than architectural "time blindness." This is critical because the finetuning experiment is the paper's strongest argument against the "out-of-distribution" counter-explanation. Without this verification, the claim that "the failure is not attributable to domain mismatch... but rather indicates a fundamental architectural inability" (Section 4.4) is incompletely supported.
 
 ### Minor
-- **SNR threshold experiment (Section 3.3.2) is poorly integrated and ambiguous**: The text mentions "85.7% accuracy above [2.5dB SNR] threshold" and "Prompts performed best (40% accuracy)" but does not clearly state whether these numbers refer to human or model performance, nor is the experimental methodology explained. The medical-imaging analogy is speculative and loosely connected to the main argument. This section reads as a separate mini-study that was not fully developed.
-- **Limited analytical depth for the central finding**: The paper documents *that* models fail but offers minimal analysis of *why*. There are no example model outputs, no attention-map visualizations, and no examination of whether models detect any motion boundaries despite being unable to identify content. The discussion of failure modes (Section 5) is generic ("models attempted to extract information from individual frames") without concrete evidence.
-- **Small human evaluation sample**: Six participants is sufficient to establish the large effect size (98% vs 0%), but a larger and more diverse sample would strengthen the human baseline, particularly for the dynamic scenes category where accuracy drops to 94.3%.
+
+- **Human evaluation is small and under-described**: Only 6 participants were used for the main study (Section 4.2), and the frame-rate study uses only 3 participants on 120 videos (Section 4.3). While the results are highly consistent, the paper provides no details on participant demographics, training/practice, whether they saw the same videos multiple times, or how acceptable-answer sets were constructed. A 6-person study cannot robustly establish that "humans effortlessly achieve 98% accuracy" — it establishes that a small group of motivated participants can. This weakens but does not invalidate the human baseline. The consistency across annotators partially mitigates this concern.
+
+- **No systematic analysis of model outputs**: The paper only reports 0% accuracy without categorizing *what* models actually produce. Section 5 mentions "attempts to extract information from individual frames" but offers no quantitative taxonomy of failure modes (e.g., random words vs. noise descriptions vs. refusal vs. hallucinated spatial content). This analysis would distinguish between models that "try and fail" (suggesting partial temporal engagement) vs. models that do not process temporal information at all — critical for guiding architectural fixes. Table 1 gives $0\% \pm 0.0$ standard deviations, which is suspicious and warrants explanation.
+
+- **SNR metrics are asserted as explanatory but not correlated with performance**: The paper computes five SNR metrics (Table 2) and argues they explain why humans succeed and models fail, but provides no correlation analysis between these metrics and either human or model accuracy. For example, Table 2 shows negative basic SNR (e.g., -46.95 dB for Images) yet humans still succeed. The threshold analysis in Figure 4 shows a binary SNR effect for text detection with LLM prompting, but this analysis is disconnected from the main human evaluation. The explanatory role of the SNR metrics remains asserted rather than demonstrated.
+
+- **Missing experimental details**: The paper does not specify how many frames were fed to each VLM (some have max context limits), whether any model produced "I don't know" or hallucinated responses, or the variance/seed-dependence of results. For closed-source models (GPT-4o, Gemini), temporal API details (maximum frames, sampling strategy) are not reported. These would aid reproduction.
+
+- **Neuroscience references (Section 2.2) are not connected to design decisions**: The discussion of distributed neural timing mechanisms and population clocks is interesting background but is not tied to any specific design choice in SpookyBench or used to derive testable hypotheses. It reads as a motivational flourish rather than a functional part of the paper's contribution.
 
 ### Trivial
-- The main body text contains parser artifacts (tables bleeding into paragraph text, garbled figure captions) that make some sections harder to follow than they should be. These are not author errors but do affect readability of the submitted PDF.
+None.
 
 ## Nice-to-Haves
-- An ablation varying the number of frames fed to each model (at fixed FPS) would more directly address the frame-sampling concern than the FPS experiment alone, and would strengthen the architectural claim.
-- Including example model outputs (even just a few representative failures) would make the "time blindness" phenomenon more concrete and compelling to readers.
-- The SNR metrics (Section 3.3.1) are computed for the benchmark but never used to analyze model performance — connecting these metrics to failure cases would add analytical depth.
+
+- **Non-VLM baselines**: Testing whether a simple motion-based pipeline (e.g., optical flow → threshold → classify motion boundaries with an image classifier or OCR) can succeed on SpookyBench would strengthen the paper's framing. If such a pipeline succeeds, it would show the task is solvable by motion processing and sharpen the claim to "VLMs specifically lack motion-processing mechanisms" rather than "the benchmark is ill-posed." If it fails, it would make the benchmark even more impressive. However, the human baseline already demonstrates the task is well-posed for biological systems, so this is supplementary, not essential.
+
+- **Test motion-aware video architectures** (e.g., TimeSformer, VideoMAE) or optical-flow-based models to see if explicit motion encoders help.
+
+- **Correlate SNR metrics with human accuracy** across a diverse subset of videos to validate that these metrics predict perceptibility.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
 
-- **Harsh Critic: "The central result depends entirely on the assumption that models received enough temporal information; this is a fatal, unfixable flaw requiring re-execution of all experiments."** — Removed as overstated. The FPS ablation (Section 4.3, Appendix D) directly tests whether temporal sampling explains the gap and finds VLMs fail at all frame rates including 30 FPS with "the exact number of frames corresponding to each target frame rate" (line 1502–1503). While the main evaluation should better document frame counts (retained as a Major weakness above), the FPS experiment provides substantial evidence that frame sampling is not the explanation. The critic's claim that this requires "re-execution of the experiments" is unwarranted.
-- **Harsh Critic: "The finetuning experiment does not demonstrate an architectural limitation" (framed as a standalone fatal criticism).** — Softened and retained as a Major weakness rather than removed entirely. The experiment is genuinely under-specified, but the criticism overstates the case: the experiment is a supporting point, not the paper's central claim, and the 0% result is still informative even if not conclusive.
-- **Harsh Critic: "Missing experiments: ablation on number of frames, testing with optical flow model, internal representation analysis."** — Moved to Nice-to-Haves. These would strengthen the paper but are not required for the core contribution to be valid. Demanding these specific additional experiments is scope creep for a benchmark paper.
-- **Strength Finder: "Fine-tuning experiments ruling out domain-mismatch explanations."** — Kept in weakened form. The fine-tuning experiment's under-specification limits how strongly it can "rule out" alternative explanations, but the result is still suggestive and worth noting.
-- **Harsh Critic: Section-by-section notes about formatting and parser artifacts.** — Removed as formatting/parser issues per the hard rules.
+These points are flagged for removal; treat them with caution.
+
+- **"No non-VLM baseline" framed as a critical issue invalidating the core claim**: The paper's claim is specifically about *video-language models* being time-blind. Requiring non-VLM baselines to validate this claim is scope creep. The human baseline already establishes the task is solvable. Removed per soft rule: the paper's stated scope is VLM evaluation, not general algorithmic capability.
+
+- **Criticism that SpookyBench doesn't isolate "pure temporal" patterns**: The patterns involve motion-based spatial reconstruction (opposing motion noise reveals spatial masks). The paper transparently describes this mechanism (Algorithms 1, 2; Figure 2). Calling it "motion-based spatial reconstruction" vs. "pure temporal reasoning" is a semantic distinction, not a substantive flaw. The benchmark genuinely removes spatial content from individual frames.
+
+- **Request for larger human study with ≥20 participants**: While a larger study would be stronger, the sample-size criticism is valid but not fatal given the extreme consistency of results. This is a strength-weakening point, not a ground for rejection.
+
+- **Criticism that finetuning only tested two models**: Testing more finetuned models is a nice-to-have, but two models already demonstrate the effect. The real issue (kept above) is the lack of convergence verification, not the count.
+
+- **Formatting/style nitpicks** and requests for missing appendix content (the parser strips these).
 
 ## Novel Insights
-The paper's most novel insight is the demonstration that the performance gap between humans and VLMs on temporal pattern recognition is not a matter of degree but of kind — models cannot extract *any* meaning from pure temporal dynamics, even when the temporal signal is unambiguous (30 FPS, high temporal coherence SNR). This is qualitatively different from prior findings where models underperform humans by some margin (e.g., TemporalBench: GPT-4o at 38.5% vs ~70% human). The complete, uniform failure across all architectures and scales, combined with the resistance to fine-tuning, suggests that current video VLM architectures genuinely lack a mechanism for temporal integration that is not compensated by scale or training data diversity. The FPS experiment elegantly isolates this: humans show the expected graceful degradation as temporal resolution drops, while VLMs show no engagement with temporal information at any resolution.
+
+The reviews and the paper together surface an interesting tension: the paper's strongest evidence (15+ models at 0% accuracy) is simultaneously its most superficially persuasive and its most analytically shallow. The unanimity of failure across architectures, scales, and prompting strategies is compelling — but the absence of any analysis of *how* models fail (are they outputting random tokens? noise descriptions? confident hallucinations?) means we cannot distinguish between fundamentally incompatible models of the failure. This matters because different failure modes imply different architectural remedies: if models are just guessing randomly, the fix might involve better temporal attention; if models confidently hallucinate spatial content, the fix might involve training data composition or temporal grounding losses. The paper would be substantially strengthened by even a simple error taxonomy (e.g., "refusal: 20%, hallucinated object: 50%, random word: 30%") for a subset of model outputs. The reviewers' demand for this analysis reflects not just a gap in the paper but a genuinely open scientific question that the paper could answer.
 
 ## Suggestions
-- Document the exact number of frames fed to each model in the main evaluation (Table 1), including how many frames each model's API or inference pipeline actually processes. This is the single most important improvement to strengthen the paper's methodology.
-- For the fine-tuning experiment, report at minimum: which modules were trainable, training loss/accuracy curves, and the hyperparameter search space explored. Even negative results (e.g., "training accuracy also stayed at 0%") would strengthen the architectural-limitation claim.
-- Either integrate the SNR threshold experiment (3.3.2) more clearly into the main narrative — specifying what the numbers refer to and how the experiment was conducted — or move it to the appendix as preliminary analysis.
-- Add a small set of representative model outputs to illustrate failure modes concretely.
-- Connect the computed SNR metrics (Table 2) to model performance to add analytical depth beyond the binary 0% result.
+
+1. **Verify and report finetuning convergence**: Show training-set accuracy, loss curves, and whether the finetuned models can overfit a held-out subset of training examples. If training accuracy is also 0%, this is itself a striking finding (models cannot even memorize motion patterns) and should be reported as such.
+
+2. **Add a simple error taxonomy**: For 2–3 representative models, categorize outputs from a sample of 100 videos into qualitative bins (hallucinated spatial content, random word, refusal/noise description, partial temporal pattern). This would ground the "time blindness" claim in actual model behavior.
+
+3. **Expand the human study**: Even modestly, 12–15 participants instead of 6, with basic demographic reporting and inter-annotator agreement (Fleiss' κ), would substantially strengthen the human baseline. The frame-rate study should also be expanded beyond 3 participants.
+
+4. **Report experimental variance**: For open-source models, report accuracy across 3 random seeds. For closed-source models, note whether the API is deterministic or stochastic.
+
+5. **Correlate SNR metrics with human perceptibility ratings**: The paper already has perceptibility ratings (1–5, Table 3). A scatter plot of Perceptual SNR vs. human accuracy per video (or per category) would make the claimed explanatory role of SNR metrics concrete.
+
+6. **Specify frame counts per model**: Report how many frames each VLM actually received given its context window limits, and the frame sampling strategy used.
 
 ## Score and Decision
 
-### Anchor Comparison
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| VideoReasonBench (1Mblo6U8kp) | 5.50 | Accept (Poster) | More methodologically rigorous with better-documented experimental setup and three reasoning levels; SpookyBench has a more novel/cleaner benchmark concept but less rigorous execution. SpookyBench is slightly below. |
-| VidHal (OALhVHiRba) | 4.50 | Reject | Larger scale (23 models) but benchmark relies on LLM-generated hallucinations and has less novelty; SpookyBench's benchmark design is more original. SpookyBench is above. |
-| ConservationBench (iTK8BZ8i3J) | 4.00 | Reject | More rigorous controls but narrower scope; SpookyBench has a more dramatic result (0% vs 98%) and broader model coverage for its specific claim. SpookyBench is above. |
-| TemporalBench (XQfRnmOzY8) | 4.00 | Reject | Larger dataset but tasks are solvable via keyframe recognition; SpookyBench's design more cleanly isolates temporal reasoning. SpookyBench is above. |
-| Vinoground (WAk6tf8VkQ) | 3.00 | Reject | Similar genre (temporal reasoning benchmark) but SpookyBench has a cleaner isolation of the temporal signal and more dramatic results. SpookyBench is above. |
-| DSI-Bench (NtxX9jyVxd) | 4.00 | Reject | Dynamic spatial intelligence focus; SpookyBench's benchmark concept is more original. SpookyBench is above. |
-| HumanVideo-MME (joh5J1nYAE) | 2.50 | Reject | Human-centric video understanding; SpookyBench is more focused and conceptually cleaner. SpookyBench is well above. |
+**Calibration anchors** (retrieved from human-review corpus):
 
-**Assessment**: SpookyBench sits between VideoReasonBench (5.50, stronger methodology, less conceptual novelty) and the cluster of temporal/spatial reasoning benchmarks in the 4.0–4.5 range (weaker or less novel designs, or less striking results). The paper's core contribution — a genuinely novel benchmark that exposes a clean, dramatic failure mode — is strong. The methodological documentation gaps (frame counts, fine-tuning details) and limited analytical depth prevent a higher score, but these are addressable issues that do not invalidate the central finding. The paper makes a valuable contribution to the community by isolating a specific architectural blind spot in current video VLMs.
+| Path | Avg Human Score | Comparison |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/WAk6tf8VkQ.md` (Vinoground) | 3.00 | Similar "temporal reasoning failure" claim but less novel benchmark design (counterfactual captions on natural videos vs. synthetic noise videos). SpookyBench's result is more striking (0% vs. ~50%) and its benchmark design is more creative. Comparable in methodological rigor — Vinoground has larger human study but SpookyBench has finetuning experiment. SpookyBench is stronger overall. |
+| `/home/wg25r/review_agent/human_reviews_2026/XQfRnmOzY8.md` (TemporalBench) | 4.00 | Larger benchmark (15K QAs vs. 451 videos) but less novel design (standard video QA with temporal annotations). SpookyBench's synthetic noise approach is more original. Both have methodological gaps; TemporalBench has better annotation rigor but SpookyBench has more striking results. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/iTK8BZ8i3J.md` (ConservationBench) | 4.00 | Similar "VLMs fail at X" paper with more rigorous controls (34 models, ablations of frame count, prompt variations). SpookyBench has a more novel benchmark design but less rigorous validation. Comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/OALhVHiRba.md` (VidHal) | 4.50 | Video hallucination benchmark with extensive model evaluation (23 models). Stronger on experimental rigor; SpookyBench stronger on benchmark novelty. VidHal is a similar reject-level benchmark paper; SpookyBench is comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/Bp8gT36LLh.md` (VCR-Bench) | 5.00 | Rejected despite strong evaluation framework. More thorough than SpookyBench in analysis depth. SpookyBench has more novel benchmark design but less thorough evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/1Mblo6U8kp.md` (VideoReasonBench) | 5.50 | Accepted as poster. More rigorous evaluation and deeper analysis. SpookyBench is less rigorous but has a more creative benchmark design. |
+| `/home/wg25r/review_agent/human_reviews_2026/joh5J1nYAE.md` (HumanVideo-MME) | 2.50 | Weak benchmark paper with shallow analysis. SpookyBench is substantially stronger in both benchmark design novelty and strikingness of results. |
+| `/home/wg25r/review_agent/human_reviews_2026/cC3TW1s309.md` (MF²) | 4.80 | Rejected long-movie benchmark. Larger scale but less novel design. SpookyBench has more creative benchmark design but smaller scale. |
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+The paper's core contribution — a benchmark that isolates pure temporal reasoning by encoding content in motion patterns through noise — is genuinely creative and fills a gap not addressed by existing benchmarks. The finding that 15+ VLMs achieve 0% is striking and well-demonstrated through extensive ablations. However, the paper is weakened by incomplete validation of the finetuning experiment (no convergence verification), an undersized human study (6 participants), and a lack of model-output analysis that would distinguish different failure modes. The SNR metrics are presented as explanatory but not actually correlated with performance. Relative to anchors: stronger in novelty than the 3.0–4.0 papers, but less rigorous than accepted papers (5.5+). The weaknesses are addressable (they do not invalidate the core result), but they prevent the paper from making a fully convincing case for "fundamental architectural time blindness."
+
+**Recommendation**: Marginally below the acceptance threshold; a major revision addressing the finetuning verification, model output analysis, and human study size could raise this to an accept.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

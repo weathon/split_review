@@ -94,7 +94,8 @@ def allow_path(path: str):
 @function_tool
 def read_file(abs_path: str, start_line: int = 1, end_line: int = 0) -> str:
     """Read lines from a file. Returns lines numbered start_line to end_line (inclusive, 1-based).
-    If end_line is 0, reads to end of file."""
+    By default (start_line=1, end_line=0), reads the entire file. Only pass start_line/end_line
+    when you specifically need a partial slice; the default is to read the whole file."""
     resolved = os.path.abspath(abs_path)
     print(f"  [read_file] Request to read '{resolved}' lines {start_line} to {end_line if end_line > 0 else 'EOF'}")
     if not any(resolved.startswith(ap) for ap in ALLOWED_PATHS):

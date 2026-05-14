@@ -1,103 +1,89 @@
-Now I have all the information needed. Let me write the final consolidated review.
-
----
+Now I have all the evidence I need. Let me write the final consolidated review.
 
 ## Summary
-
-This paper proposes SigMap, a wireless localization foundation model with two innovations: (1) cycle-adaptive masking that dynamically generates mask patterns based on detected CSI periodicities to prevent shortcut learning, and (2) a map-as-prompt framework that encodes 3D geographic geometry via a GNN into a soft prompt prepended to frozen CSI tokens. The method achieves strong results on DeepMIMO (1.564m MAE single-BS, 0.673m MAE multi-BS), outperforming the best baseline LWLM by 34.4% and 18.7% respectively, and demonstrates few-shot cross-scenario transfer to two unseen environments while updating only a fraction of parameters.
+This paper proposes SigMap, a multimodal foundation model for wireless localization that introduces two innovations: (1) a cycle-adaptive masking strategy for self-supervised pre-training on CSI data that disrupts periodic shortcuts, and (2) a "map-as-prompt" framework that encodes 3D geographic information via GNNs into lightweight soft prompts for parameter-efficient cross-scenario adaptation. The model is pre-trained on DeepMIMO simulated data and evaluated on single-BS and multi-BS localization tasks, with generalization tests on a second DeepMIMO scenario and the WAIR-D dataset.
 
 ## Strengths
 
-- **Cycle-adaptive masking is well-motivated and effective.** The masking strategy dynamically detects periodicity via cross-correlation and generates shift-aware mask patterns to prevent shortcut learning. Table 3 shows it reduces multi-BS MAE to 0.673m vs. 0.770m (grid) and 0.753m (strip), with CDF@1m rising to 84.5%. The design is a reasonable response to a real problem (CSI periodicity enabling trivial reconstruction).
+- **Cycle-adaptive masking addresses a genuine failure mode in SSL for periodic signals**: The paper identifies that standard masked autoencoding allows models to exploit periodic structure in CSI as shortcuts, and validates in Table 3 that adaptive masking improves MAE from 0.770m (grid-masking) to 0.673m in multi-BS localization — a 12.6% improvement. This is a well-motivated, domain-specific adaptation of masked modeling.
 
-- **Map-conditioned prompt tuning provides substantial gains.** The GNN-based geographic prompt encoding 3D building geometry as a learnable soft token improves single-BS NLoS MAE from 2.275m (no map) to 1.564m (with 3D map), more than doubling CDF@1m (Table 4). The 2D bird's-eye-view ablation shows only 8% degradation (1.692m), confirming the prompt mechanism captures essential topological cues robustly.
+- **Map-as-prompt framework achieves dramatic parameter efficiency with strong results**: The geographic prompt mechanism (Section 3.4) restricts fine-tuning to only 0.085M trainable parameters (0.7% of the 11.73M total), yet achieves 1.564m MAE in single-BS and 0.673m in multi-BS localization, outperforming LWLM (2.382m and 0.828m respectively) while updating orders of magnitude fewer parameters (Table 5). This is a practical contribution for deployment.
 
-- **Strong cross-scenario transfer results.** On DeepMIMO O2 and WAIR-D Scenario-2 (100 cities), SigMap with map prompts achieves 1.026m and 1.880m MAE respectively, outperforming LWLM by 53.2% and 44.3% while only fine-tuning task heads with ~100 labeled samples per scenario (Section 4.5). The backbone remains frozen, demonstrating representational quality.
+- **Generalization to unseen environments is demonstrated with limited supervision**: On DeepMIMO O2 and WAIR-D Scenario-2 (100 real-world city scenes), SIGMAP with map achieves 1.026m and 1.880m MAE respectively, outperforming LWLM by 53.2% and 44.3% (Table 4.5) with only ~100 target samples for fine-tuning. The WAIR-D evaluation across 100 diverse city layouts provides reasonable evidence of cross-scenario transfer.
 
-- **Well-designed ablation structure.** The paper isolates contributions via SigMap (w/o map) vs. baselines (architecture contribution), SigMap (w/ map) vs. w/o map (map contribution), masking strategy comparison (Table 3), and map modality comparison (Table 4). This allows readers to attribute gains to specific components.
-
-- **Practical parameter efficiency.** Fine-tuning activates only 0.085M parameters (Table 5), with inference at 0.83ms/sample, making the approach feasible for deployment.
+- **Ablation on map quality cleanly isolates the value of 3D geometry**: Table 4 shows that 2D bird's-eye polygons increase MAE by only 8% relative to full 3D meshes (1.692 vs 1.564m), while removing maps entirely raises MAE by 45% (2.275m). This helps attribute the gain to topological/LoS cues rather than fine geometric detail.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **NLoS-aware attention mechanism is introduced only in experimental results and is absent from the methodology.** Section 4.2 introduces an "NLoS-aware attention mechanism" with a learnable weight matrix W_NLoS (Eq. 11) that "allows the model to differentiate between direct and reflected paths, significantly reducing positioning ambiguity." The text attributes the key single-BS advantage to this mechanism. However, this component is never described in Section 3 (Methodology), leaving critical questions unanswered: where does the model obtain path-type information (explicit LoS/NLoS labels? learned implicitly?), how is this attention integrated into the forward pass, and is it part of pre-training or fine-tuning? The omission makes the single-BS NLoS results impossible to fully assess and reproduce, and it undermines confidence that the reported gains come from the claimed innovations (masking, map prompt) rather than from this undisclosed component.
+- **Inconsistent reporting of WAIR-D results**: The main text (line 613) states that SIGMAP achieves "1.580 m on WAIR-D Scenario-2," but the corresponding table entry (line 608) shows **1.880m** MAE for SIGMAP (w/ map). The improvement percentage of 44.3% over LWLM's 3.375m is consistent with 1.880m, not 1.580m, confirming that 1.580 is an error. Data inconsistencies of this nature undermine trust in the results and must be corrected.
 
-- **"Zero-shot generalization" claim is misleading — the evaluation uses few-shot adaptation.** The abstract and introduction repeatedly claim "zero-shot generalization in unseen environments," but Section 4.5 explicitly states that approximately 100 labeled target samples per scenario are used to fine-tune downstream task heads. This is few-shot adaptation, not zero-shot generalization. The distinction is fundamental: zero-shot requires no target-domain labels whatsoever, while here labeled data is used to update model parameters. The few-shot results themselves are strong and worth reporting, but the inflated terminology damages the paper's credibility and should be corrected throughout.
+- **"Zero-shot generalization" claim is misleading**: The abstract claims "strong zero-shot generalization," but all generalization experiments fine-tune on ~100 labeled target samples (described as a "few-shot learning setup" in line 589-590). True zero-shot evaluation — applying the pre-trained model directly to a new environment without any fine-tuning — is never reported. This is a meaningful gap: the abstract claims a capability the experiments do not test.
+
+- **Insufficient ablation of the geographic prompt mechanism**: The "w/o map" condition (Table 1, 2, 4) removes both the prompt tokens and the geographic information simultaneously. This conflates two effects: (a) the benefit of prompt-based fine-tuning as a parameter-efficient adaptation strategy, and (b) the benefit of geographic content specifically. Without comparing against prompt tuning with random (non-geographic) prompts or full fine-tuning with maps, it is impossible to attribute the observed gains to the geographic information versus the prompt mechanism itself. This is a core gap for a paper whose claimed contribution centers on geographic integration.
+
+- **Limited evaluation breadth for a "foundation model" claim**: The main results (Tables 1-3) come from a single simulated dataset (DeepMIMO O1_3p5). While the generalization section adds two settings, the pre-training, fine-tuning, and main evaluation all use the same ray-tracing simulator (Remcom Wireless InSite via DeepMIMO). A "foundation model" framing implies broad competence across diverse conditions; the current evaluation — one simulated urban scenario with two transfer targets — does not support this scope. Real-world CSI data with hardware impairments and non-ideal propagation is never tested.
 
 ### Minor
 
-- **Data representation is inconsistent between main text and appendix.** The main text (Eq. 5, Section 3.2) describes CSI preprocessing as real/imaginary decomposition: X = [ℜ(H), ℑ(H)]. The appendix (Eq. 12, B.2) describes it as magnitude/phase decomposition: H_s = [|H_s|, ∠H_s]. These are not equivalent transformations (different information content and mathematical properties), and the paper should clarify which is actually used. The appendix hyperparameters table further lists "C: Channel dimensions (2 for real/imaginary components)" (line 833), compounding the confusion.
+- **High RMSE/MAE ratio suggests heavy-tailed errors**: For single-BS localization, RMSE (5.675m) is 3.6× the MAE (1.564m). This far exceeds the Gaussian expectation (~1.25×) and indicates extreme outliers. The paper reports no median error or percentiles (e.g., P90), making it difficult to assess whether the approach systematically fails in certain conditions — which is precisely the scenario that matters most for real-world deployment.
 
-- **Cycle-adaptive masking evaluation could be stronger.** The only quantitative evidence for the masking strategy is Table 3 (multi-BS localization). While the improvement over grid/strip masking is meaningful (0.673m vs 0.770m/0.753m), no statistical significance is reported, no probing experiments test whether the pre-trained representations actually capture more global features, and no analysis of reconstruction difficulty vs. random masking is provided. The central motivation — that cycle-adaptive masking forces learning of globally meaningful representations rather than exploiting periodic shortcuts — is supported only indirectly through downstream localization performance.
+- **Cycle-adaptive masking mechanism is partially underspecified**: Section 3.3 and Appendix B.4 describe cross-correlation-based periodicity detection and shift pattern augmentation, but the precise computation of `d_final` (the detected periodicity shift used in Equation 6) is not specified. The augmentation introduces free parameters (N_a=8, N_s=32, random starts) whose sensitivity is never ablated. It is unclear whether the gains come from periodicity detection or the random augmentation parameters.
 
-- **The paper overclaims what the experiments demonstrate about map integration mechanisms.** While the "w/o map" ablation correctly isolates the map contribution, the paper does not compare its prompt-based map integration against simpler map integration alternatives (e.g., concatenating a map embedding to CSI features, or using a 2D CNN on a bird's-eye-view image). Without such a comparison, the claim that the *prompting mechanism specifically* is superior to alternative map fusion methods remains untested. The comparison of 3D vs 2D map quality (Table 4) is helpful but addresses a different question (map quality, not fusion mechanism).
+- **Geographic prompt generation uses standard GCN with symmetric normalization on a heterogeneous graph**: Algorithm 1 applies the standard GCN update (`˜D^{-1/2} ˜A ˜D^{-1/2}`) on a graph where building vertices and base station nodes serve fundamentally different roles. While this may work empirically, no justification is provided for why a homophilic graph operator is appropriate for this heterogeneous structure.
 
 ### Trivial
 
-- Section 4.4 claims "near-overlapping error bars" (line 564) when comparing 3D and 2D map variants, but Table 4 contains no error bars or standard deviations. The paper states results are averaged over 5 runs (Section 4.1), but the uncertainty estimates are not shown.
-
-- The parameter efficiency percentages differ between sections (0.7% in Section 4.6 vs. 0.4% in Section 4.5). While this likely reflects different fine-tuning scopes (full prompt tuning vs. task-head-only), the distinction is not clearly explained.
+- Table 4.5 appears mislabeled as "Table 4.5" rather than "Table 5" — numbering should be sequential.
+- The 1.580 vs. 1.880 WAIR-D discrepancy (discussed above) is a clear copy-editing error.
 
 ## Nice-to-Haves
 
-- Equipping a strong baseline (e.g., LWLM) with the same 3D map information via a simpler integration mechanism (e.g., concatenation) and comparing against the prompt-based approach would more rigorously isolate the benefit of the prompt tuning design.
-
-- Conducting zero-shot evaluation (no target-domain labeled samples at all) to properly test whether the frozen pre-trained backbone alone can generalize across environments, or retracting the "zero-shot" language entirely.
-
-- Visualizing what the geographic prompt learns — e.g., which building structures or spatial relationships the attention weights emphasize for a given scene — would support interpretability claims.
+- **Random-prompt baseline**: Comparing map-derived prompts against learned random prompts (no geographic content) would cleanly isolate the value of geographic information from the prompt mechanism itself.
+- **True zero-shot evaluation**: Reporting pre-trained model performance without any fine-tuning on new environments would substantiate the "zero-shot" claim in the abstract.
+- **Median/percentile error metrics**: Given the high RMSE/MAE ratio, reporting P50 and P90 errors would clarify whether failures are concentrated or dispersed.
+- **Real-world CSI validation**: Even a small-scale real-world test would significantly strengthen the practical relevance claim.
 
 ## Removed Points
 
-These points from the input reviews were flagged and removed after verification against the paper.
+These points are flagged to be removed, treat them with caution:
 
-- **"Baseline comparison is unfair because baselines are not given access to map information" (Harsh Critic Point 2).** The paper includes SigMap (w/o map) as its own baseline, which already outperforms LWLM, SWiT, and CNN without any map access. This controls for architecture vs. map contribution. The remaining question about prompt mechanism vs. simpler map integration is kept as a Minor weakness above.
-
-- **"Map ablation spin: 8% gap weakens case for 3D-specific pipeline" (from Harsh Critic Point 5).** The paper honestly presents this as "most gain comes from topological/LoS cues" and frames it as robustness to simplification (line 571), not as 3D superiority. This is a valid observation, not spin.
-
-- **"No justification for Delaunay triangulation" (from Harsh Critic Point 5).** The paper states "To capture the inherent proximity relationships in 3D space, the edge set E is constructed using Delaunay triangulation" (line 350-351). Delaunay triangulation is a standard spatial graph construction method; extensive justification is not required for a well-known technique.
-
-- **"The paper should have tested on real-world measurement data" (from Harsh Critic Missing Experiments).** Ray-tracing data (DeepMIMO, WAIR-D) is standard in the wireless localization literature and the paper's scope is explicitly simulation-based. This is scope creep.
-
-- **Strength Finder's "zero-shot generalization" strength claim.** This was dropped because the zero-shot claim conflicts with the verified weakness (few-shot adaptation with ~100 labeled samples). The cross-scenario transfer results remain a strength but must be characterized correctly as few-shot.
-
-- **Generic strength: "The problem of leveraging 3D environmental context for wireless localization is timely and practically relevant."** This is too generic — dropped.
+- **"Only one additional unseen scenario tested"**: Factually incorrect — the paper tests two (DeepMIMO O2 and WAIR-D Scenario-2, the latter covering 100 city scenes). The reviewer's own text later acknowledges "exactly two settings."
+- **"No comparison to any method that uses map information"**: SIGMAP is the first approach to integrate 3D maps into CSI-based localization. Demanding comparison to non-existent methods is a strawman. The paper compares against the best available baselines (LWLM, SWiT, CNN, OMP).
+- **"Parameter count suspiciously low for a transformer backbone"**: A transformer with feature dimension 512 and moderate depth (likely 4-6 layers) plausibly yields ~11.7M parameters. The reviewer compares to ViT-Base (768 dim, 12 layers, ~86M) which is a different architecture class.
+- **"SWiT (2024) and LWLM (2025) are outdated/weak"**: These are the most recent (2024-2025) learned localization methods. OMP is a standard classical baseline. The claim is unsupported.
+- **Pure formatting/style nitpicks**: Removed per policy (parser artifacts, not author errors).
+- **"GCN assumes homophily" concern**: This is a minor theoretical observation that lacks empirical evidence of harm. Deferred to Nice-to-Haves.
+- **"Section C reads as post-hoc justification"**: This is a subjective stylistic judgment, not a substantive weakness.
 
 ## Novel Insights
 
-The paper's observation that wireless CSI periodicity can be exploited as a shortcut in masked autoencoding — and that adaptive, shift-aware masking based on cross-correlation analysis can disrupt this — is a genuinely useful insight for the growing subfield of self-supervised learning on wireless signals. This is a domain-specific challenge that naive transfer of vision MAE approaches would miss. Additionally, the finding that most of the map benefit comes from 2D topology rather than full 3D geometry (Table 4) is a practical insight that could inform simpler deployment pipelines.
+The most striking pattern across the reviews is that both supporters and critics agree the core ideas (periodic-aware masking, geographic prompts) are well-motivated and address real gaps in wireless SSL. The disagreement centers sharply on execution: whether the evaluation is sufficient to support the "foundation model" framing. This reveals a fundamental tension in specialized-domain foundation model papers — the ICLR community increasingly expects broad multi-task, multi-dataset evaluation standards from NLP/vision, while wireless localization is an emerging domain where even a single simulator-based benchmark with two transfer targets represents meaningful progress relative to prior practice. The paper would benefit from either expanding its evaluation scope or tempering its claims to match the evidence.
 
 ## Suggestions
 
-- Either retract "zero-shot" terminology and replace with "few-shot" throughout the abstract, introduction, and conclusion, or conduct a genuine zero-shot evaluation with no target-domain labels.
-- Describe the NLoS-aware attention mechanism in the methodology section (Section 3.4 or 3.5), including how path-type information is obtained, how the attention is computed, and where it fits in the forward pass. If the mechanism requires explicit LoS/NLoS labels from ray-tracing, this should be disclosed as an additional input assumption.
-- Clarify which CSI preprocessing is actually used (real/imaginary vs. magnitude/phase) and make it consistent between main text and appendix.
-- Report standard deviations or confidence intervals alongside all main results, since the paper already states 5-run averaging.
+1. **Fix the WAIR-D data inconsistency** (1.580 → 1.880 in the text) and verify all numerical values match between tables and prose.
+2. **Add a random-prompt ablation**: Fine-tune with randomly initialized (non-geographic) prompts to isolate whether map content or the prompt structure drives the gains.
+3. **Report true zero-shot performance** (no target-sample fine-tuning) to substantiate the abstract's claim.
+4. **Report median error and P90** alongside MAE/RMSE to characterize the error distribution, especially given the high RMSE/MAE ratio.
+5. **Temper the "foundation model" language** in the abstract and title unless evaluation is expanded to more diverse conditions (real-world data, different frequency bands, different array geometries).
 
----
+## Score and Decision
 
-Now let me calibrate my score. Here are all the anchors returned by the search, with my assessment of how this paper compares:
+**Calibration Anchors** (all from ICLR 2026 human reviews under /home/wg25r/review_agent/human_reviews_2026/):
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| AEMP (CSI localization SSL) | `/home/wg25r/review_agent/human_reviews_2026/3AbyfpQgR2.md` | 5.33 | Most comparable topic. AEMP has a self-supervised pre-training framework for CSI localization with masked reconstruction + autoregressive prediction. SigMap is stronger: more comprehensive experiments (cross-dataset transfer vs. single-dataset), larger margins over baselines, and the map-as-prompt is a more genuinely novel contribution than the MR+AP combination. Both have presentation issues. SigMap should score higher than AEMP. |
-| SpaRTran (wireless channel SSL) | `/home/wg25r/review_agent/human_reviews_2026/fNC3aaGeIa.md` | 3.50 | SpaRTran shows weaker novelty (adapts gated SAE from LLM interpretability) and has scalability issues. SigMap has substantially more contribution and stronger results. SigMap is clearly stronger. |
-| Diffusion^2 (RF from 3D) | `/home/wg25r/review_agent/human_reviews_2026/teTUSK98gA.md` | 3.50 | Diffusion^2 has modest novelty and limited evaluation. SigMap's approach is more complete and better evaluated. SigMap is stronger. |
-| AGG-RL (sound source localization) | `/home/wg25r/review_agent/human_reviews_2026/bWXpJFesLS.md` | 5.33 | Different modality but similar spirit (physics-informed representation learning for localization). AGG-RL is well-executed with good generalization results. SigMap has comparable quality but with a methodological gap (NLoS attention). Comparable level. |
-| WaveVerse (RF simulation) | `/home/wg25r/review_agent/human_reviews_2026/O0czoZPSZ1.md` | 5.00 | WaveVerse has a creative concept but limited evaluation. SigMap has stronger empirical evidence. SigMap is stronger. |
-| Special Unitary Parameterized Estimators | `/home/wg25r/review_agent/human_reviews_2026/VaS6xcDrTb.md` | 8.50 | Completely different topic (rotation estimation), very strong theoretically. SigMap is a different kind of paper (empirical systems vs. theoretical) and not at this level of polish or theoretical depth. |
-| EEG Source Localization | `/home/wg25r/review_agent/human_reviews_2026/rIIpKdKzkC.md` | 1.60 | Weak paper across the board. SigMap is clearly far stronger. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `3AbyfpQgR2.md` (AEMP) | 5.33 | Same domain (CSI localization + SSL). AEMP had weaker novelty but stronger evaluation (real-world data, multiple public datasets). SigMap has more novel ideas but narrower evaluation. **SigMap slightly weaker overall.** |
+| `DmCof7cMTc.md` (GRF-LLM) | 4.00 | Same domain (wireless + environment integration). GRF-LLM had strong novelty concerns (incremental to WRF-GS). SigMap's technical contributions are cleaner. **SigMap stronger.** |
+| `be4ey66fhk.md` (SPAR) | 4.40 | SSL for distributed sensing with spatial awareness. Similar pattern: motivated contributions, some ablation gaps, limited evaluation breadth. **Comparable quality.** |
+| `64Ea2Dx0JJ.md` (VLM GeoPriv) | 5.50 | Accepted poster. Different domain but well-executed benchmark paper. Stronger evaluation methodology. **SigMap weaker.** |
+| `PUm9OaFNvf.md` (FlowletFormer) | 4.00 | BERT adaptation for traffic classification. More incremental than SigMap. **SigMap stronger.** |
+| `StD1GnueIb.md` (GeoReasoning) | 3.50 | Localization with limited baselines, new dataset. Weak evaluation. **SigMap stronger.** |
+| `eDxZ6MR2FL.md` (LLM Time Series) | 3.50 | Methodological flaws in evaluation. **SigMap is stronger methodologically.** |
 
-**Score reasoning:** SigMap is stronger than the 3.5-4.0 band papers (SpaRTran, Diffusion^2, nGRF) which have modest novelty or evaluation gaps. It is comparable to or somewhat stronger than AEMP (5.33) and AGG-RL (5.33) — better experimental breadth, more novel components, but with its own issues (zero-shot overclaim, NLoS attention undisclosed). It is not at the 8+ level of theoretically deep, flawlessly executed papers.
+SigMap has genuine technical contributions (cycle-adaptive masking, geographic prompts) that are well-motivated by the domain. However, it suffers from a concrete data inconsistency (WAIR-D), an overclaimed "zero-shot" narrative, and evaluation breadth insufficient for its "foundation model" framing. Comparing against the anchors, it sits between the rejected papers (avg 4.0) and the marginal accepts (avg 5.3-5.5) — stronger in novelty than most rejects but held back by execution issues that prevent acceptance at the current bar.
 
-The zero-shot overclaim and the NLoS attention omission are real substantive issues, but (a) the zero-shot issue is a wording problem — the few-shot results are still strong, and (b) the NLoS attention gap can be addressed with clarification in a rebuttal, as it's likely a component that exists but was poorly described. These pull the score down from what could otherwise be a ~7.0 paper.
-
-I'll place this at **6.0** — a clear accept with revisions needed, above the borderline 5.33 papers but with acknowledged issues that prevent a higher score.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

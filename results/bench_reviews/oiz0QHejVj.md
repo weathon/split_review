@@ -1,99 +1,142 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me write the final review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
----
+**Note on the Table 6 inconsistency:** I need to verify whether the critic's claim about the architecture/parameter mismatch is correct. Looking at Table 6 in the appendix (lines 1143-1146):
 
-## Summary
+For 1.0% compression:
+- TinyCLIP: Width 128, Depth 4 (vision), Width 128, Depth 2 (text), Params 0.8+0.3M ✓
+- CLIP-Map_tiny (Ours): Width 512, Depth 12 (vision), Width 512, Depth 6 (text), Params 0.8+0.3M ✗
 
-CLIP-Map proposes a **mapping-based** alternative to the dominant **select-based** paradigm for CLIP model compression. Instead of pruning parameters and retraining, the method learns Kronecker-factored transformation matrices that map a large pretrained CLIP model into a smaller one via matrix multiplication (width compression) and linear layer combinations (depth compression). A **Diagonal Inheritance Initialization** scheme preserves pretrained weight structure and stabilizes optimization. The mapped model is then retrained with knowledge distillation. The paper demonstrates competitive or better zero-shot retrieval and classification performance compared to TinyCLIP at matched parameter counts, while requiring fewer training epochs.
+This is clearly impossible — a ViT with width 512 and depth 12 would have tens of millions of parameters. This is almost certainly a copy-paste error where the teacher model dimensions were listed instead of the student dimensions. However, the parameter count is what matters for comparison, and those match TinyCLIP's.
+
+For 10% compression:
+- TinyCLIP: Width 256, Depth 10, Params 8+3M ✓ (plausible ~786K per layer × 10 layers ≈ 7.86M)
+- CLIP-Map_small: Width 256, Depth 10, Params 8+3M ✓ (consistent)
+
+For 50% compression:
+- TinyCLIP: Width 512, Depth 24, Params 39+19M 
+- CLIP-Map_base: Width 512, Depth 12, Params 39+19M 
+
+The 50% case is interesting — CLIP-Map_base has depth 12 while TinyCLIP has depth 24, yet both have 39+19M params. This makes sense because the mapping-based model might use a different architecture that achieves the same parameter count.
+
+So the error is specifically in the 1.0% row for CLIP-Map_tiny. This is significant but not fatal — the parameter counts (which drive the comparison) are consistent.
+
+Now let me compose the review.
+
+Actually wait, I need to reconsider. Maybe the width/depth specs for CLIP-Map_tiny are actually correct, and the mapping creates a model that somehow has only 0.8M parameters despite having width 512 and depth 12? No, that's impossible. Even if each weight matrix were rank-1, a student model with width 512 and depth 12 would have at minimum 512×12 = 6,144 parameters just for the diagonal of each weight matrix, and actually the weight matrices are D2×D2 for each layer. So:
+
+If the student truly has width 512 and depth 12:
+- Each weight matrix: 512 × 512 = 262,144
+- Q, K, V, O per layer: 4 × 262,144 = 1,048,576
+- MLP (fc1 + fc2): 512 × 2048 + 2048 × 512 = 2,097,152
+- Per layer total: ~3.1M
+- 12 layers: ~37.7M
+- Plus embeddings
+
+So the student model with those specs would need ~38M+ parameters, not 0.8M. The architecture specs in the table are definitely wrong for CLIP-Map_tiny.
+
+The correct student architecture for CLIP-Map_tiny is almost certainly width ~128, depth ~4 (matching TinyCLIP's architecture at this compression level), since that gives ~0.8M parameters.
+
+This is a clear error in the paper. I'll flag it as Major.
+
+Now let me finalize and write.## Summary
+
+CLIP-Map proposes a mapping-based compression framework for CLIP models that replaces conventional select-based pruning (e.g., TinyCLIP) with learnable linear transformations (parameterized via Kronecker factorization) that map large pretrained weights into smaller ones. The framework operates in two stages: a mapping stage that learns width and depth compression operators, followed by a retraining stage using knowledge distillation. A diagonal inheritance initialization is introduced to stabilize the optimization of the mapping matrices. Experiments on zero-shot retrieval (MSCOCO, Flickr30K) and classification (21 datasets) show consistent improvements over TinyCLIP at equivalent parameter budgets, particularly under extreme compression (1.0%), while requiring fewer training epochs.
 
 ## Strengths
 
-- **Novel paradigm shift from select-based to mapping-based compression**: The paper reframes CLIP compression as learning transformations that preserve pretrained information rather than discarding parameters. This is a conceptually clean and well-motivated inversion of model-growth techniques like LiGO, applied to the compression direction. Table 1 shows CLIP-Maptiny (1.0% size) achieves 15.8 TR@1 on MSCOCO vs. 10.5 for TinyCLIP of identical parameter count.
+- **Strong empirical gains at extreme compression**: At 1.0% compression (0.8+0.3M total params), CLIP-Map_tiny achieves 15.8 TR@1 on MSCOCO vs. 10.5 for non-progressive and 12.5 for progressive TinyCLIP — a 26–50% relative improvement (Table 1). At 10% compression, CLIP-Map_small outperforms TinyCLIP on retrieval (38.4 vs. 34.5 TR@1) and classification (62.8 vs. 59.6 IN-1K Top-1). These gains hold across multiple scales and benchmarks (Tables 1–3), supporting the core claim that learned mappings preserve more information than weight selection under aggressive compression.
 
-- **Diagonal Inheritance Initialization is simple, theoretically motivated, and empirically decisive**: The variance analysis (Eqs. 5–8) explains why random/Kaiming/Xavier initialization of Kronecker factors causes distribution shifting and optimization failure. The diagonal initialization fixes this cleanly. Table 5 quantifies the dramatic impact: mapping-stage accuracy jumps from 4.4% (Kaiming) to 28.9% (Diag Init) on ImageNet-1K, and the loss curves (Fig. 6) confirm faster, more stable convergence. This is a genuine insight applicable beyond this paper.
+- **Training efficiency advantage**: Table 11 shows CLIP-Map_tiny trains in 21h50m (25 total epochs) vs. TinyCLIP_tiny's 49h33m (75 epochs across three progressive stages), while achieving higher accuracy. This is a genuine practical benefit — the combined mapping+retraining pipeline requires less than half the wall-clock time and eliminates multi-stage engineering complexity.
 
-- **Significantly reduced training cost**: Table 11 shows CLIP-Maptiny completes in 21h50m (5 mapping + 25 retraining epochs) vs. TinyCLIP's 49h33m (3-stage progressive, 75 epochs). The mapping stage replaces expensive multi-stage progressive compression with a single 5-epoch optimization of lightweight mapping matrices. This efficiency argument is well-supported and practically meaningful.
+- **Principled approach to initialization**: The diagonal inheritance initialization (Section 3.2.3) is grounded in an analysis of variance multiplication in Kronecker products (Eq. 5–8). Table 5 shows it achieves 28.9% IN-1K accuracy after the mapping stage alone, vs. ≤4.9% for standard initializations. The visualization in Figure 5 further shows the mapping matrices evolve from diagonal toward structured off-diagonal patterns, indicating the optimization does learn beyond simple weight copying.
 
-- **Unified width and depth compression in a single differentiable pipeline**: Both dimensions are handled simultaneously via Kronecker-factored width mappings and learned linear layer combinations for depth, reducing engineering complexity compared to multi-stage pruning pipelines.
-
-- **Generalizability demonstrated across architectures and pretrained weights**: Results are shown for ViT-based and ResNet-based vision encoders, and for OpenCLIP and MetaCLIP teacher models, indicating the approach is not tightly coupled to one backbone.
+- **Parameter-efficient mapping via Kronecker factorization**: Section 3.2.2 reduces mapping complexity from O(D₁²D₂²) to O(D₁D₂), making the approach practical. The ablation on mapping/retraining duration (Table 4) provides useful practical recipes (5 epochs mapping + 20 epochs retraining).
 
 ## Weaknesses
 
 ### Fatal
-
-None.
+None. The paper's core claims are supported by the experiments, and no error identified invalidates the central finding that mapping-based compression outperforms select-based pruning at equivalent parameter budgets.
 
 ### Major
 
-- **Table 6 contains a contradictory architectural specification for CLIP-Maptiny**: The table lists CLIP-Maptiny's vision encoder as width=512, depth=12, with 0.8M parameters. A ViT at width=512 and depth=12 would have approximately 37M parameters, not 0.8M — and the reported 0.21 GFLOPs (Table 12) is also incompatible with this architecture. The correct dimensions are presumably closer to TinyCLIP's width=128, depth=4, but the table was not updated. This is a documentation error rather than evidence of fraudulent experiments (the param counts and FLOPs are internally consistent), but it creates genuine confusion about what architecture was actually evaluated and undermines trust in the reported configurations.
+- **Table 6 architecture/parameter count inconsistency for CLIP-Map_tiny**: At 1.0% compression, CLIP-Map_tiny is listed with vision encoder width 512, depth 12 and text encoder width 512, depth 6, but a total parameter count of only 0.8+0.3M. This is physically impossible — a ViT with those dimensions would require tens of millions of parameters. The parameter counts for TinyCLIP at the same compression level (width 128, depth 4 vision; width 128, depth 2 text; 0.8+0.3M) are consistent, strongly suggesting the architecture columns for CLIP-Map_tiny are erroneous (likely copied from the teacher model). This does **not** invalidate the core comparison — the parameter counts (which define the comparison basis) match between methods — but it is a significant presentation error that undermines trust in the data. The authors must correct this before the paper can be accepted. The 10% and 50% rows in Table 6 do not exhibit this inconsistency.
+
+- **Missing ResNet-50 performance results**: Section 4.1 states the method is applied to a ResNet-50 vision encoder, and Table 6 lists a configuration ("CLIP-Map_base (Ours, ResNet-50, wo Retraining)"). However, no corresponding performance results appear in any main table (Tables 1–3) or in the appendix. This claim of "broad applicability" is unsupported by evidence and should either be removed or the results should be reported.
+
+- **No quantification of mapping-stage parameter/computation overhead**: The paper never states how many total trainable parameters the mapping matrices F_in, F_out, and L_depth require, nor their FLOPs cost relative to the retraining stage. For ViT-B/16 compressed to 10% (D₁=768, D₂=256), each layer requires 2×768×256 ≈ 393K mapping parameters, totaling ~4.7M for 12 layers — a non-trivial overhead that should be explicitly discussed to validate the efficiency narrative.
 
 ### Minor
 
-- **"Manual Drop" baseline in Table 4 is never defined**: The mapping-duration ablation includes a "Manual Drop (0 epoch)" entry with 41.1% IN-1K accuracy, but the paper does not describe how this subnetwork is selected. Without this description, the reader cannot interpret what this baseline actually tests or how it relates to the mapping approach.
+- **Sensitivity to initialization raises robustness questions**: Table 5 shows standard initializations (Random, Kaiming, Xavier) produce near-zero accuracy (0.1–4.9%) after the mapping stage. While the paper acknowledges this and proposes diagonal initialization as a solution, the extreme brittleness is atypical and suggests the optimization landscape may be pathological. The paper does not analyze why the off-diagonal components of F_in/F_out can only be learned from a nearly-identity starting point, nor does it quantify how far the optimized matrices deviate from the diagonal initialization (e.g., via a Frobenius norm ratio).
 
-- **Multi-head attention and architectural details are underspecified**: Section 3.2.2 and Appendix A.3 describe how F matrices are applied to attention and FFN weight blocks, but the paper does not clarify whether the number of attention heads changes, how LayerNorm parameters are handled, or how residual connections are affected after dimension reduction. These are standard operations in this line of work and can be inferred, but explicit discussion would improve reproducibility.
+- **Gain over simple weight-subset baseline is modest**: In Table 4, the "Manual Drop" baseline (no mapping, just selecting a weight subset) achieves 41.1% IN-1K accuracy, while the best mapped model achieves 42.1% — a 1% absolute gain after adding a full mapping stage with millions of additional learned parameters. The paper frames this as "particularly significant" but does not provide statistical significance or analysis of why the gap is small relative to the added complexity. The main TinyCLIP comparison shows larger absolute gains, which mitigates this concern somewhat.
 
-- **Non-TinyCLIP comparisons rely on numbers from original papers with different training setups**: Table 3 compares against MoPE-CLIP, CLIP-KD, and MobileCLIP, and Appendix Table 7 against UPop, EfficientVLM, and DynaCLIP, but these are cited from the original papers where datasets, teacher models, and training budgets differ. The paper acknowledges this limitation (A.4). This weakens the strength of the cross-method comparison but does not invalidate the direct TinyCLIP comparison, which is the paper's primary empirical claim.
-
-- **The loss-weighting ablation (λ=1.0) is conducted only on CC3M with CLIP-Mapsmall**: The finding that λ=1.0 is optimal is then applied to all experiments (YFCC-15M, all model sizes). While λ=1.0 (pure distillation) is a common and reasonable default, the ablation does not demonstrate that the finding generalizes across datasets and model scales. This is a minor concern since pure distillation is a standard choice.
+- **Comparison with UPop/EfficientVLM/DynaCLIP (Table 7) uses non-standardized settings**: The paper acknowledges these numbers are taken directly from other papers without adapting to a common experimental setting (different datasets, model sizes, training recipes). This is transparent but the inclusion is of limited value and could mislead readers.
 
 ### Trivial
 
-- None worth noting beyond the parser-related formatting artifacts present in the extracted text.
+- **Residual presentation issues in extracted text**: Several tables (especially Table 1 and parts of the method section) have formatting artifacts from PDF extraction, but these do not affect substantive understanding.
+- **Minor notation inconsistency**: `λ` parameter sweep shown in Table 10 but the equation uses `λ` and text refers to it as "distillation coefficient" — the paper could benefit from a cleaner connection between the equation and the ablation.
 
 ## Nice-to-Haves
 
-- **A deterministic low-rank compression baseline** (e.g., truncated SVD of each weight matrix) would directly test the value of learned mapping over a static optimal projection. The paper's core claim that mapping preserves information better than selection would be strengthened by showing that the learned mapping matters, not just the low-rank structure.
-
-- **Analysis of what the learned F matrices converge to** (e.g., comparing their structure to the SVD of the original weights) would provide insight into whether the mapping stage discovers a genuinely different compression strategy or simply approximates a standard subspace projection.
-
-- **Scaling experiments on larger datasets** (LAION-2B, DataComp-1B) to test whether the mapping-retraining pipeline remains beneficial with stronger teachers. The authors acknowledge this as future work (A.9).
+- **Ablation isolating width vs. depth compression**: The method jointly optimizes width and depth mappings. An ablation that keeps width fixed while varying depth (and vice versa) would clarify whether the depth-mapping component (L_depth) contributes meaningfully beyond what width compression alone achieves.
+- **Comparison with distillation-only baselines** (e.g., CLIP-KD) without the mapping stage would help isolate the mapping benefit from the distillation benefit, since the retraining stage is pure distillation.
+- **Analysis of learned mapping matrices**: A quantitative measure (e.g., ∥F − diag(init)∥ / ∥diag(init)∥) would show whether the optimized matrices deviate significantly from the diagonal initialization or remain near-identity, clarifying whether the "learned transformation" framing is warranted.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+**Architecture inconsistency "invalidates every experimental result" (Harsh Critic, Critical Issues #1)**: The critic claims the Table 6 mismatch makes "every quantitative result in Tables 1–3 uninterpretable." This is an overstatement. The parameter counts in the same table (the actual basis for comparison) are consistent between CLIP-Map and TinyCLIP at every compression ratio. The error is in the architecture-width/depth columns for the 1.0% CLIP-Map_tiny row only — almost certainly a copy-paste error showing teacher dimensions instead of student dimensions. The parameter-count-based comparison is valid. The error is preserved above as Major (not Fatal) for its effect on credibility, not because it invalidates results.
 
-1. **Harsh critic's claim that "none of the experimental claims can be taken at face value" due to the Table 6 error** — REMOVED as overstatement. The Table 6 error is a genuine documentation problem (moved to Major), but the param counts and FLOPs are internally consistent across all tables, and the comparison against TinyCLIP at matched sizes establishes credibility for the core results. The error affects clarity, not experimental validity.
+**"Mapping stage is not fundamentally different from pruning" (Section-by-Section, Introduction)**: The critic claims mapping "still implicitly discards information by projecting weight matrices onto a lower-dimensional subspace" and is "not fundamentally different from pruning." This conflates all forms of compression. The paper's distinction (mapping via learned linear combination vs. hard selection of a weight subset) is a meaningful difference in the compression mechanism — one retains information through learned projections, the other through discrete selection. The paper is clear about this framing.
 
-2. **Harsh critic's claim that the only select-based competitor is TinyCLIP** — REMOVED as factually incorrect. The paper also compares against MoPE-CLIP, CLIP-KD, UPop, EfficientVLM, DynaCLIP, and MobileCLIP (Tables 3, 7). The criticism about cross-paper comparison setups is valid and retained as Minor.
+**"λ=1.0 means the student is purely mimicking the teacher, which is standard knowledge distillation" (Section-by-Section, Retraining Stage)**: The critic characterizes this finding negatively. The paper presents λ=1.0 as an empirical finding (Table 10) that pure distillation works best, which simplifies the loss design. That this aligns with standard KD practice does not make it a weakness — it is a useful practical insight.
 
-3. **Harsh critic's claim about "no non-learned mapping baseline" making it impossible to demonstrate superiority of mapping over selection** — REMOVED as scope creep. The paper's primary claim is mapping vs. selection (not learned vs. non-learned mapping). The Diagonal Inheritance initialization itself functions as a non-learned mapping baseline (zero mapping epochs). The SVD suggestion is moved to Nice-to-Haves.
+**"Diagonal initialization is nearly equivalent to copying a submatrix" (Section-by-Section, Sec 3.2.3)** and **"The mapping may add little beyond simple submatrix selection" (Critical Issues #3)**: These claims are contradicted by the paper's own evidence. Figure 5 shows the mapping matrices evolving from diagonal toward structured off-diagonal patterns over training epochs, indicating the optimization does learn beyond the initialization. The paper explicitly states (lines 756-758) that "the distribution of the mapping matrix gradually evolves from an initial diagonal pattern toward a more uniform structure." The critic's speculation that the learned mapping "may add little" is not supported.
 
-4. **Strength Finder claims about "thorough ablation studies" and "generalizability across architectures" that are generic** — Qualified rather than removed. The ablations are mostly thorough but the Manual Drop issue weakens this somewhat. The generalizability claim is supported by the ViT/ResNet results.
+**"Very extensive set of datasets is a strength" (Strength Finder, point 4)**: Generic phrasing; retained as "strong empirical gains" with specific numbers above.
 
-5. **Harsh critic's formatting and typo complaints** — REMOVED per hard rules; these are parser artifacts.
+**"Ablation studies provide actionable insights" (Strength Finder, point 3)**: The specific insights (5-epoch mapping, λ=1.0) are valuable but presented as minor supporting strengths rather than core claims. These are subsumed into the main strengths.
 
-6. **Harsh critic's note about the Kronecker factorization being "standard"** — REMOVED. Even if standard in other contexts, its application to CLIP compression with diagonal initialization is the novel contribution.
+**"Generalization across different CLIP architectures" (Strength Finder, point 4)**: Weakened since the ResNet-50 result is claimed but no performance numbers are actually reported, and the Meta-CLIP variant is listed in Table 6 configuration but comparisons are limited.
+
+**Criticism about missing appendix/proofs**: Removed per instructions (parser strips appendix content).
+
+**Formatting/style nitpicks and typos**: Removed per instructions (parser artifacts, not author errors).
 
 ## Novel Insights
 
-The most genuinely novel insight from this work is that **the distribution-shifting problem caused by Kronecker-factored mappings can be elegantly solved by diagonal initialization, which simultaneously provides weight inheritance from the pretrained model**. This is not just an engineering trick — the variance analysis (Eqs. 5–8) provides theoretical grounding, and the empirical gap (4.4% → 28.9%, Table 5) is large enough to suggest this is a fundamental observation about Kronecker-structured transformations in neural networks. The insight bridges model growth literature (LiGO, LeTs) with model compression, revealing that the mapping direction can be reversed if the initialization problem is properly addressed.
+Beyond the paper's own contributions, the reviews collectively raise an important question about the boundary between "learned mapping" and "structured initialization." CLIP-Map's diagonal inheritance initialization essentially copies a submatrix of the original weights and then learns off-diagonal corrections. The extreme failure of standard initializations (Table 5) suggests that the optimization landscape for Kronecker-structured mappings is highly non-convex and that the diagonal initialization provides a strong enough inductive bias to find a meaningful basin. This raises the interesting question of whether the mapping stage is best understood as *learning a correction to weight inheritance* rather than *learning a compression mapping from scratch* — a subtle but meaningful reframing. Future work could explore whether the mapping matrices can be learned jointly from the outset without the two-stage pipeline, or whether cheaper alternatives (e.g., learning only the off-diagonal perturbations) suffice.
 
 ## Suggestions
 
-- **Fix Table 6**: The CLIP-Maptiny architecture dimensions should be updated to match the actual model evaluated (likely width=128, depth=4 for vision, matching the 0.8M parameter count). All three model variants in that table should be double-checked for consistency between reported dimensions, parameter counts, and FLOPs.
+1. **Fix Table 6**: Correct the architecture specifications for CLIP-Map_tiny at 1.0% compression. The student model dimensions should be width ~128, depth ~4 (vision) and width ~128, depth ~2 (text) — matching the parameter count of 0.8+0.3M and TinyCLIP's architecture at the same compression level. Verify that all other architecture specs in Table 6 are correct.
 
-- **Define "Manual Drop"**: Add 1–2 sentences in Section 4.3 explaining what subnetwork selection strategy is used for the no-mapping baseline in Table 4. If it is random selection or TinyCLIP-style importance-based pruning, state this explicitly.
+2. **Report ResNet-50 results or remove the claim**: Provide the actual performance numbers for the ResNet-50 mapping-only experiment. If the results are not available, remove the ResNet-50 configuration from Table 6 and the claim in Section 4.1.
 
-- **Clarify attention head handling**: Add a brief note in A.3 stating whether head count is preserved (with per-head dimension scaling proportionally) or adjusted, and confirm that LayerNorm parameters scale with the mapped dimensions.
+3. **Report mapping parameter overhead**: Add a table or sentence stating the total number of trainable mapping parameters (F_in, F_out, L_depth) for each model variant, and their computational cost relative to the retraining stage.
 
-- **Add an SVD-based projection baseline** would substantially strengthen the paper, but this is suggested as future work rather than a requirement for acceptance.
+4. **Quantify mapping matrix deviation**: Add a metric (e.g., Frobenius norm ratio between off-diagonal and diagonal components) to show that the optimized F_in/F_out matrices learn meaningful off-diagonal structure beyond the diagonal initialization.
 
 ## Score and Decision
 
-### Calibration anchor comparison:
+**Calibration anchors** (all from human reviews):
 
-- **/home/wg25r/review_agent/human_reviews_2026/RQUwj3HdUm.md** (avg 2.50, Reject): Task Matrices — interesting idea but very limited evidence, couldn't reproduce. CLIP-Map is substantially stronger with thorough experiments.
-- **/home/wg25r/review_agent/human_reviews_2026/UGCgt3cvcC.md** (avg 4.00, Reject): Adaptive MLP Pruning — decent method but limited novelty and some concerns. CLIP-Map has more novelty and stronger empirical demonstration.
-- **/home/wg25r/review_agent/human_reviews_2026/Fxz0aaGSNY.md** (avg 4.80, Reject): Multi-modal dataset distillation — creative approach but reviewers found theoretical simplifications unjustified. CLIP-Map's methodology is better justified.
-- **/home/wg25r/review_agent/human_reviews_2026/mp67iSM7qn.md** (avg 5.00, Accept Poster): InherNet — uses SVD-based initialization for model compression, similar spirit. CLIP-Map is comparable in contribution level, with a more complete pipeline.
-- **/home/wg25r/review_agent/human_reviews_2026/CVXpkc3bXc.md** (avg 5.20, Reject): Kronecker SAEs — related technique but mixed reviews. CLIP-Map is comparable in technical contribution but has more application-oriented results.
-- **/home/wg25r/review_agent/human_reviews_2026/i36E5Ezm0H.md** (avg 5.50, Accept Poster): PruneSID — solid method with good results. CLIP-Map is at a similar level but has the Table 6 error that reduces confidence slightly.
-- **/home/wg25r/review_agent/human_reviews_2026/Wa9Bg9b50B.md** (avg 6.00, Accept Poster): CompoDistill — very clean analysis, well-motivated. CLIP-Map is somewhat weaker due to the documentation issues and missing baselines.
-- **/home/wg25r/review_agent/human_reviews_2026/kI27Niy4xY.md** (avg 8.00, Accept Oral): Model stitching — truly novel paradigm with strong results. CLIP-Map is clearly below this level.
+| Path | Avg Score | Topic | Comparison |
+|------|-----------|-------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/mp67iSM7qn.md` | 5.00 (Accept) | Weight inheritance via low-rank decomposition | Similar in spirit (transforming weights rather than pruning). CLIP-Map has stronger empirical scope but a concrete Table 6 error this paper doesn't have. Slightly weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/YULeQtSyiW.md` | 5.50 (Accept) | VLM token compression | Both propose compression with strong experiments. CLIP-Map's mapping idea is more novel, but presentation/analysis is less polished. Comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/OaWiP9VTgO.md` | 5.33 (Reject) | Low-rank activation-aware factorization | Mixed reviews (6,2,8). CLIP-Map has clearer novelty but a more concrete error. Slightly weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/TkJ8UNxD6B.md` | 4.50 (Reject) | Learngene initialization | Both involve learnable transformations for weight initialization. ALT has thorough theory but novelty concerns. CLIP-Map has a clearer application but a glaring table error. Comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/UGCgt3cvcC.md` | 4.00 (Reject) | MLP pruning for ViTs | Both target ViT compression. CLIP-Map's experiments are more extensive across modalities. Stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/iY0Wi8UIjA.md` | 3.50 (Reject) | Low-rank LLM compression | SLIM has novelty concerns; CLIP-Map has a clearer contribution and broader experiments. Stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/CXVf8Vx2E2.md` | 4.67 (Reject) | VLM quantization | Both target VLM efficiency. CLIP-Map has stronger results but a more significant presentation error. Slightly weaker. |
 
-CLIP-Map sits at the borderline. The core idea (mapping-based compression with Kronecker factorization and diagonal initialization) is genuinely novel and well-motivated, and the results against TinyCLIP are compelling. However, the Table 6 architectural specification error, the undefined "Manual Drop" baseline, and the underspecified architectural details collectively reduce confidence. The paper is stronger than the 4.0–4.8 rejected papers and comparable to borderline accepts at 5.0–5.2. I score it **5.0** — a weak/borderline accept that requires the identified issues to be addressed.
+CLIP-Map introduces a genuinely novel approach (mapping-based compression for CLIP via Kronecker-factorized transformations) with demonstrated empirical advantages over the state-of-the-art select-based baseline (TinyCLIP) across multiple compression levels and benchmarks, along with meaningful training efficiency gains. The contribution is real and the experimental validation is reasonably broad.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, the paper is undermined by a significant presentation error: the architecture specifications in Table 6 for CLIP-Map_tiny at 1.0% compression are inconsistent with the reported parameter count (width 512, depth 12 with only 0.8M params). While this does **not** invalidate the core comparison (the parameter counts match between methods), it erodes trust and must be corrected. Additional shortcomings include missing ResNet-50 results and unquantified mapping overhead. These issues are fixable but prevent acceptance in the current form.
+
+Positioning relative to anchors: the paper is stronger than the 3.50–4.00 rejected papers (which had more fundamental novelty/validity issues) and comparable to the 4.50–5.33 borderline papers. The Table 6 error prevents it from reaching the 5.50 Accept range where YULeQtSyiW and similar papers sit.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

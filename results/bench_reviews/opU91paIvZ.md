@@ -1,87 +1,88 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me write the consolidated review.
-
----
+Now I have enough context from both the paper and the calibration anchors. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper addresses the problem of making chain-of-thought (CoT) reasoning traces *monitorable*—both faithful (honestly reflecting what influenced the answer) and concise (short enough for effective monitoring). The authors formalize monitorability as a constrained optimization problem, demonstrate that naive RL fails due to sparse monitorability signals, and propose a prior-guided distillation pipeline: an auxiliary model rewrites base-model reasoning traces into monitorable versions, which are filtered by reward preservation and then used for supervised fine-tuning. Experiments on MMLU-Pro (faithfulness) and GSM8K/MATH500 (conciseness) show a ~10pp gain in hint verbalization and ~60% reduction in reasoning length, though the conciseness results come with a ~10% relative accuracy drop.
+This paper addresses the problem of making chain-of-thought (CoT) reasoning in LLMs more "monitorable" — specifically, more faithful (open about using injected hints) and more concise (shorter). The authors formulate this as a constrained optimization problem, show that naive RL fails due to sparse monitorability signals, and propose a prior-guided distillation pipeline: use a larger instruction-tuned model (Qwen 2.5-7B Instruct) to rewrite base-model CoTs into monitorable versions, filter for correctness and monitorability, then supervised fine-tune the base model on these curated traces. On MMLU-Pro (with hint injection), faithfulness (hint verbalization rate) improves from 15% to 25%; on GSM8K and MATH500, CoT length drops substantially while maintaining roughly 90% of base accuracy.
 
 ## Strengths
 
-- **Clear problem diagnosis and formalization.** The paper provides a constrained optimization formulation (Eq. 1) for CoT monitorability and gives a mathematical explanation—supported by an empirical RL failure demonstration (Figure 2)—for why naive policy-gradient training fails: the monitorability signal \(f(z)\) is zero under the base policy, causing the relevant gradient term to vanish. This diagnosis directly motivates the proposed approach.
+- **The problem is timely and well-motivated.** Making CoTs faithful and concise is an important AI safety challenge, and the paper clearly identifies why naive RL fails (sparse reward signal under the initial policy — the gradient term \(L_1\) vanishes because \(f(z)\approx 0\) for samples from \(\pi_0\)). This diagnosis is empirically demonstrated in Figure 2 and mathematically explained in Section 3 (Eq. 5).
 
-- **Prior-guided transformation is a sensible practical solution.** Using an external prior model to rewrite sparse, unmonitorable traces into dense, monitorable ones, and then distilling that behavior via SFT, is a pragmatic way to convert a sparse-reward problem into a supervised learning task. The proof-of-concept experiment (Figure 3) showing that prior-transformed traces are reward-compatible under the unchanged base model is a useful sanity check that rules out an inherent accuracy–monitorability trade-off as the primary obstacle.
+- **The prior-guided distillation pipeline is a sensible solution to the sparse-reward problem.** The key insight — that monitorable traces may already be within the base model's capability but are sampled too rarely to drive RL — is validated by the proof-of-concept experiment (Section 4, Figure 3) showing that conditioning the base model on prior-rewritten traces preserves correctness. Using the prior to generate dense supervised training data is a clean way to bypass the vanishing-gradient problem.
 
-- **Substantial conciseness gains demonstrated.** The method reduces reasoning length by roughly 60% on GSM8K and MATH500 (Figures 5–6), with the entire length distribution shifting left—showing the model reliably produces shorter traces, not just occasional ones. This is a meaningful result for anyone concerned with CoT verbosity.
-
-- **Limitations are acknowledged.** The paper explicitly notes dependence on prior model quality and reliance on LLM-as-a-judge for faithfulness evaluation (Section 6).
+- **Empirical gains are observed on both dimensions.** On faithfulness (MMLU-Pro), hint verbalization improves from 15% to 25% — a 67% relative gain. On conciseness (GSM8K, MATH500), the trained model's CoT length distribution shifts substantially leftward (Figure 6). These results confirm that the training pipeline produces measurable changes in the desired direction.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Accuracy claims are internally inconsistent and overstated.** The introduction (line 100–101) claims "maintaining at least 96% of the base model's task accuracy in both the tasks," while the conciseness results (Figure 5 caption, lines 680–684) explicitly report "approximately 90%" relative accuracy—a ~10% drop. This is not a minor reporting error: the abstract's "keeping accuracy essentially unchanged" is contradicted by the conciseness experiments, and the 96% claim is simply not true for the conciseness task. The faithfulness results do preserve accuracy, but the combined claim is misleading. This directly undermines the paper's core narrative that monitorability comes without sacrificing accuracy.
+- **Numerical inconsistency between abstract and results.** The abstract (line 101) claims "maintaining at least 96% of the base model's task accuracy," but the experimental section (lines 681–684, 696–697) states "maintaining a average relative accuracy of approximately 90%." These are not compatible — 96% retention and 90% retention differ by 6 percentage points. This discrepancy is not explained by different tasks (both refer to GSM8K and MATH500) and is a clear error that overstates the paper's strongest quantitative claim. Authors must correct this and justify which number is accurate.
 
-- **Faithfulness evaluation relies on a single unvalidated proxy.** The faithfulness gain (15% → 25% hint verbalization) is measured solely by an LLM judge (Qwen 14B Instruct) counting whether the hint appears in the trace. No human validation, no multi-judge consistency check, and no correlation with any ground-truth faithfulness measure are reported. A model could learn to superficially name-drop the hint without genuinely conditioning its reasoning on it, inflating the metric while remaining unfaithful. With 75% of traces still lacking any hint mention after training, the practical value of the faithfulness improvement is questionable.
+- **The faithfulness operationalization (hint verbalization) is a surface-level proxy that the paper does not validate against a deeper notion of faithfulness.** The paper defines faithfulness as whether the model explicitly mentions an injected hint in its CoT (following Chen et al., 2025). The training pipeline uses a prior model to generate traces that include such mentions, and the evaluation checks whether the fine-tuned model produces mentions on disjoint examples. While this is not "circular" (training and evaluation examples are different), the paper provides no evidence that the model's CoT genuinely *reflects its internal reasoning* rather than simply learning to mimic a verbalization pattern. Rival explanations (e.g., the model inserts hint mentions as superficial tokens while its actual reasoning path is unchanged) are not ruled out. The paper's own limitations section (lines 624–626) acknowledges that "more rigorous human or multi-judge validation would strengthen the work," but this limitation is fundamental to the core claim and should be addressed directly — for instance, via causal probing or intervention-based validation.
 
-- **No baseline comparisons for conciseness.** The paper does not compare against any existing conciseness method (e.g., Chain-of-Draft, L1, length-penalty RL, or the closely related PALU from Arora & Zanette 2025, which the paper already cites). Without such comparisons, it is impossible to assess whether the prior-guided SFT approach offers any advantage over simpler alternatives.
+- **The "principled" constrained optimization framing is disconnected from the actual algorithm.** The Lagrangian formulation (Eq. 3) and its analysis motivate the paper but play no role in designing the algorithm. The method in Algorithm 1 is a standard data distillation pipeline: generate candidates with a stronger model, filter by correctness, and fine-tune with SFT. The Lagrangian is never optimized, the Lagrange multiplier \(\lambda\) is never tuned, and the gradient analysis in Section 3 does not inform any design decision. The paper would be more honest if it presented the method as "distillation with a prior" rather than claiming a "principled approach" to constrained optimization.
 
 ### Minor
 
-- **Connection between formal optimization and practical algorithm is loose.** Section 4.1 reformulates the objective using the prior policy \(\pi_s\) (Eq. 6), but Algorithm 1 does not optimize this objective via any gradient-based method. Instead, it collects high-reward transformed traces and performs SFT. The paper would benefit from explicitly clarifying that Algorithm 1 is a practical heuristic, not a solver for Eq. 6, and discussing what is lost in this translation.
+- **Base model CoT length distributions are not reported.** The conciseness experiments use thresholds \(\beta = 125\) (GSM8K) and \(\beta = 950\) (MATH500), but the paper never reports the base model's mean, median, or distribution of CoT lengths. Without this information, claims of "60% reduction" and the appropriateness of the chosen thresholds cannot be evaluated. If the base model's median length on MATH500 is already 800 tokens, a 60% reduction claim is misleading; if it is 2500 tokens, the same claim means something very different.
 
-- **Single model pair evaluated.** Only DeepSeek R1 Qwen-1.5B (base) and Qwen 2.5-7B Instruct (prior) are used. While the proof-of-concept is valid, showing results with at least one additional base model or prior would substantially strengthen the generality claim.
+- **LLM-as-a-judge faithfulness evaluation may have model-family bias.** The judge is Qwen 14B Instruct (Appendix A.4), while the prior policy is Qwen 2.5-7B Instruct. Both are from the Qwen family, and the judge may be biased toward the kinds of outputs its smaller sibling produces. A cross-family judge (e.g., Llama or DeepSeek) or human annotation with inter-annotator agreement would strengthen the faithfulness results.
+
+- **No error bars or confidence intervals on any experimental result.** Given the small evaluation sets (MATH500 = 500 samples, MMLU-Pro subsets of similar size), variance matters. Figures 2, 4, 5, and 6 all lack uncertainty quantification, making it impossible to assess whether the reported improvements are statistically significant.
+
+- **Candidate trace filtering rate is not reported.** Algorithm 1 filters candidate traces for correctness and monitorability. The paper does not report what fraction of prior-generated candidates pass this filter. If most fail, the effective training dataset is much smaller than the stated 3200 examples, which affects the method's practical viability.
+
+- **The faithfulness improvement (15% → 25%) is modest in absolute terms.** While the relative gain of 67% sounds impressive, 25% hint verbalization still means 75% of outputs are unfaithful by the paper's own definition. This is acknowledged implicitly but the framing ("about an additional 10%") obscures the fact that the model remains predominantly unfaithful.
 
 ### Trivial
 
-- The faithfulness results section (line 593) reports a "22 percentage point" rise from the baseline, while the abstract and Figure 4 caption say "10%"—the abstract refers to absolute percentage points (15% to 25% = 10pp), while the results section appears to use a different framing. These should be reconciled for clarity.
+- The claim "10% relative increase in faithfulness" in Figure 1 (line 67) is inconsistent with the actual numbers (15% to 25% = 10 percentage points = 67% relative increase). This should be clarified.
 
 ## Nice-to-Haves
 
-- Human evaluation or a more rigorous faithfulness measure (e.g., counterfactual simulatability) would substantially strengthen the faithfulness claims.
-- Qualitative examples comparing base vs. trained reasoning traces for both faithfulness and conciseness would help readers assess whether the compressed traces remain intelligible and genuinely monitorable.
-- Ablating the filtering criteria (reward equality, likelihood selection) would clarify whether gains come from the prior transformations or merely from selection bias.
+- **Controlling for prior quality**: The proof-of-concept experiment (Section 4) should compare the prior-rewritten traces against equally high-quality but non-monitorable rewrites (e.g., same prior model with a different instruction) to verify that monitorability, not just trace quality, drives the results.
+
+- **Cross-evaluation**: Test whether the faithfulness-trained model also improves conciseness and vice versa. The paper currently treats these as separate experiments with no analysis of interaction effects.
+
+- **Causal faithfulness probing**: Using activation interventions to test whether the fine-tuned model's CoT actually reflects its internal processing would substantially strengthen the core claim. This is acknowledged as future work but is central enough to warrant discussion.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- **"The bar charts in that figure (which are garbled but decipherable)"** — This is a PDF parser artifact. The original submission does not have garbled figures.
-- **Demand for standard RL mitigation techniques (reward shaping, intrinsic curiosity, soft constraints) to be explored before presenting the prior-guided method** — The paper's scope is to propose and validate the prior-guided approach. Criticizing it for not exhaustively exploring all RL alternatives is scope creep. The RL failure demonstration is sufficient motivation for the proposed method.
-- **"The dataset construction, using hints whose correctness is not explicitly verified"** — The paper explains that it recreated hints based on detailed descriptions from Chen et al. (2025) and provides templates in the appendix. The hint methodology is adopted from prior work and is standard in faithfulness evaluation.
-- **Criticism about missing appendix, appendix-deferred proofs, or absent references** — The parser strips appendix sections. The original submission contains these.
-- **Formatting, typo, and layout complaints** — These are either parser artifacts or trivial presentation issues that carry no evaluative weight.
+- **"Faithfulness evaluation is fundamentally circular"** (Harsh Critic #1): The reviewer claimed the evaluation is circular because the metric and training procedure are "aligned by construction." This mischaracterizes the setup: training and evaluation are on *disjoint* example sets, so the model must generalize the hint-verbalization pattern to unseen inputs. The deeper concern about construct validity of hint-verbalization as a faithfulness measure is real and is retained in Major Weaknesses above, but the "circularity" framing is factually incorrect.
+
+- **"Naive RL fails is trivial"** (Harsh Critic #2): The reviewer characterizes this as an obvious result. While the result is not surprising to practitioners, the paper uses it as motivation (not a core contribution), and the empirical verification is still useful. This is not a genuine paper weakness.
+
+- **Formatting/parser artifact complaints**: Criticisms about garbled tables, missing text, and broken formatting are artifacts of the PDF extraction process and not present in the original submission.
 
 ## Novel Insights
 
-The paper's most interesting conceptual insight is the explicit framing of the monitorability learning problem as a *support mismatch* issue: the base policy's distribution has essentially zero probability mass on monitorable traces, causing the monitorability gradient term to vanish. This is demonstrated empirically and explained mathematically, and it motivates the prior-guided approach cleanly. The proof-of-concept that prior-transformed traces preserve reward under the unchanged base model is a simple but effective check that separates the *scarcity* problem from a *compatibility* problem—a useful methodological move that could inform future work on CoT steering.
+None beyond the paper's own contributions. The observation that monitorable traces are reward-compatible under the base model (Section 4) is the paper's most interesting finding, but it is essentially a sanity check that a stronger, instruction-tuned model can produce reasoning traces that the base model can still follow — a predictable outcome.
 
 ## Suggestions
 
-- Reconcile the accuracy claims across abstract, introduction, and conciseness results. Either (a) report the conciseness accuracy drop transparently in the abstract/intro and soften the "essentially unchanged" language, or (b) if the 96% figure comes from averaging faithfulness and conciseness, state this explicitly and give per-task numbers.
-- Add at least one conciseness baseline (e.g., L1 or a simple length-penalty RL variant) to contextualize the ~60% length reduction.
-- Report human validation or multi-judge agreement for the LLM-as-judge faithfulness metric, even on a small subset.
-- Clarify the relationship between Eq. 6 and Algorithm 1: the algorithm is a heuristic approximation; state this explicitly and discuss any theoretical gaps.
+1. **Fix the numerical inconsistency**: The abstract's "96%" and results section's "90%" must be reconciled. Report the exact accuracy numbers with standard deviations.
+2. **Report base model CoT length distributions** for all evaluation datasets, so readers can contextualize the conciseness improvements.
+3. **Add a human faithfulness evaluation** on a subset of examples, or at minimum use a cross-family LLM judge (e.g., Llama or DeepSeek), to validate that faithfulness gains are not an artifact of model-family bias.
+4. **Report the candidate filtering rate** from Algorithm 1 — what fraction of prior-generated traces pass the correctness + monitorability filter?
+5. **Add error bars / confidence intervals** to all figures showing experimental results.
+6. **Reconcile the "10% relative increase" wording** with the actual 15% → 25% numbers throughout the paper.
 
 ## Score and Decision
 
-**Calibration anchor comparison:**
+**Calibration anchors** (all paths relative to `/home/wg25r/review_agent/human_reviews_2026/`):
 
 | Anchor | Avg Score | Comparison |
 |--------|-----------|------------|
-| `lN3yKqqzF1.md` (FaithCoT-Bench) | 6.50 | A rigorous benchmark paper with human annotation and 11 baselines. The current paper is substantially less rigorous. |
-| `6QDFsYxtI1.md` (When More is Less) | 6.00 | Strong theoretical + empirical work with clear insights. The current paper has less depth and more evaluation gaps. |
-| `msKQYIfgVm.md` (Concise Reasoning Lagrangian) | 5.00 | Similar Lagrangian formulation for conciseness; had broader model evaluation and clearer algorithm. The current paper is weaker on evaluation rigor. |
-| `emjPKK11Oo.md` (CoT Faithfulness in the Wild) | 4.50 | A systematic empirical analysis paper. Similar evaluation-level rigor but without the overclaim issue. |
-| `V2MqnCNgZi.md` (Concise Reasoning via RL) | 4.40 | Similar contribution level with conciseness focus. The current paper has the additional faithfulness dimension but also the accuracy overclaim. |
-| `qWmsebKO14.md` (Investigating CoT Monitorability) | 3.60 | Similar topic area. The current paper has a clearer algorithmic contribution. |
-| `SLlNqU2Syl.md` (Thought Injection) | 2.50 | The current paper is clearly stronger—better motivated, more complete, and has a concrete method. |
+| `lN3yKqqzF1.md` (FaithCoT-Bench) | 6.50 | Much stronger: rigorous human-annotated benchmark, systematic evaluation of 11 detectors. The current paper lacks comparable rigor and has unresolved numerical inconsistencies. |
+| `6QDFsYxtI1.md` (When More is Less) | 6.00 | Stronger: comprehensive theoretical + empirical analysis of CoT length with novel findings and practical implications. Current paper's contribution is more incremental. |
+| `emjPKK11Oo.md` (CoT Reasoning In The Wild) | 4.50 | Rejected but methodologically cleaner in its empirical analysis. Current paper has a method contribution but weaker execution. |
+| `qWmsebKO14.md` (Investigating CoT Monitorability) | 3.60 | Same topic, similar tier — both have limited faithfulness operationalization. Current paper is slightly stronger because it proposes a concrete training method. |
+| `Bibt0JTvpx.md` (EPiC) | 3.33 | Both propose methods for CoT improvement via data transformation. Similar level; EPiC was rejected. |
+| `5FtNTyaHp0.md` (Innate Reasoning) | 3.00 | Weaker: narrower empirical scope. Current paper's method contribution is more substantive. |
 
-The paper tackles a timely problem, has a sensible core idea, and demonstrates meaningful conciseness improvements. However, the internal inconsistency in accuracy reporting (96% claimed vs. 90% measured), the reliance on an unvalidated faithfulness proxy, and the absence of baseline comparisons collectively lower the paper below the acceptance threshold. These are not fatal errors—the core idea and conciseness results have merit—but the overclaiming and insufficient evaluation rigor prevent the paper from being a convincing contribution in its current form. I score this at **4.0**, placing it between the Concise Reasoning via RL paper (4.40) and the CoT Monitorability investigation (3.60).
+The paper identifies a real problem and proposes a reasonable pipeline, but the core method is a standard distillation approach (generate data with a stronger model, filter, SFT) dressed in constrained-optimization language. The most serious issue is the numerical inconsistency between the abstract (~96% accuracy retention) and the results (~90%) — a discrepancy that overstates the paper's headline claim. Other weaknesses (surface-level faithfulness proxy, missing base distributions, no error bars) prevent the paper from rising to the acceptance threshold. Compared to the anchor papers, it falls below the quality bar set by accepted papers (6.0+) and is roughly on par with rejected papers in similar topic areas (3.3–4.5).
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,100 +1,101 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me write the final consolidated review.
-
----
+Now I have all the information needed to write the consolidated review. Let me synthesize everything.
 
 ## Summary
 
-This paper introduces RLIE, a neuro-symbolic framework that combines LLM-generated natural-language rules with elastic-net logistic regression to produce a compact, probabilistically weighted rule set for binary classification. The framework has four stages: LLM-based rule generation, logistic regression for global weighting, error-driven iterative refinement, and a hierarchical evaluation comparing direct linear inference against three strategies for injecting rules/weights/predictions back into an LLM. The key empirical finding is that the simple linear-only classifier consistently outperforms all LLM-augmented inference strategies, suggesting that LLMs are unreliable at fine-grained probabilistic integration—a practically valuable insight for neuro-symbolic system design.
+The paper proposes RLIE, a framework that integrates LLM-generated natural language rules with a regularized logistic regression combiner for binary classification. The framework proceeds through four stages: rule generation (LLM proposes and filters candidate rules), logistic regression (learns probabilistic weights for global selection and calibration), iterative refinement (error-driven rule improvement), and evaluation (comparing Linear-only inference against three LLM-augmented strategies). Experiments on six text classification datasets using three LLM backbones show that RLIE achieves competitive or superior performance compared to several baselines, and the key finding is that the simple Linear-only inference strategy consistently outperforms injecting rules, weights, or linear predictions back into the LLM.
 
 ## Strengths
 
-- **Novel and well-motivated neuro-symbolic architecture**: The paper proposes a clean division of labor—LLMs for local semantic interpretation (rule generation and ternary judgments) and logistic regression for global probabilistic weighting and selection. The elastic-net regularization provides principled rule selection and robustness, yielding compact, interpretable rule sets. This is documented in Sections 3.1–3.2 and clearly differentiated from prior work that either refines a single rule (IO Refinement) or uses independent top-k selection without joint weighting (HypoGeniC).
+- **Novel integration of LLM-generated rules with probabilistic weighting**: The paper introduces a principled four-stage pipeline that couples LLM-based rule generation with regularized logistic regression for global weight learning, clearly distinguishing itself from prior work (e.g., HypoGeniC, IO Refinement) that lacks joint probabilistic combination. Table 1 shows RLIE achieves competitive or best performance across six datasets and three backbone LLMs.
 
-- **Counterintuitive and practically important finding from hierarchical evaluation**: The E1–E4 comparison (Table 2) reveals that providing an LLM with learned rule weights and even the linear model's own correct prediction (E4) frequently degrades performance relative to the simple linear-only classifier (E1). This direct evidence that LLMs struggle with "fine-grained, controlled probabilistic integration" is not obvious a priori and provides concrete guidance for designing neuro-symbolic systems. The finding is well-supported across six datasets and multiple backbone LLMs.
+- **Counterintuitive and practically relevant finding about LLM limitations for probabilistic reasoning**: The systematic comparison of four inference strategies (E1–E4, Table 2) reveals that the simplest Linear-only strategy consistently outperforms injecting rules, weights, and linear predictions back into the LLM across nearly all datasets and backbones. This is a valuable empirical finding that challenges common assumptions in neuro-symbolic systems.
 
-- **Error-driven iterative refinement with joint rule-weight optimization**: The refinement loop (Section 3.3) uses prediction errors from the logistic regression to identify hard examples, which are then fed back to the LLM to generate improved rules targeting specific failures. The case study (Table 3) qualitatively demonstrates rules evolving from generic observations to specific high-confidence patterns, with training accuracy improving from 0.625 to 0.700. This closed-loop design is more principled than prior approaches that refine rules independently of set-level performance.
+- **Hierarchical evaluation design**: The controlled decomposition of inference strategies into Linear-only, LLM+Rules, LLM+Rules+Weights, and LLM+Rules+Weights+Linear Prediction allows precise attribution of where and why LLMs underperform in rule-based reasoning, going deeper than typical evaluations in this area.
 
-- **Comprehensive empirical evaluation**: The method is tested across six diverse real-world tasks from HypoBench, compared against five baselines (Zero-shot Inference, Zero-shot Generation, IO Refinement, HypoGeniC, LoRA Fine-tuning), and evaluated under three different backbone LLMs. The evaluation goes beyond simple accuracy comparisons to systematically analyze different inference strategies.
+- **Robust across multiple backbone LLMs**: RLIE is tested with DeepSeek-V3, Qwen3-235B, and Qwen3-Next-80B, demonstrating the framework is not tied to a single model.
+
+- **Reproducibility focus**: The paper specifies fixed data splits (200/200/300), deterministic LLM settings (temperature 1e-5), and provides full prompts in the appendix.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **No validation of the LLM's local ternary judgments undermines the interpretability claim**: The entire RLIE pipeline depends on the LLM correctly producing ternary judgments ({+1, 0, −1}) when asked whether a rule applies to a sample. These judgments serve as input features to the logistic regression and define the semantics of each rule. However, the paper provides no analysis of the accuracy, consistency, or calibration of these judgments. If the LLM frequently misapplies a rule (e.g., returning +1 when the rule should not fire), the logistic regression may assign a spurious weight to a misapplied rule, and the claimed interpretability becomes hollow—a user reading a high-weight rule has no assurance it was actually applied correctly. The paper's discussion (Section 6) explicitly advocates for "leveraging LLMs for local, semantic tasks such as judging individual rules," making this gap central to the proposed division of labor. Even a small-scale validation (e.g., human annotation of 100 judgment instances) would substantially strengthen the paper. This is not fatal—the end-to-end results provide indirect evidence that the system works—but it weakens the core interpretability narrative.
+- **Missing ablation of iterative refinement**: The paper claims iterative refinement improves rule quality, but provides only a single qualitative case study (Table 3, Retweets) showing training accuracy progression from 0.625 to 0.700. There is no controlled comparison to a version that stops after initial generation + logistic regression. Without this ablation, we cannot attribute performance gains specifically to refinement rather than to the initial rule set or the logistic regression step. This is the most critical missing experiment.
+
+- **No baseline for simpler rule aggregation**: The logistic regression combiner is central to RLIE, but the paper never compares it to simpler alternatives such as unweighted majority voting over rule judgments, taking the highest-confidence rule, or thresholding on the number of satisfied rules. This makes it impossible to isolate whether the benefit comes from probabilistic weighting, the sparsity penalty, or merely from having multiple rules. The conclusion that "Linear-only" beats LLM-based strategies is clear, but whether learned weights improve over a trivial aggregation remains unquantified.
+
+- **Incomplete sensitivity analysis**: Only the coverage threshold γ is varied (Table 4, Headlines dataset). Critical hyperparameters — rule-set capacity (H=10), number of generated rules per iteration (h=5), number of hard examples (k=20), regularization parameters λ and α — are fixed without robustness checks. Performance may be fragile to these choices, especially given the small training set (200 samples). The paper does not report whether the reported results are the best among a grid search or simply one fixed configuration.
+
+- **No reliability analysis of LLM-based rule judgments**: The framework depends on accurate ternary judgments (positive/negative/abstain) from the LLM for every rule–sample pair. The paper does not assess the consistency or accuracy of these judgments (e.g., by repeated calls with different seeds, or by comparison against human annotations). Errors at this local level propagate directly into the logistic regression features and can undermine the entire pipeline.
 
 ### Minor
 
-- **Overstated performance claim in the abstract**: The abstract states that RLIE "achieves superior over all performance compared to a range of LLM-based methods," but this is contradicted by Table 1: on the Citations dataset, HypoGeniC (DeepSeek-V3) achieves 85.2% accuracy / 85.1% F1 while RLIE (DeepSeek-V3) reaches only 64.6% / 63.0%. On Headlines, IO Refinement (80.5% F1) outperforms RLIE (67.0% F1). The results section itself uses more measured language ("consistently ranks within the top two"), which is accurate. The abstract should be corrected to match the actual findings.
+- **Asymmetric baseline comparison on number of rules**: Zero-shot Gen and IO Refinement are evaluated by selecting the single best rule on the validation set, while RLIE uses up to 10 rules with logistic regression. The paper acknowledges this asymmetry but does not control for it — a fairer comparison would let baselines also use multiple rules (e.g., top-k with majority vote) to isolate whether multi-rule aggregation per se drives improvement.
 
-- **The E3/E4 experiments do not test whether giving the LLM the exact functional form of the logistic regression changes the conclusion**: In E3 and E4 the LLM is shown weights as qualitative signals ("the weight's magnitude reflects the pattern's importance") rather than the exact linear formula (e.g., "compute 0.3 × r₁ + 0.2 × r₂ + …"). The paper concludes that LLMs are deficient at "fine-grained, controlled probabilistic integration," but the experiments only test whether LLMs can benefit from qualitative weight descriptions. Testing the exact-formula condition would distinguish between "LLMs cannot handle probabilistic integration at all" and "LLMs cannot benefit from underspecified weight descriptions." The current evidence supports a weaker but still valid claim: that injecting weighted rule information into LLMs does not improve over direct linear inference.
+- **No significance tests for main results**: The margins over the best baseline are often small (e.g., Headlines: 67.0 vs. 65.4 from HypoGeniC). Paired significance tests would help assess whether these differences are reliable given the reported standard deviations.
 
-- **The explanation for IO Refinement's occasional advantage is speculative**: Section 5.1 attributes IO Refinement's better performance on some datasets to "the strategy of generating only a single rule forces it to be more generalizable." This is presented without evidence. While the paper then balances this by noting the single-rule approach limits expressiveness, the speculatory causal claim should be flagged as such rather than stated as explanation.
+- **LoRA baseline uses a different (smaller) backbone**: The LoRA fine-tuning baseline uses Qwen3-8B while RLIE uses DeepSeek-V3 and larger Qwen3 variants. The paper dismisses this with a note; it should either match the backbone or omit the comparison.
 
-- **The rule pruning heuristic is not justified**: When the rule set exceeds capacity H=10, rules are pruned by individual validation accuracy rather than by |β| magnitude from the elastic net (which already performs feature selection). The pruning criterion may discard rules that are weak in isolation but complementary in combination. This is a small methodological gap worth acknowledging.
+- **No error analysis of why LLM+weights degrades performance**: Table 2 shows that LLM-aided strategies (E2–E4) consistently underperform Linear-only (E1), but the paper does not analyze *why*. For instance, do LLMs over-correct correct predictions? Do they ignore weights? A breakdown by prediction correctness would strengthen the conclusions.
+
+- **Limited case study for iterative refinement**: Only one dataset (Retweets) and one run are shown qualitatively. No quantitative statistics across datasets or runs are provided for the refinement benefit.
 
 ### Trivial
 
-- Standard deviations are mentioned in the text (Section 4.3) but not visible in Table 1 or Table 2, making it hard to assess result stability. This may be a formatting issue, but the values should be included.
+- The phrase "superior over all performance" (Section 1, line 93) is awkward, though the meaning is clear.
+- The red/blue/gray coloring in Table 3 is not explained in the caption.
 
 ## Nice-to-Haves
 
-- A human evaluation study of rule quality and judgment correctness, even on a small scale (e.g., 100 samples), would directly address the major weakness about local judgment validation.
-- An additional inference strategy condition where the LLM is given the exact linear formula and threshold would strengthen the conclusion about LLMs' inability to handle probabilistic integration.
-- A deeper analysis of the Citations dataset failure (where RLIE trails HypoGeniC by ~20 points) would help characterize the method's limitations and failure modes.
-- Qualitative error cases showing where the LLM overrides a correct linear prediction (in E4) would turn the surprising degradation into an actionable insight.
+- **Convergence criteria or theoretical analysis**: The iterative refinement loop uses heuristic early stopping (validation performance plateau). A more formal characterization of convergence would be useful, though not required for an empirical systems paper.
+- **Alternative rule selection strategies**: The paper prunes rules by individual accuracy when exceeding capacity H, which might discard rules that are weak alone but useful in combination. Exploring leave-one-out importance or other selection strategies would be interesting.
+- **Test on larger training sets**: The 200-sample training set is small. Showing that RLIE scales to 500+ samples would strengthen claims of generalizability.
+- **Visualization of learned rule weights**: Plotting the elastic net weight distribution across iterations would illustrate the rule selection effect.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed, treat them with caution:
 
-- **"Circular dependency in iterative refinement" (Harsh Critic)**: The critic claims the refinement loop has an "undiscussed circular dependency" because the LLM must address logistic regression errors. This is not a circular dependency—it is sequential: logistic regression identifies errors → LLM generates new rules → logistic regression reweights. This is standard iterative refinement. Removed as a strawman.
-
-- **"Claim that existing methods overlook combination effects is vague" (Harsh Critic)**: The paper explicitly states that existing methods "fail to jointly learn and compress the rules as a cohesive set," citing that HypoGeniC uses top-k selection and IO Refinement refines a single rule. The characterization is accurate and well-supported. Removed.
-
-- **"Abstract typo 'Large Lange Models'" (Harsh Critic)**: This is a parser artifact from PDF extraction, not an author error. The original submission almost certainly says "Large Language Models." Removed per hard rule on formatting artifacts.
-
-- **"Missing related works" (general)**: The hard rules state we should not mention missing related works since we cannot verify their existence externally. Removed.
-
-- **"Blank table cells / broken formatting"**: These are parser artifacts. The original tables are properly formatted. Removed.
-
-- **"No confidence intervals / statistical tests" (Harsh Critic, framed as major)**: The paper states experiments were repeated ≥3 times and standard deviations are reported. While the std devs are not visible in the parsed output, the paper's methodology section explicitly commits to this. The absence in the parsed output likely reflects parser stripping, not an author omission. Weakened to a trivial point asking for visible std devs in the table. The harsh critic's framing of this as a major evidential gap is disproportionate—single-run evaluation is common in this subfield, and the paper already runs multiple trials.
-
-- **Strength Finder's "ternary rule judgment with abstain option" as a major strength**: This is a reasonable design choice but not a contribution-level strength. It enables the method to work but is not independently novel. Moved to Removed Points.
-
-- **Strength Finder's "comprehensive empirical comparison"**: This is a supporting strength that is generic. Still listed above as a minor supporting point but not as a core strength.
-
-- **"Iterative refinement depends on LLM generating rules addressing errors" as a weakness**: This describes how refinement works, not a flaw. Removed.
+- **"lacks formal convergence criteria or a proof that error on hard examples will decrease"** (from section-by-section notes): This is a theoretical systems paper, not a formal methods paper. Requesting formal convergence proofs is scope creep. Moved to Nice-to-Haves.
+- **"superior over all performance" typo**: This is a parser/presentation artifact. Removed per hard rules about formatting/typo nitpicks.
+- **Any concerns about code/dataset release status**: The paper clearly states code will be released upon acceptance. Removed per hard rules.
+- **"The proposed extensions (GAMs, factor graphs, Bayesian LR) are speculative"** (from §6 discussion notes): This is labeled as discussion of future work, not a claimed contribution. Criticizing it as speculative misunderstands the purpose of a discussion section.
 
 ## Novel Insights
 
-The most interesting insight emerging from this work—beyond the paper's own claims—is a methodological lesson for the broader neuro-symbolic community: there appears to be an asymmetry in what LLMs and classical models each do well that is deeper than simple capability boundaries. The paper shows not just that logistic regression outperforms LLMs at rule combination (which could be explained by the LLM's context-window limitations or instruction-following failures), but that providing the LLM with *more* correct information (the linear model's own prediction) makes it *worse*. This suggests a fundamental mismatch in how LLMs process explicitly weighted evidence, reminiscent of cognitive science findings about human difficulty with explicit probabilistic reasoning despite strong intuitive judgment. This observation, if reproduced across more settings, could reshape how the field designs hybrid systems—moving from "LLMs as reasoning engines with classical guardrails" toward "LLMs as semantic sensors with classical reasoning engines."
+None beyond the paper's own contributions. The reviews collectively reinforce the paper's main finding — that a simple linear combiner of LLM-judged rules outperforms LLM-based aggregation — but do not add new conceptual insights beyond what the paper itself provides.
 
 ## Suggestions
 
-- Add a limitations subsection acknowledging that local rule judgments are unvalidated and that this is an important direction for future work. This transparency would strengthen the paper's credibility.
-- Correct the abstract's "superior over all performance" to accurately reflect the results (e.g., "achieves top-two performance on most datasets" or "achieves the best average performance").
-- If standard deviations are available, ensure they appear in Tables 1 and 2. If they are small, this would support the robustness claim.
-- Add a brief discussion of the Citations dataset failure—even a speculative analysis would demonstrate awareness of the method's boundaries.
-- Consider presenting a confusion or error analysis for E4 vs. E1 to help explain *why* LLMs override correct linear predictions.
+1. **Add an ablation of iterative refinement**: Compare full RLIE against a variant that stops after initial generation + logistic regression. Report the performance difference across all six datasets.
+2. **Add simple aggregation baselines**: Compare logistic regression against majority voting, max-confidence rule, and threshold-based aggregation on the same rule set.
+3. **Extend sensitivity analysis**: Vary H, h, k, and regularization parameters (λ, α) for at least one or two datasets.
+4. **Add a human evaluation or consistency check of LLM rule judgments**: Sample 50–100 rule–sample pairs and measure agreement between repeated LLM calls or against human annotation.
+5. **Control for number of rules in baselines**: Let IO Refinement and Zero-shot Gen also retain multiple rules with a simple aggregation method to test whether multi-rule sets per se drive improvement.
+6. **Report significance tests**: Add paired statistical tests (e.g., bootstrap or t-test) for the main results in Table 1.
 
 ## Score and Decision
 
-### Anchor comparison
+### Calibration Anchors
 
-| Anchor | Avg Score | Decision | Comparison |
-|--------|-----------|----------|------------|
-| `iCJG36rclz` (Horn Envelopes from LLMs) | 1.50 | Reject | RLIE is far stronger: 6 datasets vs 1 case study, systematic evaluation vs minimal experiments |
-| `1vGmQ33GpQ` (ILP-CoT) | 4.00 | Reject | RLIE has cleaner integration, more systematic experiments, and a more interesting/actionable finding; ILP-CoT had fundamental issues (98% faulty proposals) |
-| `x85kiYqL4y` (Optimal Aggregation of LLM/PRM) | 5.00 | Accept (Poster) | RLIE has a more clearly justified method and more consistent empirical gains; the 5.00 paper had questionable theory and marginal improvements |
-| `K8EinVWtUB` (AutoGEO) | 6.00 | Accept (Poster) | Comparable contribution level; AutoGEO lacks ablation studies and qualitative rule analysis, similar gaps to RLIE's missing judgment validation |
-| `nqZe43tRY9` (LogicXGNN) | 6.50 | Accept (Poster) | Similar level of contribution and experimental thoroughness; LogicXGNN had strong quantitative results but domain-specific evaluation |
-| `xD0ivsbBf6` (L-FMLC) | 4.00 | Reject | RLIE is substantially more complete in both methodology and empirical evaluation |
+| Anchor | Path | Avg Score | Comparison to this paper |
+|--------|------|-----------|--------------------------|
+| Entity Binding Mechanisms | UJ2UUjT2ko | 8.0 (Accept Poster) | Higher rigor — thorough causal intervention analysis with precise claims. This paper has a broader scope but less experimental depth. |
+| Generative Universal Verifier | DM0Y0oL33T | 8.0 (Accept Oral) | Significantly more comprehensive benchmark and model contribution. This paper is narrower and has more gaps. |
+| Multi-turn Conversation | VKGTGGcwl6 | 8.0 (Accept Oral) | Large-scale simulations with robust findings. This paper has smaller-scale experiments. |
+| CtrlHGen | oTgJg0M9kY | 5.5 (Accept Poster) | Similar tier — both have clear novel contributions but missing baselines. CtrlHGen has stronger ablations. |
+| NEURONA | alEx0sm74l | 5.5 (Accept Poster) | Similar tier — both accepted despite some reviewer concerns about missing experiments. RLIE has cleaner experimental design. |
+| AutoRule | HUNajlG9Tp | 5.5 (Reject) | Similar average score but rejected. This paper has a clearer central finding (linear-only beats LLM). |
+| RePAIR | r4PjSs01MZ | 5.0 (Reject) | RLIE has better experimental design and clearer contributions. |
+| ILP-CoT | 1vGmQ33GpQ | 4.0 (Reject) | RLIE has more extensive evaluation and a stronger empirical finding. |
+| Actively Learning Horn Envelopes | iCJG36rclz | 1.5 (Withdrawn) | RLIE is substantially stronger — broader evaluation, clearer contributions. |
 
-RLIE sits clearly above the 4.00 reject threshold and is comparable to the 5.00–6.00 accepted posters. The core contribution—a neuro-symbolic framework with a counterintuitive finding about LLM limitations—is genuinely novel and well-supported. The weaknesses (overclaimed abstract, unvalidated local judgments, experimental design that could be strengthened) are real but addressable and do not invalidate the core claims. The paper makes a valuable contribution to the neuro-symbolic reasoning literature.
+**Positioning**: The paper sits in the 5–6 range. Its core contributions — the RLIE framework and the finding that Linear-only inference outperforms LLM-based aggregation — are novel and empirically supported. However, the missing ablations (iterative refinement, simple aggregation baselines), limited sensitivity analysis, and lack of LLM judgment reliability assessment leave notable gaps in the empirical evidence. These gaps are addressable but real. The paper is stronger than the 4.0 anchors (ILP-CoT) and comparable to the 5.5 anchors (CtrlHGen, NEURONA). Unlike some 5.5 papers that were rejected, this paper has a clearer central finding that is well-supported even without the missing ablations.
+
+**Score**: Considering the strengths and the addressable nature of the weaknesses, this paper merits borderline acceptance — the contribution is genuine but the empirical support needs strengthening.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

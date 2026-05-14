@@ -1,89 +1,87 @@
-Now I have all the information I need. Let me produce the final consolidated review.
-
----
-
 ## Summary
 
-This paper develops a minimax-robust decision-making framework for acting on partially calibrated forecasts. Given a forecaster that satisfies H-calibration (a parameterized family of calibration guarantees), the authors characterize the decision-maker's optimal robust policy via Lagrangian duality (Theorem 3.1). The central insight is a sharp phase transition: once the calibration test class H contains the decision-calibration indicators (one per action), the optimal robust policy collapses exactly to the plug-in best response (Theorems 4.1, 4.2). This means that the much weaker and more tractable condition of decision calibration recovers the full "trustworthiness" semantics of full calibration in the minimax sense. The paper also provides practical instantiations — self-orthogonality from squared-loss training (Proposition 4.4) and bin-wise calibration (Proposition 4.5) — and evaluates the framework on two 1-D regression datasets.
+This paper studies how a decision-maker should optimally act when given forecasts that satisfy a partial (H-)calibration guarantee. The authors cast this as a minimax problem over conditional expectations consistent with the calibration constraints, characterize the optimal policy via convex duality (Theorem 3.1), and show a sharp transition: when H contains the decision-calibration indicators, the minimax-optimal policy collapses to the plug-in best response to the raw forecast (Theorems 4.1–4.2). This upgrades previously known swap-regret guarantees to full minimax optimality. Practical instantiations include self-orthogonality from squared-loss training and bin-wise calibration. Experiments on two regression datasets illustrate the approach.
 
 ## Strengths
 
-- **Sharp, surprising theoretical result:** The proof that decision calibration (a tractable condition requiring only |A| linear constraints) is the precise threshold at which the minimax-optimal policy collapses to plug-in best response is elegant and conceptually significant. The paper shows that the robust policy's expected utility becomes *invariant* to the adversary under decision calibration, upgrading prior swap-regret guarantees to full minimax optimality.
+- **Decision calibration recovers plug-in minimax optimality.** Theorem 4.1 is the paper's centerpiece: under decision calibration—a substantially weaker condition than full calibration—the minimax-optimal decision rule is the plug-in best response to the forecast. This upgrades swap-regret guarantees (Noarov et al., 2023) to minimax optimality over *all* forecast-to-action policies, not just action-remapping policies. This is a clean, genuinely useful conceptual result.
 
-- **Clean duality characterization (Theorem 3.1):** The Lagrangian dual reduces the infinite-dimensional minimax problem to a finite-dimensional concave maximization plus a pointwise convex program, yielding a computationally tractable robust policy for any finite-dimensional H. The two-stage structure (solve dual → pointwise best-respond to adversarial tilt) is both principled and practical.
+- **Sharp transition simplifies practical guidance.** Theorem 4.2 and Figure 2 show that once H contains the |A| decision-calibration indicators, the robust policy collapses to plug-in best response; any larger H gives the same policy. This gives a clear, actionable target for practitioners: if they can influence training, decision calibration suffices for minimax-optimal decision-making.
 
-- **Practical instantiations from standard pipelines:** Proposition 4.4 shows that any regression model with a linear head trained to a stationary point of squared loss automatically yields usable self-orthogonality constraints — no post-hoc intervention needed. Proposition 4.5 gives a closed-form robust policy for bin-wise calibration, which is already standard practice in many settings.
+- **General duality characterization.** Theorem 3.1 provides a closed-form minimax optimal decision rule via dual variables that is pointwise computable and scales with the dimension of H. Instantiations for self-orthogonality from squared-loss training (Proposition 4.4) and bin-wise calibration (Proposition 4.5) connect theory to common pipelines without algorithmic modification.
 
-- **Theoretical stability under approximation (Appendix B):** The extension to ε-approximate calibration (Theorems B.1, B.2, Proposition B.3) demonstrates that the central findings degrade gracefully — the plug-in rule remains O(mLε)-minimax optimal under ε-slack decision calibration. This tempers the exact-calibration assumption and strengthens practical relevance.
-
-- **Clear and rigorous exposition:** The paper is well-structured, the formalism is clean, and the main results flow naturally from problem setup to general characterization to sharp specialization.
+- **Robustness to approximate calibration is quantified.** Appendix B (Theorem B.2) proves that even with ε-slack on decision-calibration constraints, the plug-in best response remains O(m L ε)-minimax optimal, bridging theory and practice.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Limited experimental validation:** The experiments use only two 1-D regression datasets with a single model type (two-layer MLP), a single H-class (self-orthogonality from squared loss), and single parameter settings. No error bars, variance estimates, or statistical testing are reported. More importantly, the "adversarial" evaluation tests the saddle-point property directly — i.e., the worst-case distribution is constructed by solving the exact minimax program the robust policy was designed to optimize. While this verifies the theory's internal consistency, it does not demonstrate robustness under *naturally occurring* distribution shifts that preserve calibration (e.g., covariate shift where the marginal of X changes but Y|X is stable). The paper also never measures whether the assumed calibration conditions (self-orthogonality) actually hold empirically on the test data, so the reader cannot assess whether the theoretical preconditions are satisfied in practice.
+1. **Experiments are far too thin to support the practical claims.** Only two regression datasets, a single H class (self-orthogonality from squared loss), and no baselines beyond the plug-in policy. Results are point estimates without standard errors or statistical tests—the utility differences are <0.02 on a [0,1] scale and likely within noise. The construction of the adversarial distributions used in the "worst-case" evaluations is not described (the paper only says they are "tailored to the plug-in policy" and "induced by the robust dual," with no algorithmic or procedural details), making the results unverifiable. There is no evaluation of sensitivity to calibration error (linking to Appendix B), training/calibration split, or network architecture. For a paper that claims to provide a "practical recipe," this experimental section does not meet the standard.
+
+2. **The robust policy protects against uncertainty about the conditional outcome but not against covariate shift on f(X).** The ambiguity set Q (Equation 4) only varies the conditional expectation q(v)=E[Y|f(X)=v] while keeping the marginal distribution of f(X) fixed. However, the paper's stated goal is robustness over "all joint distributions over X×Y that are consistent with the promise that f is H-calibrated." In many deployment scenarios, the marginal of f(X) could shift, and the paper's framework does not address this. The decision-calibration collapse result (Theorems 4.1–4.2) also relies on this fixed-marginal structure. The paper does not acknowledge this as a limitation—the Conclusion mentions non-linear utilities but not this scope restriction.
+
+3. **The theoretical techniques are standard.** Theorem 3.1 follows directly from convex duality (Sion's theorem + Lagrangian) given the convex-concave structure. Theorems 4.1–4.2 use Jensen's inequality and the fact that decision-calibration constraints fix the conditional mean within each decision region. The proofs are clean and correct but not technically surprising given the setup. The paper's primary value is in the *insight* (decision calibration ⇔ minimax optimality) rather than the technical machinery.
 
 ### Minor
 
-- **Exact calibration assumed in the main body:** The main theorems (3.1, 4.1, 4.2) assume perfect H-calibration, with ε-approximate extensions deferred entirely to Appendix B. The paper is transparent about this (lines 219–221), but the introduction and conclusion's claims about practical applicability would benefit from at least previewing how the collapse degrades under realistic miscalibration. This does not threaten the theoretical contribution, but weakens the practical narrative slightly.
+4. **The adversarial distribution construction is underspecified.** The paper describes adversaries "tailored to the plug-in policy" and "induced by the robust dual" but gives no details about how these are computed or verified. For the self-orthogonality case, the worst-case distribution should derive from the dual: q*(v) = argmin_p [val(p) + λ* v p]—but whether this is actually what is used, and how λ* is estimated from finite data, is not stated. This is a reproducibility gap.
 
-- **Linearity and finite-action assumptions restrict scope:** The framework requires linear utilities in the outcome and a finite action set. These are standard in the calibration literature and are explicitly acknowledged as limitations (Section 6), but they do limit immediate applicability to risk-averse or continuous-action settings.
+5. **The "tractability" of decision calibration depends on |A|.** The paper states that decision calibration is "far more statistically tractable" than full calibration because |H_dec| = |A|. This is true when |A| is small, but for many decision problems |A| could be large, and achieving decision calibration would then scale poorly. The paper does not discuss this caveat.
+
+6. **Exact H-calibration is assumed in the main body.** While the paper relegates approximate calibration to Appendix B (and mentions it briefly in Section 2), the experiments do not test robustness to calibration error. The self-orthogonality property (Proposition 4.4) holds only at a first-order stationary point of expected squared loss; finite-data training and early stopping violate this exactly. The paper would be stronger if the main results and experiments discussed or tested sensitivity to calibration error.
 
 ### Trivial
-None worth noting.
+
+7. **Figure 2 (sharp transition)** is referenced but appears to be a schematic figure with no actual data; its value is limited without quantitative backing.
 
 ## Nice-to-Haves
 
-- Experiments on a multiclass or higher-dimensional outcome setting (d > 1) would strengthen the practical motivation, since the paper's central pitch is that decision calibration helps when full calibration is intractable in high dimensions.
-- Reporting empirical H-calibration errors alongside utilities would connect the approximate-calibration theory (Appendix B) to the observed policy performance.
-- Evaluating the robust policy under a realistic (non-adversarially-constructed) distribution shift — e.g., a covariate shift that preserves calibration constraints — would test generalization beyond the worst-case construction.
+- Add standard errors or confidence intervals to Table 1, and describe the adversarial construction procedure explicitly.
+- Compare to simple baselines such as the conservative minimax policy (argmax_a min_y u(a,y)).
+- Test sensitivity to calibration error by synthetically perturbing forecasts, linking to Appendix B's theoretical guarantees.
+- Plot robust policy decision boundaries on synthetic 2D data to illustrate how the adversarial tilt changes the decision rule.
+- Analyze computational cost: how much slower is the robust policy than plug-in for the self-orthogonality case?
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed, treat them with caution:
 
-- **Harsh Critic, Point 1 (partially):** The claim that the adversarial evaluation is "essentially a tautology" and "not an empirical demonstration of robustness" is partially valid (the experiment does test the construction the theory predicts), but the saddle-point verification *is* a legitimate empirical check of the theory. **Action:** Kept a weakened version as a major weakness (focusing on absence of realistic-shift evaluation and missing calibration verification), removed the more dismissive framing.
-
-- **Harsh Critic, Point 2 (partially):** The claim that deferring approximate calibration to the appendix constitutes a "methodological gap" that "weakens the claimed practical significance" overstates the issue. The paper is transparent about the organization and all approximate results are fully proved. **Action:** Kept as minor, downgraded.
-
-- **Harsh Critic, Point 3 (partially):** The claim that domain restrictions "substantially narrow the scope of the claimed results" is true but the paper explicitly acknowledges these as limitations. **Action:** Kept as minor, noting the acknowledgment.
-
-- **Harsh Critic, "Missing Experiments" suggestions:** Demands for higher-dimensional experiments, calibration-error reporting, and realistic-shift evaluation are all reasonable but represent directions for expansion rather than flaws. **Action:** Moved to Nice-to-Haves.
-
-- **Strength Finder, "Empirical validation under adversarial distribution shift":** While the experiments do verify the theory, they are limited in scope as noted above. **Action:** Kept but subsumed under the strengths about theory, not featured as a standalone empirical strength.
-
-- **Harsh Critic, formatting/spelling/typo nitpicks:** None found in the paper — the critic did not raise any.
+- "Theorem 3.1 is straightforward / not surprising" — This is a reviewer opinion about technical complexity, not a verifiable weakness. Clean results using standard techniques are a feature, not a bug.
+- "Pointwise computability is only true once λ* is known" — This is how duality works for all such problems; not a weakness specific to this paper.
+- "Missing related works" — Per instructions, I cannot confirm the existence of missing references.
+- "Reproducibility concern about not-yet-released artifacts" — All cited entities are assumed to exist.
+- "Theorems 4.2 only holds in minimax sense under fixed-marginal" — This is already subsumed under weakness #2 (fixed-marginal issue).
+- Generic formatting/style nitpicks.
+- "Self-orthogonality Proposition 4.4 only holds at stationary point" — This is explicitly stated in the proposition; the paper is clear about the assumption.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews highlight an interesting tension: the paper's theoretical machinery (duality, saddle points) gives sharp *structural* results (the collapse at decision calibration) but the experimental methodology struggles to go beyond verifying the theory's internal consistency. This mirrors a broader challenge in calibration-for-decisions research — how to design empirical evaluations that test *robustness* (generalization to unseen shifts) rather than merely confirming *optimality* under the constructed worst case. The paper's approximate-calibration theory (Appendix B) could serve as a bridge here: measuring empirical calibration slack and using it to bound expected utility degradation would transform the experiments from verification to validation.
+None beyond the paper's own contributions. The review process did not uncover unexpected interpretations or implications beyond what the paper already presents: the key insight is that the hierarchy of minimax-optimal robust policies collapses at decision calibration, a much weaker condition than full calibration.
 
 ## Suggestions
 
-- Add a brief paragraph in Section 4 or 5 previewing the key takeaway from the approximate-calibration results (Theorem B.2): that under ε-slack, the plug-in rule remains O(mLε)-minimax optimal. This would temper the exact-calibration claims in the main body without requiring a major reorganization.
-- Even a simple empirical check of self-orthogonality (e.g., reporting E[f(X)(Y − f(X))] on the test set) would substantially strengthen the experimental section by grounding the theoretical assumptions in data.
-- If space permits, include one realistic (non-adversarial) distribution-shift evaluation — e.g., a time-based train/test split on Bike Sharing to test temporal covariate shift.
-- Consider plotting the adversarial tilt q*(v) vs. v for the regression experiments (as the Harsh Critic suggests) — this would make the robustness mechanism visually concrete.
+1. **Expand the experiments substantially.** Add at least one multi-class classification experiment with decision calibration (directly testing Corollary 4.3), include more baselines (conservative minimax, constant-mean policy), and report error bars. Most importantly, describe how the adversarial distributions are constructed—without this, Table 1 is uninterpretable.
 
----
+2. **Acknowledge the fixed-marginal limitation explicitly.** The paper should clarify that the ambiguity set Q only perturbs the conditional expectation E[Y|f(X)] while keeping the marginal of f(X) fixed, and discuss when this is or is not a reasonable modeling choice. This would help readers understand the scope of the robustness guarantee.
+
+3. **Test robustness to calibration error.** Run a sensitivity experiment where synthetic noise is added to the forecaster's outputs, and show how the robust policy's performance degrades as ε increases. This would connect the main results to Appendix B and address the concern that exact H-calibration is unrealistic.
+
+4. **Improve presentation of adversarial evaluation.** Provide explicit formulas or pseudocode for constructing the worst-case distributions used in evaluation. This is essential for reproducibility.
+
+## Score and Decision
 
 **Anchor comparison:**
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| Dimension-Free Decision Calibration for Nonlinear Loss Functions | vAU1fo1zRV | 7.00 | Stronger algorithmic contribution, comparable theoretical depth; current paper has weaker experiments. |
-| Persuasive Prediction via Decision Calibration | m5zdEywl57 | 6.00 | Both use decision calibration as a key concept; current paper has sharper/cleaner theoretical insight but less applied thrust. |
-| Conformal Robustness Control | bt4Ahpemmi | 6.50 | Oral-quality insight with strong experiments; current paper has comparably strong theory but weaker empirical validation. |
-| Conformal Risk-Averse Decision Making | NNqi3tBcZr | 3.00 | Current paper is clearly stronger in both theory and clarity. |
-| Sample-efficient Multiclass Calibration | jwv2Lsh8Wo | 4.00 | Both are theoretical; current paper has experiments (weak but present) and cleaner central result. |
-| CarBoN: Calibrated Best-of-N Sampling | Zb3yuOZVDN | 2.00 | Current paper is clearly stronger. |
-| Smooth Calibration Error | qXVmmj8J0T | 6.00 | Comparable theoretical depth; current paper's sharp transition result is more conceptually novel. |
+| Anchor Paper | Avg Score | Comparison |
+|---|---|---|
+| `vAU1fo1zRV` — Dimension-Free Decision Calibration for Nonlinear Loss Functions | 7.00 | Stronger technical contribution (dimension-free results, lower bounds). Current paper has cleaner conceptual message but more standard techniques. |
+| `m5zdEywl57` — Persuasive Prediction via Decision Calibration | 6.00 | Similar level of theory, but that paper had no experiments. Current paper has thin experiments but still more than that paper. Both rejected in their venues. |
+| `UkDte1jM2Q` — Non-Asymptotic Analysis of Efficiency in Conformalized Regression | 6.00 | Strong theory paper with limited experiments, accepted as poster. Current paper has similar theory-to-experiment ratio but the theory here is less technically novel. |
+| `NNqi3tBcZr` — Conformal Risk-Averse Decision Making | 3.00 | Tanked by missing proofs. Current paper is substantially stronger. |
+| `EYOwByRzU5` — Distributionally Robust Bayesian Optimization | 3.00 | Weak experiments with no baselines led to rejection. Current paper similarly lacks baselines but has stronger theory. |
+| `YVzvi34qyc` — Making and Evaluating Calibrated Forecasts | 4.00 | Rejected/withdrawn. Current paper has clearer contribution. |
 
-The paper under review has a genuinely sharp theoretical contribution (the collapse at decision calibration) that compares favorably to accepted papers in the 6.0–7.0 range. The experimental limitations pull it below the 7.0 tier but the theory is strong enough to warrant acceptance at the 6.0 level.
+The paper makes a clean conceptual contribution (decision calibration ⇔ minimax optimality of plug-in) that is genuinely useful for practitioners and theorists working on calibration for decision-making. However, the experimental evaluation is far too thin to support the claimed practical significance (2 datasets, no error bars, underspecified adversarial construction, tiny effect sizes), and the fixed-marginal limitation of the framework is not acknowledged. The theoretical results, while correct and well-presented, rely on standard techniques (convex duality, Jensen). Relative to the anchors, this paper sits below the 7.0 theoretical paper that was accepted but above the 3–4 range papers that had fatal flaws. The closest comparator is m5zdEywl57 (avg 6.0, rejected) which had similar theoretical ambition but weaker experiments.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

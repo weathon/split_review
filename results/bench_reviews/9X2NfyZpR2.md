@@ -1,22 +1,16 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me write the final consolidated review.
-
----
+Now I have thorough calibration. Let me produce the final review.
 
 ## Summary
 
-This paper introduces TbLTA, the first framework for dense long-term action anticipation (LTA) trained exclusively from video transcripts — ordered lists of action labels without timing or duration information — eliminating the need for costly frame-level annotations. The method combines a temporal alignment module (ATBA) that generates dense pseudo-labels from transcripts, a cross-modal attention mechanism that grounds video features in transcript semantics, CTC-based alignment losses, and a CRF-augmented anticipation decoder. Experiments are reported on Breakfast, 50Salads, and EGTEA benchmarks, with TbLTA showing competitive performance against fully-supervised baselines on 50Salads.
+This paper introduces TbLTA, the first framework for dense long-term action anticipation (LTA) trained exclusively from video transcripts — ordered action lists without timing or duration information — eliminating the need for frame-level annotations. The architecture combines a transformer encoder with learnable class tokens, a weakly-supervised temporal alignment module (ATBA) for pseudo-label generation, cross-modal attention between transcript and video features, and an anticipation decoder with CRF-based sequence coherence. The model is evaluated on Breakfast, 50Salads, and EGTEA, establishing the first transcript-only LTA baseline and showing competitive results compared to fully supervised methods.
 
 ## Strengths
 
-- **First transcript-only LTA framework**: The paper genuinely establishes a new weakly-supervised paradigm for dense LTA. Prior work (Zhang et al., 2021) still required some frame-level labels for the observed segment; TbLTA is the first to use only ordered action lists. This is a meaningful reduction in annotation cost and a novel problem setting.
+- **First transcript-only weakly-supervised LTA framework.** The paper is genuinely novel in proposing dense LTA under full weak supervision using only transcripts (ordered action lists without boundaries/timing). Prior work such as WS-DA (Zhang et al., 2021) still required frame-level labels for the observed segment. This is a well-motivated direction that could meaningfully reduce annotation costs.
 
-- **Coherent multi-component architecture**: The integration of ATBA-based temporal alignment, CTC loss, cross-modal attention with local masking, and a CRF decoder is well-motivated. Each component addresses a specific challenge in the weakly-supervised setting (pseudo-label generation, transcript consistency, semantic grounding, sequence coherence).
+- **Principled multi-component architecture.** The paper integrates several complementary mechanisms (CTC loss for global transcript consistency, ATBA-based alignment for pseudo-label generation, cross-modal attention for feature grounding, CRF-based coherence loss, self-supervised duration loss) into a coherent pipeline. The ablation discussion (though with missing tables) indicates each component contributes.
 
-- **Clear ablation evidence for key components**: The paper reports that removing the cross-modal attention drops accuracy by ~5.7 points on Breakfast and ~1.3 points on 50Salads, and removing CTC supervision drops accuracy by ~0.6–0.8 points (Section 4.3). These results support the contribution of the proposed architectural choices.
-
-- **Competitive results on 50Salads**: TbLTA achieves an average MoC of 28.5 on 50Salads, which is essentially tied with the fully-supervised ActFusion (28.39) in the deterministic setting — a notable result given the absence of frame-level annotations.
-
-- **Demonstration that transcript supervision helps rare classes**: On EGTEA Gaze+, TbLTA proves competitive on rare action classes, suggesting that high-level semantic supervision from transcripts can mitigate class imbalance without dense labels.
+- **Establishment of transcript-only baselines on three benchmarks.** The paper provides the first results for transcript-only LTA on Breakfast, 50Salads, and EGTEA, creating a reproducible foundation for future work in this direction. Results on 50Salads (28.5 avg MoC) are competitive with fully supervised methods like ActFusion (28.39 avg).
 
 ## Weaknesses
 
@@ -25,54 +19,55 @@ None.
 
 ### Major
 
-- **ATBA uses future video features to generate training targets for the anticipation decoder — implications not discussed.** During training, the ATBA module operates on the *full* video (including future frames) to partition the transcript and produce per-frame pseudo-labels for both the observed and future intervals. These future-interval pseudo-labels are then used to supervise the LTA decoder, which at training time takes only *observed* encoder features as input (Section 3.1, lines 260-262: "operates on the fused encoder output, defined as F̃ ∈ R^{Tobs × dTAS}"). While this is akin to teacher-student distillation (ATBA-as-teacher sees the full video; the decoder-as-student sees only observed frames), the paper does not acknowledge or discuss this asymmetry. The concern is not that the method is invalid — knowledge distillation from a more-informed teacher is a legitimate training strategy — but that it complicates claims of being "competitive with fully supervised methods," because the training targets for the future are aligned with the benefit of future visual evidence. The paper should discuss this design choice, justify why it does not constitute an unfair advantage relative to supervised baselines, and ideally include an ablation comparing ATBA alignment on full video vs. ATBA alignment restricted to observed features only.
-
-- **TbLTA results on Breakfast are absent from the main comparison table (Table 1).** Table 1 shows supervised baselines (Cycle Cons., FUTR, ActFusion) and the semi-weak baseline WS-DA on both 50Salads and Breakfast, but TbLTA's own numbers appear only for 50Salads (line 589). The paper's headline claim — "On Breakfast, TbLTA exhibits a pronounced gain at 30% observation, outperforming all supervised baselines" (lines 509-510) — is therefore unverifiable from the data presented in the main body. While these numbers may exist in an appendix (which the parser strips), the main comparison table is the natural home for the paper's central results, and their absence is a significant evidential gap. Including TbLTA's Breakfast results in Table 1 is essential.
+- **Missing TbLTA Breakfast results in the main comparison table (Table 1).** The paper claims "On Breakfast, TbLTA exhibits a pronounced gain at 30% observation, outperforming all supervised baselines," yet the Breakfast section of Table 1 (lines 484–489) contains rows only for Cycle Cons., FUTR, ActFusion, and WS-DA — no TbLTA row. The paper's central claim about competitiveness with, and superiority over, fully supervised methods on Breakfast cannot be verified from the presented data. This is not a parser artifact: the table structure is intact, and the TbLTA row is simply absent for Breakfast (the only TbLTA row shown is for 50Salads at lines 589–591, in what appears to be a separate ablation table). The text's quantitative claims about Breakfast are essentially unverifiable from the main paper.
 
 ### Minor
 
-- **Ablation tables referenced in text but not visible.** Tables 3 (TAS ablation) and 4 (LTA ablation) are discussed in Section 4.3 (lines 537-540) but do not appear in the main body. The EGTEA results table (Table 2) appears truncated (only Timeception and Anticipatr are shown before the text breaks into Section 4.4). These are likely parser/appendix artifacts, but in the main body they leave claims of "consistent hierarchy" and cross-attention benefits unsubstantiated.
+- **No fully supervised upper bound of the same architecture.** The comparison against fully supervised methods (ActFusion, FUTR) uses different architectures and training protocols. Without ablating the same TbLTA architecture with dense frame labels, it is unclear how much of the observed performance is attributable to the transcript-based supervision paradigm versus architectural design choices (pyramid hierarchical attention, CRF, cross-modal attention, etc.). A fully supervised ablation of TbLTA would cleanly isolate the cost of weak supervision.
 
-- **The duration-loss ablation shows a marginal gain.** On 50Salads, removing the duration loss changes the average MoC from 28.5 to 28.3 — only 0.2 points (lines 584-591). This is a tiny effect and does not strongly justify the complexity of the affinity-based duration buffer. The paper should discuss whether this component is pulling its weight or whether the gain is within noise.
+- **Stochastic results claimed but not shown in the main paper.** The text states "we also report stochastic results, where TbLTA achieves substantially higher accuracy by capturing multiple plausible futures" and references a stochastic protocol "in the supp. mat." While deferring results to supplementary is acceptable, the main paper asserts "substantially higher accuracy" with no quantitative support, which weakens the in-paper experimental evidence.
 
-- **No discussion of soft-target effects.** ATBA generates soft pseudo-labels (line 236: "soft per-frame pseudo-labels that preserve boundary uncertainty"). Training on soft vs. hard targets can affect model calibration and confidence. While evaluation is against ground-truth hard labels (so the metric is not directly inflated), the effect on what the model learns is worth a brief discussion.
+- **Complex 3-stage training protocol not ablated.** The training involves pre-training (10 epochs), segmentation+alignment (30 epochs), and end-to-end optimization, with re-initialization of optimizer and schedule at each stage. The contribution of each stage and the necessity of re-initialization are not analyzed, making it difficult to assess the stability and necessity of this complex protocol.
+
+- **Potential feedback loop in the affinity-based duration loss (Eq. 7).** The duration loss uses per-class duration estimates derived from the segmentation head's predicted pseudo-labels, which are themselves noisy. If the pseudo-labels have systematic alignment errors, the duration estimates could reinforce those errors. The paper does not analyze the sensitivity of this loss to pseudo-label quality.
 
 ### Trivial
-- Some table formatting is inconsistent (e.g., the EGTEA table fragment blends into narrative text).
+None.
 
 ## Nice-to-Haves
 
-- An ablation where ATBA is restricted to observed features only (with the future transcript still used as a symbolic target but aligned without benefit of future video) would directly quantify the effect of the full-video alignment on the decoder's training signal.
-
-- Reporting TbLTA's performance when evaluated against hard ground-truth labels with hard-label training (i.e., a fully-supervised variant of the same architecture) would help isolate how much of the competitive performance comes from the architecture vs. the weakly-supervised training regime.
+- A fully supervised upper bound of TbLTA (retrained with dense frame labels) would cleanly decompose the supervision gap from the architecture gap.
+- An analysis of pseudo-label quality (e.g., frame-wise pseudo-label accuracy vs. ground truth at different training stages) would clarify how alignment errors affect downstream anticipation.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
+- **Missing ablation tables (Tables 3 and 4) and EGTEA results (Table 2) / missing qualitative figures (3a, 3b).** These are parser/stripping artifacts from the PDF extraction process. The original submission likely includes these; they are not author omissions.
+- **Criticism that EGTEA results contradict the competitive claim.** The paper explicitly states that on EGTEA "supervised models retain a clear edge overall" and only claims competitiveness "on rare classes." The paper is honest about the EGTEA gap; the criticism misrepresents the paper's actual claim.
+- **Formatting/style nitpicks and missing appendix content.** These are parser artifacts, not author errors.
 
-1. **"Information leakage from future-derived pseudo-labels is fatal / structural."** (Harsh Critic, Issue 1) — Removed as a *fatal* classification. The ATBA module uses future video features for alignment, but ATBA is itself weakly supervised (transcript-only). Using a teacher model with more information to generate training targets for a student is standard knowledge distillation and does not invalidate the core method. However, the asymmetry is a real concern that the paper should discuss; elevated to Major (see above).
+## Novel Insights
+None beyond the paper's own contributions.
 
-2. **"Results cannot be trusted as evidence for transcript-based LTA."** (Harsh Critic) — Removed as overstatement. The decoder genuinely predicts from observed features only at both training and inference time. The "leak" is in the training targets, not in the model inputs.
+## Suggestions
 
-3. **"Unfair comparison due to softer pseudo-label targets artificially inflating MoC."** (Harsh Critic, Issue 3) — Weakened and moved to Minor. MoC is computed against ground-truth hard labels at test time, not against the pseudo-labels used during training. Soft training targets do not directly inflate the evaluation metric. However, the effect on model behavior is worth discussion.
+1. **Show TbLTA's Breakfast results in the main table.** This is the single most important fix. The current Table 1 must include a TbLTA row for Breakfast so that the central claim (competitive with/outperforming supervised methods on Breakfast) can be verified by readers. Without this, the paper's headline result remains unverifiable.
 
-4. **"Missing results for Breakfast and incomplete ablation evidence."** (Harsh Critic, Issue 2) — Partially retained. The Breakfast results genuinely do not appear in Table 1 (the main comparison table), which IS a significant gap. But the claim that "no numbers are provided in the table to support this" could be a parser issue if results are in the appendix. Kept as Major but framed as a presentation/evidential concern rather than a fatal evidential gap.
+2. **Add a fully supervised TbLTA ablation.** Training the same architecture with dense frame labels would isolate the supervision gap and make the comparison with published fully supervised methods more rigorous.
 
-5. **Strength Finder claim about "clear outperformance over WS-DA"** — This claim is valid; TbLTA is clearly better than WS-DA on 50Salads. Retained.
+3. **Show the stochastic results in the main paper, or refrain from making quantitative claims about them in the main text.** If the stochastic results are important enough to claim "substantially higher accuracy," they should appear in a main-paper table.
 
-6. **Strength Finder claim about "pronounced gain on Breakfast outperforming all supervised baselines"** — This claim cannot be verified from the main-body data. Flagged under Major weakness above.
+## Score and Decision
 
-7. **Missing ablation tables (Table 3, 4)** — Likely parser/appendix artifact. Noted under Minor.
+**Calibration anchors** (all from ICLR 2026 human-review corpus):
 
-8. **"No significance testing"** (Harsh Critic) — Valid minor point but not central. Noted implicitly via the close-results concern.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| uKFVZMPppq (Action-Guided Attention for Video Action Anticipation) | 5.50 | Stronger experimental completeness; similar topic (action anticipation); had complete results in all tables |
+| 3Genv8DQgf (EAST: Early Action Prediction) | 5.00 | Stronger experimental section; simpler method with clean evaluation; more thorough baselines |
+| Vgh30npuN3 (CurvSeg: Skeleton Action Segmentation) | 5.00 | Thorough ablation experiments; clearer demonstration of each component's contribution |
+| ENwxBjOlAR (VLPO: Weakly-Supervised Action Localization) | 4.00 | Withdrawn/Reject; less novelty than TbLTA; TbLTA's contribution is more novel (first vs. incremental) |
+| xPBsWooORO (ActDR: Action Difference Reasoning) | 2.00 | Clear Reject; fundamental novelty and comparison issues; TbLTA is substantially stronger |
 
-## Overall Assessment
+TbLTA's core contribution (first transcript-only LTA) is more novel than several accepted papers (AGA at 5.50, EAST at 5.00), but the missing Breakfast results in Table 1 represent a meaningful evidentiary gap that prevents full verification of a central claim. The paper sits below fully complete evaluations (5.00–5.50) but above papers with fundamental novelty or rigor issues (2.00–4.00).
 
-TbLTA makes a genuine contribution: it is, to my knowledge, the first method to tackle dense long-term action anticipation using only video transcripts as supervision, eliminating the need for frame-level annotations entirely. The architecture is modular and well-motivated, and the results on 50Salads demonstrate that transcript-based LTA is feasible and can approach fully-supervised performance.
-
-However, the paper has two notable issues that prevent a stronger recommendation. First, the use of ATBA on the full video (including future frames) to generate training targets for the anticipation decoder is an asymmetry that should be acknowledged and discussed — it is not fatal, but it complicates claims of direct equivalence with fully-supervised training. Second, the Breakfast results for TbLTA are absent from the main comparison table (Table 1), leaving the paper's strongest claim unverifiable from the main body. The EGTEA table is also truncated.
-
-These issues are addressable: the Breakfast numbers can be added to Table 1, the ATBA design choice can be discussed and (ideally) ablated, and the missing tables can be restored. The core contribution — demonstrating that LTA is possible from transcripts alone — remains valid and significant.
-
-**Score: 4.5** (borderline; would lean toward acceptance if the Breakfast results were verifiable and the ATBA concern was addressed in rebuttal).
-
-**Calibration note**: This score sits below EAST (5.0, accepted poster — cleaner empirical presentation with stronger, verified results) and AGA (5.50, accepted poster — novel mechanism with thorough ablations), but above LAF (4.0, rejected — contradictory results, heavy reliance on pretrained modules) and OOTSM (3.33, rejected — limited technical novelty despite novel problem). TbLTA's novelty as first transcript-only LTA is comparable to EAST's practical contribution, but the evidential gaps (missing Breakfast numbers in the main table) and the unaddressed methodological concern pull the score down.
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

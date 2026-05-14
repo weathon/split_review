@@ -1,96 +1,83 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
-
----
+Now I have all the information I need. Let me write the final review.
 
 ## Summary
 
-DemoGrasp proposes a framework for universal dexterous grasping that reformulates the problem as demonstration editing: a single successful grasp demonstration is adapted to novel objects by having an RL policy output SE(3) wrist transformations and hand joint deltas in a single-step MDP. This compact action space dramatically reduces exploration burden, enabling a simple binary success + collision reward to achieve 95.2% state-based success on DexGraspNet (surpassing prior SOTA by 4–5%). A vision-based flow-matching policy distilled from RL rollouts transfers zero-shot to a real robot, grasping 110 unseen objects with 86.5% overall success (95.3% on normal-sized, 71.1% on thin/flat). The method also generalizes across six diverse robotic embodiments without per-hand tuning.
+DemoGrasp proposes a novel framework for universal dexterous grasping that reformulates the task as a single-step MDP where an RL policy learns to edit a single demonstration trajectory — applying SE(3) wrist transformations and delta hand joint angles — rather than exploring in the full low-level action space. A vision-based student policy is then trained via imitation learning on successful RL rollouts for sim-to-real transfer. The method achieves strong simulation results (95.2% state-based success on 3.2K DexGraspNet objects with the Shadow Hand, surpassing prior SOTA by ~4%) and demonstrates zero-shot real-world transfer across 110 objects (86.5% overall, 71.1% on small/thin objects), cross-embodiment generalization across 6 hand types, and extensions to cluttered and language-conditioned grasping.
 
 ## Strengths
 
-- **Novel and effective problem reformulation.** The demonstration-editing formulation reduces the long-horizon, high-dimensional grasping problem to a single-step MDP with a compact action space (Section 2.3). This enables simple RL with a binary reward, yet achieves 95.2% state-based success on DexGraspNet — 4% higher than the previous SOTA UniGraspTransformer (Table 1). The simplicity of the reward (Eq. 3) contrasts sharply with the complex reward shaping used by prior work.
-
-- **Strong cross-embodiment generality with zero hyperparameter tuning.** Trained on only 175 objects, DemoGrasp achieves an average 84.6% success rate across six unseen object datasets and six different robotic hands (five-fingered, four-fingered, three-fingered, and parallel gripper), all mounted on arms (Table 10, Figure 3). This demonstrates the method is not hand-specific and transfers across dramatically different morphologies without any tuning.
-
-- **Thorough ablation studies.** The paper systematically ablates every design choice: RL vs. sampling+BC (Table 5, 77.6% → 96.2%), action-space components (Table 8, incrementally adding wrist translation, rotation, and hand deltas), demonstration quality (Table 9, robust to different demos), training set size (Table 7, 175 objects nearly matches training on all test sets), and camera configurations (Table 6). These provide convincing evidence for each component.
-
-- **Substantial real-world evaluation.** The vision-based policy is tested on 110 real-world objects across diverse categories (Table 3), including challenging thin/flat and small objects that prior work struggled with. The policy also handles cluttered scenes with language instructions at >80% success in both simulation and real-world tests (Table 4), and exhibits emergent regrasp behavior (Figure 7).
-
-- **Versatile input modalities and scene configurations.** The method supports RGB and depth, monocular and two-camera setups, and extends to language-conditioned grasping in clutter with randomized backgrounds and lighting (Tables 4, 6). This practical extensibility is well-demonstrated.
+- **Novel demonstration-editing formulation** dramatically reduces RL exploration complexity. By compactly parameterizing grasping as SE(3) transformation + delta hand joints applied to a single trajectory, the method replaces standard long-horizon RL with a single-step MDP. This is evidenced by Table 5, where RL (96.24%) far outperforms sampling+BC (77.56%) on the same action space.
+- **State-of-the-art simulation results on DexGraspNet** (Table 1): 95.2% state-based and 92.2% vision-based success with the Shadow Hand, outperforming UniGraspTransformer (91.2%/88.9%) by meaningful margins. The generalization gap between training and unseen categories is only ~1%.
+- **Real-world results on small and thin objects** are genuinely impressive: 71.1% combined success on objects <1.5 cm thick or <3.5 cm diameter, with 95.3% on normal-sized objects across 110 items. This capability is explicitly identified as a novel contribution beyond prior work.
+- **Extensive cross-embodiment validation**: Evaluated on 6 different hand types (5-finger, 4-finger, 3-finger, parallel gripper) across 6 object datasets without hyperparameter tuning, achieving an average 84.6% success rate (Table 10). This goes well beyond most prior work that focuses on a single hand.
+- **Data efficiency**: Training on only 175 objects yields success rates within 2.4% of training directly on test sets (Table 7), and performance is robust to demonstration quality (Table 9).
+- **Thorough ablation studies**: The paper systematically ablates the necessity of RL (Table 5), the contribution of each action component (Table 8), camera configurations (Table 6), and demonstration quality (Table 9).
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **No real-world baseline comparison.** The paper claims state-of-the-art performance in real-world dexterous grasping (lines 155–156, 141–142), yet Section 3.4 reports only standalone success rates without any side-by-side comparison against prior sim-to-real methods (e.g., RobustDexGrasp, DextrAH-RGB) on the same hardware, object set, and protocol. The simulation comparisons (Tables 1–2) are strong, and the absolute real-world numbers (86.5% on 110 objects) are impressive, but the claim of real-world SOTA is not directly substantiated. Reproducing other sim-to-real pipelines is admittedly a high bar, but without it the "state-of-the-art" framing for real-world results overreaches. The claim about being "the first to grasp small, thin objects without severe collisions" is better supported by the related-work discussion (Appendix B, lines 1109–1125) documenting prior methods' failures on these object types, though a direct comparative experiment would be more convincing.
+None.
 
 ### Minor
 
-- **Teacher penetration reward lacks quantitative analysis.** The reward design that randomly disables robot–table collision detection for half the environments (Section 2.3, lines 322–330) is well-justified conceptually — thin/flat objects genuinely require slight table contact for the fingers to reach underneath. And the real-world success rates (71.1% on thin objects) and qualitative results (Figure 7, "Slight robot–table contact is leveraged to grasp tiny objects") show the approach works. However, the paper provides no quantitative analysis of how frequently the teacher policy uses the penetrating mode, what proportion of the student's imitation dataset comes from penetrating rollouts, or collision-force statistics from real-world trials. Such analysis would strengthen confidence that the teacher is not exploiting physically unrealistic penetration and that the student policy has learned safe behaviors.
-
-- **Success criteria alignment with baselines not independently verified.** Table 1 compares DemoGrasp against UniDexGrasp, UniDexGrasp++, and UniGraspTransformer using a success criterion (lift ≥ 10 cm, hand–object distance < 12 cm). The paper states it "follows the settings of previous … methods" (line 410) but does not confirm that the compared works use identical thresholds, hold times, or termination conditions. If baselines used stricter criteria, the reported 4–5% gap could be slightly inflated. The gap magnitude makes it unlikely that threshold differences would reverse the conclusion, but explicit verification would remove this doubt.
+- **Uncontrolled baseline comparison in Table 1**: The paper acknowledges that baselines (UniDexGrasp, UniDexGrasp++, UniGraspTransformer) are tested *without* object position randomization, while DemoGrasp uses a 50 cm × 50 cm reset region. The paper frames this as a harder test for their own method, which is reasonable, but the lack of a controlled comparison (baselines with the same randomization, or DemoGrasp without randomization) makes the 4–5% margin uninterpretable as a clean apples-to-apples comparison. A simple ablation removing position randomization for DemoGrasp would clarify how much of the gain is due to the method vs. the different test conditions.
+- **Terminology imprecision around "closed-loop"**: The paper correctly acknowledges in Section A that "the policy learned in the RL stage is open-loop," and the vision-based student (which operates per-timestep with action chunking) is indeed closed-loop. However, multiple passages in the abstract and introduction refer broadly to "closed-loop grasping policies" without sufficiently distinguishing the two stages. This creates unnecessary confusion for readers and gives the harsh critic ammunition. The paper would benefit from precise language distinguishing the open-loop RL teacher from the closed-loop vision student.
+- **Real-world failure mode analysis is absent**: Table 3 reports per-category success rates but provides no breakdown of *why* objects failed (perception errors, collisions, slips, missed grasps). The paper would be significantly strengthened by a 1-paragraph analysis of the most common failure types, especially given the claim of being "first to grasp" thin/small objects.
+- **No confidence intervals or error bars in simulation results**: Tables 1, 2, 5, 7, 8, 9, and 10 report single-run success rates without standard deviations or multiple seeds. While single-run evaluation is common in large-scale robotics RL benchmarks, this is worth noting as a limitation.
+- **Motion planner success rate not reported**: The method relies on an interpolation-based motion planner to align the robot to the first demonstration step (Appendix E.1). The paper says the planner works with "minimal tracking error" but does not report its success rate, which is a potential failure source.
 
 ### Trivial
-
-- The open-loop nature of the RL teacher is explicitly acknowledged as a limitation in Appendix A (lines 1057–1062), and the vision-based student policy operates closed-loop with demonstrated regrasp behavior (Figure 7). This is not a hidden flaw.
+- The abstract's "71.1%" for "small, thin objects" is the combined average of the "Flat & Thin" (68.3%) and "Small" (76.7%) categories, which is consistent when properly interpreted. However, the main text reports 68.3% for flat & thin, creating a minor apparent discrepancy that should be clarified.
+- The "robust RL framework" claim in the conclusion is somewhat overstated — the method still requires careful simulation setup, demonstration collection, motion planning, and two-stage training.
 
 ## Nice-to-Haves
 
-- A real-world head-to-head comparison against RobustDexGrasp or DextrAH-RGB on a shared subset of objects would elevate the real-world claims from "strong standalone results" to "demonstrated superiority."
-- Quantitative collision statistics (contact forces, penetration depth, frequency) from real-world trials, particularly for thin/small objects, would directly address any remaining sim-to-real safety concerns.
-- Letting the RL policy also modify the lifting timestep `T_lift` (currently fixed by the demonstration) could increase expressiveness and is a natural extension of the editing framework.
-- An analysis of what proportion of the student's imitation dataset comes from penetrating teacher rollouts would illuminate how the teacher's permissive collision mode influences the final policy.
+- Controlled baseline comparison with matched position randomization
+- Failure mode analysis for real-world experiments
+- Confidence intervals / multiple-seed reporting in simulation results
 
 ## Removed Points
 
-These points from the Harsh Critic were considered but either misread the paper, are scope creep, or are standard-practice issues that do not constitute weaknesses:
+These points from the harsh critic are flagged for removal; treat them with caution:
 
-- **"Unverified alignment of success criteria" is elevated to a fatal gap.** Removed from fatal/major tier. The paper explicitly states it follows prior methods' settings. While explicit verification would be ideal, this is standard practice in the field and unlikely to meaningfully change conclusions given the 4–5% margin.
-
-- **"Open-loop single-step teacher vs. closed-loop deployment" presented as a methodological gap.** The paper explicitly discusses this limitation in Appendix A and the student policy is closed-loop by design. The critic's framing as an undisclosed gap misrepresents the paper.
-
-- **Demand for adaptive `T_lift` and safety-constrained distillation.** These are scope creep — reasonable future work, not weaknesses of the current contribution.
-
-- **Formatting/style/typo nitpicks.** These are parser artifacts and not present in the original submission.
-
-Strength Finder points removed:
-- None of the Strength Finder's points were dropped — all were verified as substantiated by specific citations and concrete evidence.
+1. *"The vision-based student policy is also trained to imitate these open-loop rollouts, meaning it too is an open-loop policy"* — **Factually wrong.** The vision-based policy (Section 2.4) takes observations at each timestep and outputs actions via action chunking with receding-horizon control (per-timestep observations → per-timestep actions), which is closed-loop. The data source does not determine whether the policy is open- or closed-loop.
+2. *"The paper provides no insight [about vision-to-state gap]"* — **Factually wrong.** The paper shows the gap (95.2% → 92.2%, Table 1) and provides extensive analysis in Appendix D.3 comparing vision-based vs. state-based RL training curves (Figures 9, 10).
+3. *"The 71.1% [flat & thin average] doesn't add up"* — **Misunderstanding.** 71.1% is the combined average of Flat & Thin (68.3%, 24 objects) and Small (76.7%, 12 objects): (24×68.3 + 12×76.7)/36 ≈ 71.1%. The paper's abstract says "small, thin objects" (both categories), and the main text separately reports 68.3% and 76.7%. The math is consistent.
+4. *"Table 8 test set success rates (82.74%) are surprisingly low compared to Table 1 (95%+)"* — **Misreading.** Table 8 uses 175 training objects tested on 5 unseen out-of-distribution datasets (DGA, EGAD, etc.). Table 1 uses 3,200 training objects tested on DexGraspNet test sets. These are different experimental setups, clearly described in Sections 3.2 and 3.3.
+5. *"The paper does not discuss how varying T_ee and Δq covers different approach strategies (scooping vs. pinching)"* — **Scope creep.** The paper focuses on grasping, not general manipulation. Scooping vs. pinching are different manipulation primitives, not different grasping strategies.
+6. *"The paper claims SOTA without sufficient evidence"* — The evidence is substantial: large-scale simulation (3,200 objects), cross-embodiment (6 hands), and real-world (110 objects). The baseline comparison concern is acknowledged but doesn't invalidate the SOTA claim.
 
 ## Novel Insights
 
-The paper's key insight — that a single demonstration trajectory encodes transferable patterns (approach direction, hand closure, lifting) that can be edited via a compact parameterization to achieve universal grasping — is genuinely novel for the dexterous grasping literature. Prior work either used demonstrations for imitation learning (requiring many demonstrations) or used RL from scratch with complex rewards. The single-step MDP reformulation effectively bridges these paradigms: the demonstration provides structure, and RL provides optimization. The finding that this simple formulation, with only 175 training objects, generalizes across six hand embodiments without tuning is a non-trivial empirical result that suggests demonstration editing captures task structure in a way that transfers across morphology. Beyond the paper's own contributions, this suggests a broader principle: for tasks where a single demonstration encodes the task's "grammar," RL over a compact editing space may be more effective than RL over raw actions or pure imitation.
+The reviewer criticism about the closed-loop/open-loop framing, while overblown, actually points to an interesting tension in the paper: the demonstration-editing formulation is elegantly simple *because* it is open-loop at the RL stage, but the paper simultaneously claims closed-loop capability through the vision-based student. This two-stage design (open-loop teacher for efficient exploration, closed-loop student for reactive deployment) creates a genuine and under-explored design space — breaking manipulation trajectories into edit parameters at one level and re-synthesizing reactive control at another. The paper's approach of having the RL stage optimize coarse trajectory parameters (where and how to grasp) while the imitation stage learns per-timestep visuomotor mappings is a clean division of labor that future work could extend to other manipulation domains (e.g., breaking trajectories into segments for segment-level editing to achieve finer-grained closed-loop behavior, as the paper itself suggests in limitations). The ablation showing that the method works robustly regardless of which specific demonstration is used (Table 9) is an underappreciated result — it suggests the editing parameter space is sufficiently expressive to absorb large variations in initial trajectory quality, which has practical implications for real-world deployment where obtaining "optimal" demonstrations is costly.
 
 ## Suggestions
 
-- Tone down the real-world SOTA claim or reframe it as "demonstrates strong real-world performance" unless a direct comparison is added. The simulation SOTA claim is fully supported.
-- Add a brief quantitative analysis in the camera-ready: what fraction of teacher rollouts use penetration mode for thin vs. normal objects, and what collision rate is observed in real-world trials. Even approximate numbers would substantially address the penetration concern.
-- Explicitly confirm (e.g., via a footnote or appendix note) that the success criteria for Table 1 baselines match your own, or report what criteria the baselines originally used.
+1. Add a controlled ablation where baselines are evaluated *with* the same position randomization, or where DemoGrasp is evaluated *without* it, to cleanly separate the contribution of the method from the test conditions.
+2. Add a 1-paragraph failure mode analysis for the real-world experiments (perception vs. collision vs. slip vs. missed grasp), even if qualitative.
+3. Clarify the terminology throughout: clearly distinguish the open-loop RL teacher from the closed-loop vision student early in the paper, not just in the limitations appendix.
+4. Report simulation results with standard deviations across 3 random seeds for the main tables.
+5. Clarify the "71.1%" / "68.3%" discrepancy between the abstract and the main text with a brief note.
 
 ## Score and Decision
 
-**Calibration anchor comparison:**
+**Calibration anchors** (all from /home/wg25r/review_agent/human_reviews_2026/):
 
-- `/home/wg25r/review_agent/human_reviews_2026/80vjyj5o7l.md` (DexNDM, avg 6.00, Accept Poster): Had real-world results on 1 hand, theoretical component with mixed reception. DemoGrasp has broader cross-embodiment evaluation (6 hands), more real-world objects (110), and a cleaner method. **DemoGrasp is stronger.**
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| EquAct (d1wuA8oIH0.md) | 7.00 | Stronger theoretical contribution (equivariance guarantees) but narrower evaluation scope. DemoGrasp has more practical real-world validation. |
+| DexNDM (80vjyj5o7l.md) | 6.00 | Comparable — strong sim-to-real for in-hand rotation. DemoGrasp has broader object/hand generalization but lacks theoretical grounding. Similar tier. |
+| D-REX (13jshGCK9i.md) | 5.50 | Accept — good real-to-sim-to-real pipeline but limited real-world object diversity. DemoGrasp stronger on real-world scale and novelty of formulation. |
+| XDex (VJqfoHU4Op.md) | 4.50 | Withdrawn/reject — grasp synthesis without closed-loop control. DemoGrasp is a more complete system. |
+| FastGrasp (Q60D8jF4KI.md) | 4.00 | Reject — low real-world success rates (20-25%), narrower scope. DemoGrasp substantially stronger. |
+| ACPPO (WFQnqY1c39.md) | 3.00 | Withdrawn/reject — incremental RL improvement. DemoGrasp has a genuinely novel formulation. |
 
-- `/home/wg25r/review_agent/human_reviews_2026/13jshGCK9i.md` (D-REX, avg 5.50, Accept Poster): Novel differentiable-physics approach but with limited generalization and missing evaluation components. DemoGrasp has more comprehensive evaluation and stronger absolute results. **DemoGrasp is stronger.**
+In the low range, Score<2 papers (HeMyWG4uYe.md, YAYhkZYRNY.md, 1CR1MTIgmq.md — scores 0.67–2.00) are clearly much weaker than DemoGrasp (fundamentally flawed or off-topic). DemoGrasp sits comfortably above the reject-range papers and is comparable to mid-range accepts.
 
-- `/home/wg25r/review_agent/human_reviews_2026/cVX3VqO8BO.md` (UniHM, avg 5.50, Accept Poster): Vision-language dexterous manipulation, trained on human-object interaction data. Different task but comparable scope. DemoGrasp has more thorough real-world evaluation. **DemoGrasp is comparable or stronger.**
+Relative to the anchors, DemoGrasp is stronger than typical reject-scoring robot learning papers (3.0–4.5) and comparable to accept-scoring papers (5.5–6.0). Its weaknesses are real but addressable and do not undermine the core contribution.
 
-- `/home/wg25r/review_agent/human_reviews_2026/3c6bnSJwDg.md` (DexMachina, avg 5.50, Reject): Bimanual dexterous manipulation with curriculum learning. Had mixed reviews. DemoGrasp has clearer contributions and stronger results. **DemoGrasp is stronger.**
-
-- `/home/wg25r/review_agent/human_reviews_2026/aoNqu2N8MC.md` (ExDex, avg 4.50, Withdrawn/Reject): Non-prehensile manipulation. Niche scope, limited evaluation. **DemoGrasp is significantly stronger.**
-
-- `/home/wg25r/review_agent/human_reviews_2026/VJqfoHU4Op.md` (XDex, avg 4.50, Withdrawn/Reject): Cross-embodiment grasp generation, missing appendix. DemoGrasp has more thorough evaluation and real-world results. **DemoGrasp is significantly stronger.**
-
-- `/home/wg25r/review_agent/human_reviews_2026/Q60D8jF4KI.md` (FastGrasp, avg 4.00, Reject): Mobile grasping, 20–25% real-world success, limited novelty. **DemoGrasp is vastly stronger.**
-
-- `/home/wg25r/review_agent/human_reviews_2026/WFQnqY1c39.md` (AC-PPO, avg 3.00, Withdrawn/Reject): Incremental PPO variant on DexGraspNet. **DemoGrasp is vastly stronger.**
-
-DemoGrasp compares favorably against all retrieved anchors. It has a genuinely novel method, SOTA simulation results with thorough ablations, impressive cross-embodiment generalization, and substantial real-world evaluation. The main gap — no real-world baseline comparison — is real but does not undermine the core contributions. This is a clear accept with a score above the 5.5–6.0 range.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

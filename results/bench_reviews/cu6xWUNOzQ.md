@@ -1,96 +1,86 @@
-Now I have all the information needed to write the comprehensive review. Let me compile it.
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces a nonlinear multimodal encoding model for naturalistic speech fMRI that combines LLaMA semantic features and Whisper audio features via a single-hidden-layer MLP operating on PCA-reduced voxel responses. The central contributions are: (1) demonstrating that nonlinear multimodal encoding is feasible and beneficial for continuous speech fMRI, achieving 17.2% improvement in average r² and 17.9% in normalized correlation (CCnorm) over the standard semantic linear baseline; (2) systematic ablation showing that both nonlinearity and cross-modal interaction drive these gains; (3) a novel spatiotemporal RED-based clustering analysis; and (4) variance partitioning revealing widespread joint audio-semantic processing aligned with neurolinguistic theories.
+This paper introduces a nonlinear multimodal encoding framework for predicting fMRI responses to naturalistic continuous speech. The method applies PCA (512 components) to the voxel space then trains a single-hidden-layer MLP on concatenated Llama (semantic) and Whisper (audio) features. The best model achieves 4.29% average r² and 34.32% CCnorm — a 17.2% and 17.9% relative improvement over the standard unimodal linear baseline. Through systematic ablations (Linear, MLLinear, DIMLP, MLP), the paper attempts to isolate contributions from PCA, nonlinearity, multimodality, and cross-modal interactions. A novel RED-based (Relative Error Difference) spatiotemporal clustering analysis is introduced and shows improved functional grouping (modularity Q = 0.155 vs. 0.145 for linear models). Variance partitioning and ROI analyses are used to connect results to neurolinguistic theories including Motor Theory of Speech Perception and Convergence-Divergence Zone theory.
 
 ## Strengths
 
-- **Systematic model comparison with well-designed controls.** The inclusion of MLLinear (MLP without nonlinear activations) and DIMLP (nonlinear within-modality but linear cross-modal fusion) cleanly disentangles the contributions of dimensionality reduction, within-modality nonlinearity, and cross-modal nonlinear interactions. This is a rare level of experimental rigor in the fMRI encoding literature (Section 3.1.1, 3.2.1, Table 1).
+- **First demonstration of nonlinear multimodal encoding for naturalistic continuous speech fMRI with proper controls.** While nonlinear models are standard in vision encoding and earlier work explored multimodal linear or unimodal nonlinear approaches, this paper combines both directions with a careful ablation design. The inclusion of MLLinear (linearized MLP with PCA) and DIMLP (within-modality nonlinearity, linear cross-modal fusion) provides a clean decomposition that allows attributing improvements to specific architectural choices (Table 1).
 
-- **Substantial and well-documented improvements over strong baselines.** The 17.2% improvement in average r² and 17.9% in CCnorm over the semantic linear baseline (Table 1) and 7.7%/14.4% over the Antonello et al. (2024) stacked regression model (Table 4) are substantially larger than the 0–0.015 ROI-wise improvements typically reported in the field (Appendix N.2 documents this comparison explicitly). Gains are consistent across all three subjects and confirmed by statistical testing (Appendix C).
+- **Systematic and transparent evaluation.** The paper evaluates 16 model configurations spanning 2 modalities × 4 architectures × 2 response representations, uses 5-fold cross-validation, reports per-subject results (Tables 2-3), and provides Bonferroni-corrected pairwise significance tests across all model pairs (Figures 4-5). The comparison with the prior state-of-the-art stacked regression model (Table 4, Appendix D) is careful and uses the authors' published weights and protocol.
 
-- **Variance partitioning reveals cortex-wide joint audio-semantic processing.** The analysis showing that 68.5% of significantly predicted voxels rely on joint audio-semantic features, with regionally specific patterns (audio-only in early AC, joint dominance in Broca's area, audio contributions in M1M), provides substantive neuroscientific insight aligned with the Motor Theory of Speech Perception, CDZ model, and embodied semantics (Figure 3, Section 3.3.2).
+- **RED-based spatiotemporal clustering is a novel methodological contribution.** The Relative Error Difference (RED) metric captures temporal dynamics of semantic vs. audio processing at each voxel. Hierarchical clustering on RED-derived correlation matrices yields more functionally coherent groupings (motor regions by body part, speech areas along the dorsal pathway) than standard functional connectivity or linear-model-based clustering (Figure 1, Appendix J.4). This addresses a genuine gap in fMRI analysis, which typically focuses on static spatial patterns.
 
-- **Novel RED-based spatiotemporal clustering.** Using relative error difference between modality-specific encoder predictions to cluster ROIs jointly in space and time is creative and yields substantially better functional compartmentalization (modularity Q = 0.155 for nonlinear, 0.145 for linear) than standard functional connectivity (Q = 0.068). The approach reveals meaningful organization (motor/somatosensory grouping by body part, visual ROIs by function) (Figure 1, Appendix J.4).
+- **Variance partitioning analysis provides interpretable neurobiological insights.** The finding that 68.5% of significantly predicted voxels show joint audio-semantic representation, with hierarchical organization from sensory to higher-order areas (Figure 3), extends earlier work (de Heer et al., 2017; Oota et al., 2023) and provides quantitative evidence for distributed multimodal integration.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **PCA fitting procedure is ambiguous and raises potential data leakage concerns.** The paper states PCA was applied to "the aggregate response matrix Y_org" (Section 2.3, Appendix B.4) without specifying whether this matrix includes only training timepoints or training+test timepoints. If PCA was fit on all data, the principal components contain information about the test set, which would inflate absolute performance numbers for all PCA-based models — including the paper's best model and several baselines. The paper notes its procedure is "identical to that of Antonello et al. (2024)," but this does not clarify the split. I note two mitigating factors: (a) all PCA-based models would be equally affected, so relative comparisons between them remain valid; (b) the core 17.2% improvement over the full-voxel baseline could still be valid when comparing within-PCA models (text Linear PCA: 3.56% vs. multimodal MLP PCA: 4.29%, a 20.5% gain). Nevertheless, the paper's absolute performance numbers — and any comparison between PCA-based and full-voxel models — cannot be fully trusted until this is clarified. This is a serious presentation gap that must be addressed.
+- **Headline improvements conflate multimodality, nonlinearity, and PCA, and the claim that "nonlinearity is the key driver" is not supported by the paper's own numbers.** The 17.2% r² improvement (3.66% → 4.29%) compares the best model (multimodal MLP+PCA) against a text-only linear all-voxels baseline — a comparison that simultaneously changes modality count, encoder architecture, and response representation. Disentangling these factors using the paper's own controls shows a different picture:
+  - Gain from multimodality alone (text+audio Linear all-voxels vs. text Linear all-voxels): **+0.44 pp r², ~12% relative**
+  - Gain from nonlinearity alone (text+audio MLP PCA vs. text+audio MLLinear PCA): **+0.19 pp r², ~4.6% relative**
+  - Gain from cross-modal nonlinear interactions (MLP vs. DIMLP): **+0.11 pp r², ~2.6% relative**
+
+  Multimodality contributes approximately twice as much as nonlinearity. The Section 3.1.1 header "NONLINEARITY IS THE KEY DRIVER OF SUPERIOR ENCODING PERFORMANCE" and the Section 3.2.1 claim that "cross-modal nonlinear interactions contribute most significantly" (based on 2.6% > 2.0% relative gain) are contradicted by the absolute numbers. The 2.6% and 2.0% are relative improvements within a narrow range (4.10% → 4.29%) and the absolute difference between DIMLP and MLP (0.11 pp) is likely within model-fitting variance — the paper provides no statistical test specific to this comparison.
+
+- **Neuroscientific interpretations are post-hoc and not supported by controlled experiments.** The variance partitioning analysis (Section 3.3.2, Figure 3) makes claims about Motor Theory, Convergence-Divergence Zone, and embodied semantics based on which feature type "dominates" prediction in each ROI. However: (1) The decomposition of "unique" vs. "joint" variance assumes features are approximately uncorrelated, but Whisper audio features and Llama semantic features are inherently correlated through shared speech content. (2) ROI-level analyses are descriptive without formal hypothesis testing linking model differences to specific theories. (3) The paper acknowledges that "our current design cannot distinguish between these explanations" (line 461-462) for embodied semantics but then discusses the results as confirmatory. Many observed patterns (joint dominance, hierarchical organization) could arise from trivial feature correlations, PCA preprocessing artifacts, or properties that simpler linear models would also show. The paper offers no ablation comparing nonlinear vs. linear variance partitioning patterns to demonstrate that the nonlinear model uniquely reveals these structures.
+
+- **Conflated evaluation framework limits the strength of conclusions about nonlinearity.** The nonlinear MLP requires PCA on fMRI responses (512 components) for tractability, while the standard linear baseline (Antonello et al., 2024) uses full-voxel ridge regression. The paper includes MLLinear (linear+same PCA) as a control, which partially addresses this. However, the MLLinear uses MSE optimization with different regularization than ridge regression, so the comparison is not perfectly matched. The full-voxel MLP performs worse than the linear baseline (3.83% vs. 4.10% r²), confirming that PCA is necessary for the MLP's success. This means the method's advantage depends on a specific preprocessing pipeline that is not needed by the baselines. While the MLLinear control goes a long way, a cleaner experiment (e.g., training the nonlinear model on the full voxel space with stronger regularization, or comparing all models under the same PCA regime) would substantially strengthen the core claims.
 
 ### Minor
 
-- **The claim that cross-modal nonlinear interactions "contribute most significantly" overstates a small effect.** The DIMLP (within-modality nonlinearity only) achieves 4.18% r², while full MLP achieves 4.29% — an absolute difference of only 0.11 pp. The paper reports this as a 2.6% relative gain over DIMLP versus DIMLP's 2.0% relative gain over MLLinear, which is technically correct but the absolute magnitudes are tiny. The voxelwise analysis (Appendix L) and ROI-wise analysis (Figure 32) do show consistent improvements, but the verbal claim in Section 3.2.1 and the abstract should be tempered to reflect the modest absolute difference.
+- **The claimed nonlinear cross-modal interaction benefit (MLP vs. DIMLP) is very small and may not be robust.** The 0.11 pp r² difference (4.18% → 4.29%) corresponds to a CCnorm difference of 1.73 pp (32.59% → 34.32%). While the paper reports statistical significance for many model pairs (Figures 4-5), it does not highlight the specific MLP vs. DIMLP comparison or report a p-value for it. Given that this 0.11 pp difference is the primary evidence for the paper's central claim about cross-modal nonlinear interactions, a dedicated significance test (e.g., paired t-test across voxels or bootstrapped CIs) should be reported.
 
-- **The RED modularity difference between nonlinear (Q=0.155) and linear (Q=0.145) encoders is tiny (0.01) and lacks statistical validation.** No permutation test, bootstrap, or other statistical procedure is provided to assess whether this difference is reliable. The paper's claim that nonlinear models "reveal previously hidden patterns of brain organization" (abstract, Section 3.1.2) leans heavily on this unvalidated 0.01 margin. The qualitative observation that nonlinear encoders correctly cluster SMHA/SMFA together (whereas linear encoders do not — Appendix J.4, line 4235-4237) is more persuasive, but the modularity numbers alone do not support strong claims.
+- **The noise ceiling is estimated but not used to contextualize the absolute improvement.** The paper computes CCnorm by dividing by CCmax, which normalizes by the noise ceiling. However, the r² values (which are not ceiling-normalized) are used for the headline 17.2% improvement. Reporting what fraction of the remaining gap to the noise ceiling each model closes would better contextualize the absolute improvement and address the concern that 0.63 pp r² is small.
 
-- **The metric r² = |r|·r is non-standard and insufficiently justified.** Standard practice in encoding studies uses squared Pearson correlation (r²) or raw correlation (r). The signed version can produce misleading voxel-wise averages since negative values cancel positive ones. The paper does report CCnorm (based on absolute correlation), and the key improvements hold there (34.32% vs. 29.12%, +17.9%), so this does not threaten the core claims. A brief justification for the signed metric and a standard r² column would strengthen transparency.
-
-- **The CCmax regularization (floor at 0.25) is not justified.** Section 2.5 states that voxels with CCmax < 0.25 are regularized to 0.25 to prevent CCnorm > 1, but provides no sensitivity analysis or ablation showing results are robust to this choice. For noisy voxels (where CCmax is genuinely low), this artificially deflates CCnorm and could affect voxel-wise comparisons.
+- **r² and CCnorm rankings are not perfectly consistent.** For example, text+audio MLP all-voxels has higher CCnorm than text+audio Linear all-voxels (31.11% vs. 31.36%) but lower r² (3.83% vs. 4.10%). This inconsistency is not discussed and suggests that conclusions might be somewhat metric-dependent.
 
 ### Trivial
 
-- The abstract claims a 7.7% improvement over "prior state-of-the-art models relying on weighted averaging of linear unimodal predictions," but this number comes from Table 4 (single-story protocol) using a different r² metric than Table 1, which could confuse readers who do not carefully track the evaluation protocol differences.
+- None beyond standard formatting artifacts that do not affect substance.
 
 ## Nice-to-Haves
 
-- **Report standard r² (squared Pearson correlation) alongside the signed version** for direct comparability with prior work.
-- **Provide a permutation-based statistical test for the modularity Q difference** between nonlinear and linear RED clustering.
-- **Show individual voxel time-course predictions** for representative voxels where the MLP meaningfully outperforms linear models, to give intuition for what the numerical gains correspond to visually.
-- **Include a sensitivity analysis for the CCmax = 0.25 floor** to demonstrate that the main findings are robust to this choice.
+- **Ablation of PCA components:** Showing performance as a function of PCA dimensionality (e.g., 128, 256, 1024 components) for both MLP and linear models would demonstrate whether the benefit of nonlinearity persists across different reduction levels and help characterize the PCA space.
+- **Statistical test for DIMLP vs. MLP:** A dedicated pairwise test with confidence intervals for the key comparison that the paper's narrative hinges on.
+- **Post-hoc power analysis or within-subject noise ceiling comparison:** To contextualize whether the 0.11 pp r² difference between DIMLP and MLP is detectable given the dataset size.
 
 ## Removed Points
 
-*These points were flagged in the input reviews but are removed from the main evaluation. Treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-1. **"Potential data leakage in PCA preprocessing" as a proven/fatal flaw.** The input critic claimed that PCA leakage "invalidates the reported performance numbers." I have reclassified this: the paper does not clarify the PCA fitting split, which is a serious clarity issue, but there is no evidence of actual leakage, and the relative comparisons central to the paper's claims are robust to this issue. Moved from "fatal structural flaw" to "major clarity concern."
-
-2. **"The observation that some PCA-based models outperform their full-voxel counterparts is consistent with leakage."** This is speculative. The paper explicitly argues that full-voxel models suffer from overfitting (80-90k voxels with limited training data) and that PCA addresses this — a well-known phenomenon. The critic's inference of leakage is not supported by evidence. Removed.
-
-3. **"Nonlinear encoders have been used previously (e.g., Oota et al., 2023; Moussa et al., 2024) and are not absent."** The paper explicitly acknowledges Moussa et al. (2024) and prior nonlinear work (Section 1, lines 63-67). Its claim is specifically about nonlinear *multimodal* encoding for *naturalistic continuous speech* — a combination not present in prior work. The paper also cites Oota et al. (2023) extensively. This criticism misunderstands the paper's novelty claim. Removed.
-
-4. **"The alignment with neurolinguistic theories is post-hoc and does not test specific predictions."** This is true of virtually all encoding-model neuroscience papers in the field (including the highly-scored TRIBE paper in the calibration set). Encoding models are by nature correlational and post-hoc; testing causal hypotheses requires different experimental paradigms. This is scope creep. Moved to nice-to-have territory implicitly.
-
-5. **Strength Finder claim: "RED achieves superior functional compartmentalization (modularity Q=0.155) compared to linear encoders (0.145)."** While numerically true, the 0.01 difference is trivial and unvalidated. This strength is retained only in the context of RED-vs-FC comparison (0.155 vs. 0.068), which is substantial. The nonlinear-vs-linear comparison within RED is demoted.
-
-6. **Various formatting/style nitpicks from section-by-section notes.** Removed per hard rules.
+- **Criticism that "linear+PCA underperforms full-voxel linear" and that this is not analyzed:** The paper acknowledges this (Table 1 shows text+audio Linear PCA 3.87% vs. all-voxels 4.10%) and includes MLLinear as the proper control for disentangling PCA from nonlinearity. The critic's deeper analysis request is fair but the criticism as a "structural issue" is overstated given the MLLinear control exists.
+- **Criticism about "no justification for 512 PCA components":** The paper cites prior work (Jabakhanji et al., 2022; Lin et al., 2022) and notes computational constraints (lines 149-155). A full ablation would be nice but is not required.
+- **Criticism about RED clustering modularity Q differences (0.155 vs. 0.145) lacking significance testing:** This is a reasonable suggestion but is a minor methodological weakness, not a structural flaw. The paper presents this as a descriptive analysis.
+- **Strength Finder's claim that "unusually large improvements... cited prior work uses different metrics and comparisons":** This is directly addressed in Appendix N.2 with a comparison table showing typical improvement ranges in the field.
 
 ## Novel Insights
 
-The reviewers' synthesis reveals an interesting tension that the paper itself does not fully explore: the contrast between the large *relative* improvements (17.2% over baseline) and the small *absolute* r² values (4.29%). This gap highlights a fundamental challenge in fMRI speech encoding — even state-of-the-art models explain only a small fraction of voxel-wise variance. The paper's systematic demonstration that nonlinear multimodal interactions capture previously unexplained structured variance is valuable, but the absolute ceiling remains low. Future work might investigate whether this residual unexplained variance reflects inherent neural noise, missing stimulus features (e.g., prosody, pragmatics), or architectural limitations of current encoding models.
+None beyond the paper's own contributions. The main novel insight from synthesizing the reviews is that the paper's framing of "nonlinearity as the key driver" is at odds with its own quantitative results — the majority of the improvement comes from multimodality, not nonlinearity. This reframing would make the paper's claims more accurate and its conclusions more credible.
 
 ## Suggestions
 
-- **Clarify the PCA fitting procedure explicitly.** State whether PCA was fit on training data only or on the aggregate (train+test) response matrix. If the latter, either re-run with training-only PCA or provide a clear justification for why the current procedure does not affect the paper's comparative claims.
-- **Temper the language around cross-modal nonlinear contributions.** Replace "contribute most significantly" with more precise language reflecting the modest absolute difference, e.g., "contribute additionally beyond within-modality nonlinearity."
-- **Add statistical validation for the RED modularity comparison** or qualify the nonlinear-vs-linear clustering claim to focus on the qualitative dendrogram differences rather than the 0.01 Q margin.
-- **Justify the signed r² metric** and consider reporting standard r² as a supplementary column in Table 1.
+1. **Reframe the narrative** to accurately reflect that multimodality (text+audio) is the primary driver of improvements (≈12% relative gain), with nonlinearity adding a secondary benefit (≈4.6% relative gain). Downplay or remove the "nonlinearity is the key driver" framing.
+2. **Report a dedicated statistical test** for the DIMLP vs. MLP comparison, with confidence intervals or Bayes factors, to justify the claim about cross-modal nonlinear interactions.
+3. **Add a PCA component ablation** (128, 256, 512, 1024) for both MLP and linear models to demonstrate that the nonlinear advantage is robust across reduction levels.
+4. **Compare variance partitioning patterns between linear and nonlinear models** explicitly to show that the nonlinear model reveals structures the linear model misses, rather than just reporting patterns from the nonlinear model alone.
 
----
+## Score and Decision
 
-Now let me calibrate the score against the retrieved anchors:
+**Calibration anchors:**
 
-**Anchor papers retrieved and comparison:**
+| Path | Avg Human Score | Comparison to this paper |
+|------|----------------|------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/biegtqdqmg.md` (TRIBE) | 7.33 (Accept) | Much stronger: transformer architecture, 80+ hrs/subject data, competition winner, 54% explainable variance. This paper is substantially weaker in both method and results. |
+| `/home/wg25r/review_agent/human_reviews_2026/msoXUX5xvy.md` (Language cortex abstractness) | 5.00 (Reject) | Similar quality: both apply encoding models to language fMRI with modest improvements. That paper had stronger conceptual novelty (probing semantic abstractness) but similar methodological concerns. Roughly comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/lTr1dv6A26.md` (Low-rank tensor encoding) | 4.50 (Reject) | Similar: both propose modest methodological improvements for speech encoding with n=3 datasets. This paper has better controls and more thorough evaluation. Slightly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/EUJ33R3LwL.md` (Instruction-tuned MLLMs) | 5.33 (Reject) | Slightly higher: more models tested, more systematic evaluation of instruction tuning. This paper has a clearer methodological contribution but weaker neuroscience validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/VlTHxRcP3A.md` (Linear/nonlinear neural decoding) | 1.00 (Reject) | Much weaker: fundamentally flawed experimental design. This paper is substantially more rigorous. |
+| `/home/wg25r/review_agent/human_reviews_2026/DJ6AR99XFA.md` (Speech DNN-brain alignment) | 3.00 (Reject) | Weaker: less thorough evaluation, fewer models compared. This paper is stronger in evaluation breadth. |
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `biegtqdqmg.md` (TRIBE) | 7.33 | Stronger: won Algonauts 2025 competition, multi-subject transformer, 80h data, captures 54% explainable variance. Our paper is more modest in architecture and scale but more systematic in its ablation design. |
-| `EUJ33R3LwL.md` (Instruction-Tuned) | 5.33 | Weaker: criticized for limited novelty, exploratory scope, linear ridge regression only. Our paper has more systematic methodology with controlled ablations (MLLinear, DIMLP) and clearer contributions. |
-| `DJ6AR99XFA.md` (Speech DNN-Brain) | 3.00 | Much weaker: single model, basic RSA, limited generalizability. Our paper is substantially stronger in experimental scope and contribution. |
-| `msoXUX5xvy.md` (Semantic Abstractness) | 5.00 | Comparable in ambition but weaker execution per reviews (score variance 2-10). Our paper has more consistent quality and clearer claims. |
-| `PgIlCCNxdB.md` (Mind's Transformer) | 6.00 | Comparable: systematic analysis of LLM-brain alignment with controlled experiments. Our paper has similar methodological rigor and comparable contribution level. |
-| `33zbWwsPI1.md` (BrainMIND) | 1.00 | Much weaker: poor writing, missing evaluations, serious methodological issues. Our paper is far stronger. |
-| `Z6fMBQ86XU.md` (4D Mind Reading) | 2.00 | Much weaker: consistently scored 2 across all reviewers. Our paper is far stronger. |
+The paper is methodologically sound and makes a genuine contribution as the first systematic evaluation of nonlinear multimodal encoding for naturalistic continuous speech fMRI. However, the core claims are overstated relative to the evidence: the improvements are modest in absolute terms, the "nonlinearity is key" narrative is contradicted by the paper's own data, and the neuroscientific interpretations are post-hoc. The ML contribution (single-hidden-layer MLP + PCA) is minimal from a machine learning perspective, making this a questionable fit for ICLR. A specialized neuroscience or interdisciplinary venue would be more appropriate.
 
-The paper under review sits between the 5.33 anchor (rejected for limited novelty) and the 7.33 anchor (accepted with strong competition results). It has stronger systematic methodology than the 5.33-level papers but lacks the scale and competition-winning results of the 7.33 TRIBE paper. The comparison to PgIlCCNxdB (6.0, Accept Poster) is most apt — both papers provide systematic, well-controlled empirical analyses with clear contributions to understanding brain-model alignment. The PCA clarity issue and overstatement of some claims prevent a higher score.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

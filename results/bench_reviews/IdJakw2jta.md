@@ -1,96 +1,106 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me compile the final review.
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces Long-Form Spatio-Temporal Video Grounding (LF-STVG), a new task that extends STVG to 1–5 minute videos, and proposes ART-STVG, an autoregressive transformer that processes frames sequentially with spatial and temporal memory banks augmented by memory-selection strategies and a cascaded spatio-temporal decoder. The authors construct extended test sets from HCSTVG-v2 at five video-length tiers and show that ART-STVG substantially outperforms existing short-form STVG methods on these long-form benchmarks, while remaining competitive on standard short-form evaluation.
+This paper introduces Long-Form Spatio-Temporal Video Grounding (LF-STVG) and proposes ART-STVG, an autoregressive transformer that processes video frames sequentially with selective spatial/temporal memory banks and a cascaded decoder design. The authors extend the HCSTVG-v2 validation set to 1–5 minute videos and show that ART-STVG outperforms existing STVG methods (TubeDETR, STCAT, CG-STVG, TA-STVG) across all five length settings while using much less GPU memory (7.9G vs. 23–26G).
 
 ## Strengths
 
-- **Novel problem formulation with constructed benchmarks.** The paper identifies a genuine gap between short-form STVG research and real-world long-video applications, and builds five extended test sets (LF-STVG-1min through -5min) from HCSTVG-v2 source videos. The benchmarks are constructed from original YouTube videos (not concatenated clips) and manually reviewed for quality (Section 4, lines 571–586).
+1. **First dedicated treatment of long-form STVG.** The paper correctly identifies a real gap: existing STVG research is confined to videos under one minute, while practical applications demand minute- or hour-long video grounding. Formulating LF-STVG as a distinct problem and creating extended benchmarks is a useful framing contribution that could catalyze future work.
 
-- **Well-motivated and carefully ablated architecture.** The autoregressive streaming design is a natural fit for long videos and is supported by thorough ablations: temporal memory selection raises m_tIoU from 9.6% (all memories) to 23.0% (Table 2), spatial memory selection adds 0.9 m_tIoU (Table 3), and the cascaded decoder outperforms a parallel design by +1.5 m_tIoU (Table 4). These component-level gains are substantial and internally consistent.
+2. **Autoregressive streaming design naturally suits long videos.** Unlike prior methods that process all frames in parallel (requiring 23–26G GPU memory and making long-video inference prohibitive), ART-STVG processes frames sequentially with only 7.9G memory (Table 8). The design is both conceptually clean and practically motivated.
 
-- **Strong empirical performance with controlled internal baseline.** ART-STVG achieves 23.0% m_tIoU on LF-STVG-3min vs. 13.9% for TA-STVG, with the gap widening as video length increases (Table 1). Critically, the paper includes a controlled autoregressive baseline (same architecture minus memory banks) that ART-STVG dramatically exceeds across all video lengths, providing a clean within-architecture comparison.
+3. **Memory selection strategies are well-validated by ablation.** The ablations (Tables 2, 3) provide clear evidence that: (a) using *all* temporal memories hurts performance (9.6 m_tIoU) compared to no temporal memory (16.7 m_tIoU), and (b) the proposed temporal memory selection recovers and surpasses both (23.0 m_tIoU). The spatial memory selection also provides additive gains. These ablations convincingly demonstrate that selective memory is necessary.
 
-- **Efficiency advantage for long videos.** ART-STVG uses 7.9 GB GPU memory vs. ~25 GB for comparable one-stage methods on 64 frames (Table 8), directly demonstrating the computational bottleneck of all-at-once processing that motivates the streaming design.
+4. **Comprehensive ablation study across multiple design axes.** The paper systematically ablates temporal memory selection (Table 2), spatial memory selection (Table 3), cascaded vs. parallel decoder design (Table 4), number of selected memories (Table 5), and training video length (Table 6). This thoroughness allows readers to understand what each component contributes.
 
-- **Competitive on short-form STVG.** ART-STVG achieves 59.2 m_tIoU on HCSTVG-v2 (Table 7), trailing TA-STVG by only 1.2 points, showing the autoregressive design does not inherently sacrifice short-clip accuracy.
+5. **Consistent outperformance on all five length settings.** ART-STVG achieves the best results on LF-STVG-1min through 5min across all metrics (Table 1). The performance gap generally widens for longer videos (e.g., +0.7% m_tIoU on 1min vs. +7.3% on 5min over TA-STVG), supporting the claim that the architecture is better suited for longer contexts. The method also shows competitive short-form performance (59.2 m_vIoU vs. SOTA 60.4).
+
+6. **Honest failure analysis and limitation discussion.** Appendix D provides concrete failure cases with clear diagnoses (indistinct event boundaries, distracting backgrounds, extremely short events), and Section G openly acknowledges performance degradation on very long videos and the lack of real-time operation.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Baseline inference protocol for existing methods on long videos is not described.** Section 4.1 states that all methods are trained exclusively on 20-second clips but provides no details on how TubeDETR, STCAT, CG-STVG, and TA-STVG — models designed to process all frames at once — were run on 1–5 minute videos containing hundreds of frames. The paper's own efficiency analysis (Table 8) shows these methods require ~25 GB for only 64 frames. How did they handle 3–5 minute videos? Were frames subsampled? Was a sliding window used? Did any methods hit OOM? Without this information, readers cannot assess whether the reported near-zero scores for existing methods on longer videos (e.g., TA-STVG at 7.7 m_tIoU on 5-min) reflect genuine grounding failure or an artifact of the inference setup. The paper's internal baseline comparison (autoregressive with vs. without memory) provides a controlled anchor, but the headline comparison with published methods is under-specified. This can be addressed in rebuttal by disclosing the protocol.
+1. **Evaluation protocol conflates "architecture suitable for long videos" with "robustness to distribution shift."** All methods (including ART-STVG) are trained exclusively on 20-second videos from HCSTVG-v2 and evaluated on 1–5 minute videos. This is a zero-shot generalization test, not an evaluation of long-form STVG as a trained capability. The paper acknowledges this (line 621–624: "all methods including ART-STVG are trained exclusively on the HCSTVG-v2 training set… for fair comparison"), and Table 6 partially addresses it by training on 40-second videos, but 40 seconds is still far from the claimed 1–5 minute regime. The central claim—that ART-STVG "can handle long videos"—would be significantly strengthened by training on actual long-form data. As it stands, the experimental design cannot distinguish between architectural suitability and differential robustness to distribution shift.
+
+2. **The baseline (ART-STVG without memory) already outperforms prior SOTA methods on several benchmarks, weakening attribution to the claimed contributions.** On LF-STVG-3min, the baseline achieves 16.2 m_tIoU vs. the best prior method at 14.2 (STCAT/CG-STVG). On LF-STVG-5min, the baseline achieves 9.2 vs. 8.1 (CG-STVG). This means the autoregressive architecture alone—absent the memory mechanisms that the paper emphasizes—already surpasses existing methods on the most challenging settings. While ART-STVG with memory is consistently better than the baseline (by +6.8 on 3min, +5.8 on 5min), the paper does not adequately analyze *why* the baseline is already stronger, making it impossible to disentangle the effect of the autoregressive design from the memory mechanisms. This undercuts the narrative that the memory modules are the primary drivers of improvement.
+
+3. **Absolute performance on long videos is very low, raising questions about practical significance.** On 5-minute videos, ART-STVG achieves m_tIoU = 15.0%, m_vIoU = 10.0%, and vIoU@0.5 = 4.7%. While the paper correctly frames this as "significantly outperforming" other methods (which score even lower), the absolute numbers suggest the problem remains far from solved. The paper would benefit from a more measured discussion of whether these numbers constitute meaningful progress toward practical deployment or are merely a proof-of-concept first step.
 
 ### Minor
 
-- **Zero-shot length-generalization framing not foregrounded.** The abstract and introduction present LF-STVG as a new task without clearly stating that all evaluation is zero-shot length generalization (trained on 20-second clips, tested on 1–5 minute videos). The paper does disclose this in Section 4.1 (lines 622–624) and partially addresses it via Table 6 (training on 40-second videos helps all methods), but a reader of the abstract alone would not understand this constraint. The framing is not dishonest — the disclosure exists — but the contribution would be more precisely characterized as "length-generalized STVG" rather than a fully realized LF-STVG with matched training and test distributions.
+1. **Extended dataset construction lacks rigor.** The LF-STVG datasets extend the HCSTVG-v2 validation set from 20s to 1–5 minutes. The paper states these are "based on original YouTube videos, not concatenated clips" and "manually reviewed," but critical details are missing: no inter-annotator agreement statistics, no qualitative examples of extended videos, no analysis of whether the extended portions contain events relevant to the queries. Since the queries describe events from the original 20-second segment, the extra minutes are essentially irrelevant content by construction—which tests robustness to distractors but does not test whether a method can *track a target that changes over time*. A more rigorous validation protocol would strengthen the benchmark's credibility.
 
-- **Memory bank scalability not characterized beyond 64 frames.** The efficiency analysis (Table 8, Appendix C) only reports numbers for 64 frames, aligned to the short-form training length. For a method whose core justification is handling longer videos, an analysis of GPU memory usage and inference time as a function of video duration (e.g., at 1, 2, 3, 4, 5 minutes) would substantially strengthen the paper. That said, the memory selection strategies (top-Ns = 32 for spatial; nearest-event for temporal) naturally cap the attention computation regardless of bank size, so this is more of a missing characterization than a scalability flaw.
+2. **Short-form performance falls behind TA-STVG (59.2 vs. 60.4 m_vIoU).** The paper describes this as "competitive," which is fair, but it reveals that the autoregressive design is not universally beneficial—it trades some short-form accuracy for long-video capability. This limitation should be stated more explicitly rather than minimized. The paper could also discuss whether design modifications could close this gap.
 
-- **Heuristic temporal memory selection relies on TextTiling-based boundary detection.** Table 2 shows a striking dependence: using all temporal memories drops m_tIoU to 9.6% while the boundary-detection heuristic recovers to 23.0%. If the TextTiling heuristic produces poor boundaries (e.g., for videos with subtle event transitions), performance could degrade sharply. The failure case analysis in Appendix D acknowledges indistinct event boundaries as a failure mode, but the paper does not quantify how often the boundary heuristic makes errors independently of the overall grounding task.
+3. **All-temporal-memories setting degrades performance dramatically (9.6 vs. 16.7 m_tIoU).** The paper explains this as "using all temporal memories may introduce irrelevant information," which is plausible, but the severity of the degradation (7.1 points drop) warrants deeper analysis. Is the model's robustness fundamentally fragile? Under what conditions does the memory selection fail? A more detailed investigation would strengthen the paper.
 
 ### Trivial
-
-- The paper defers the loss function (Section 3.5) to supplementary material; a brief in-text summary would aid readability.
-- Some table formatting artifacts from PDF extraction make parts of the method section hard to parse, though these are parser issues, not author errors.
+- The paper defers several implementation details (loss function, baseline architecture) to the supplementary material. While acceptable, including the key equations in the main text would improve readability.
+- Figure 3 (architecture diagram) is dense and hard to parse at small sizes.
 
 ## Nice-to-Haves
-
-- A learned attention-based selection over the spatial memory bank (replacing the text-similarity heuristic) could be explored, as could learned temporal memory selection.
-- Error bars or per-video diagnostic distributions would provide better insight into performance variance, though single-run evaluation is standard in STVG.
-- Comparison with memory-augmented long-video understanding models (e.g., MA-LMM, MovieChat) adapted to STVG would contextualize the memory design, but the paper discusses conceptual differences with these works in Appendix F.
+- Training a subset of methods on *actual* long-form data (even if only for a partial comparison) would substantially strengthen the evaluation.
+- Statistical significance tests (e.g., confidence intervals) for the key results in Tables 1–4.
+- Comparison with simpler temporal selection strategies (e.g., attention-weighted averaging) to better contextualize the temporal memory selection design.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-**From Harsh Critic — Critical Issue 1 (claiming the comparison "invalidates the paper's principal experimental contribution"):** While the baseline protocol is indeed under-described (kept as a major weakness above), the harsh critic's conclusion that this alone invalidates the paper is unjustified. The paper provides a controlled internal comparison (autoregressive baseline without memory), thorough component ablations (Tables 2–5), and cross-length trends (Table 1) showing ART-STVG's advantage grows with video length. The existing methods' scores are not "near-zero" in a way that suggests catastrophic failure — they show plausible degradation patterns (TA-STVG: 38.4 → 25.3 → 13.9 → 10.1 → 7.7 across 1–5 min). The paper also explicitly acknowledges these methods face computational bottlenecks (lines 126–131) that motivate the streaming design. The missing detail is a transparency issue, not evidence of invalid results.
+- **Harsh Critic Issue 1 (evaluation protocol fundamentally invalid):** While the evaluation protocol limitation is real and is kept as a Major weakness above, the claim that it *invalidates* the central contribution is overstated. The paper explicitly acknowledges the limitation, and Table 6 provides a partial mitigation. The evaluation demonstrates that ART-STVG generalizes better to longer videos than alternatives, which is a meaningful empirical finding even if it is not a full validation of "long-form STVG." This criticism has been weakened and kept as Major weakness #1.
 
-**From Harsh Critic — Critical Issue 2 (claiming "training–test mismatch misrepresents the LF-STVG problem"):** The paper discloses the training regime in Section 4.1 (lines 622–624) and partially addresses it with longer-training experiments in Table 6. The abstract could be more precise, but the paper does not hide this constraint and the harsh critic's characterization as "misrepresents" is overstated.
+- **Harsh Critic Issue 2 (extended datasets not valid benchmarks):** The claim that the extended datasets "cannot support any conclusion about long-form STVG performance" is incorrect. Extending videos to include more irrelevant content around a target event is a standard and valid way to test robustness to temporal distractors—a core challenge in long-form understanding. The benchmark construction does have room for improvement (kept as Minor weakness #1), but the datasets are useful for their intended purpose.
 
-**From Harsh Critic — "No error bars or per-video diagnostics" (Section-by-Section on 4.1):** Single-run evaluation without confidence intervals is standard practice in STVG benchmarking (see, e.g., all compared methods in Table 1 and the short-form results in Table 7, none of which report error bars). Demanding them here while accepting their absence in all cited prior work is a double standard. The same applies to the harsh critic's demand for "per-video diagnostics."
+- **Harsh Critic's claim that baseline "outperforms all prior state-of-the-art methods on LF-STVG-3min, 4min, and 5min"** is factually wrong for 4min (where the baseline at 9.9 m_tIoU is lower than STCAT at 10.4, CG-STVG at 10.6, and TA-STVG at 10.1). This factual error is removed; the partially correct observation is retained in Major weakness #2.
 
-**From Harsh Critic — "Memory-bank baselines: Compare against memory-augmented long-video models" (Missing Experiments #3):** The paper already discusses differences with existing memory-based video understanding methods in Appendix F (lines 1239–1271), noting their memory serves global context while ART-STVG's is task-specific. Direct empirical comparison would require adapting models designed for VQA to STVG, which is beyond reasonable scope.
+- **Harsh Critic's claim that "TubeDETR, STCAT, and CG-STVG operate on sampled frames… the distinction is about whether temporal modeling is parallel or sequential":** This is a pedantic framing issue. The paper's distinction (process-all-frames-at-once vs. streaming) is conceptually valid and practically meaningful regardless of sampling strategy.
 
-**From Harsh Critic — "Learned vs. heuristic selection" (Deeper Analysis #3):** This is a reasonable future direction, not a missing experiment. The paper proposes and validates heuristic selection; exploring learned alternatives is scope creep.
+- **Harsh Critic's claim that spatial memory selection is "standard cross-attention with a sparsity constraint":** Describing the mechanism in these terms is reductive but not a valid weakness. Many attention mechanisms in the literature can be described in such terms; what matters is whether the design is effective, which the ablations demonstrate.
 
-**From Strength Finder — generic strengths:** All three strengths from the Strength Finder are specific and evidence-backed. None were dropped.
+- **Strength Finder's claim that "Significant outperformance across all long-video benchmarks"** is kept as a strength but reframed to acknowledge the low absolute numbers.
 
 ## Novel Insights
 
-The paper's most interesting finding is the interaction between memory banks and selection strategies: naively accumulating all memories *hurts* performance (Table 2: all temporal memories drops m_tIoU from 16.7% to 9.6%), but with intelligent selection the same memory bank provides a dramatic 13.4-point gain. This "memory is harmful unless selected" dynamic is counter-intuitive and implies that for long-form video tasks, the primary challenge is not storing history but knowing *which* history is relevant. The cascaded spatial→temporal design (+1.5 m_tIoU over parallel) further suggests that fine-grained spatial cues can bootstrap temporal reasoning in ways not exploited by prior STVG methods.
+The most interesting observation from the reviews is the tension between the autoregressive architecture and the memory mechanisms as the true source of improvement. The baseline (autoregressive without memory) already outperforms prior non-autoregressive methods on the longer settings (3min, 5min), suggesting that the sequential processing paradigm itself carries significant benefits for distribution-shifted evaluations. Yet the memory selection mechanisms provide substantial additional gains (+6.8 m_tIoU on 3min). This suggests that the value proposition is cumulative: the autoregressive design provides a strong foundation, and the selective memory modules provide meaningful refinements on top. The paper would be strengthened by explicitly framing the contribution in these two-tier terms rather than foregrounding the memory mechanisms as the primary innovation.
+
+Additionally, the finding that "all temporal memories" performs *worse* than "no temporal memory" (Table 2) is a striking result with broader implications for memory-augmented video understanding. It suggests that naive memory accumulation is actively harmful in long-video settings and that selection is not merely beneficial but *necessary*—a finding that could inform memory design in other long-video tasks.
 
 ## Suggestions
 
-- In rebuttal, clearly describe the inference protocol used for existing STVG methods on long-form videos (frame count, any subsampling, whether any models encountered OOM, and how those cases were handled). Even a brief statement would resolve the major weakness.
-- Add a sentence to the abstract clarifying the zero-shot length-generalization evaluation setting.
-- Report GPU memory and inference time for ART-STVG at 1-min, 3-min, and 5-min video lengths (not just 64 frames) in a revision.
-- Consider quantifying the TextTiling boundary-detection accuracy independently of the full STVG pipeline to provide insight into the temporal memory selection reliability.
+1. **Address the training/evaluation gap directly.** Either: (a) collect long-form training data (even a modest extension to 1 minute would be valuable), or (b) reframe the paper's claims from "a method for LF-STVG" to "a method that generalizes to longer videos," and discuss what additional training data would likely unlock.
+
+2. **Analyze why the autoregressive baseline outperforms prior methods.** Provide an analysis (e.g., attention visualization, diagnostic experiments with controlled video lengths) that explains the source of the baseline's advantage. This would clarify the contribution attribution and strengthen the paper's scientific contribution.
+
+3. **Provide more rigorous dataset documentation** for the extended benchmarks, including inter-annotator agreement, statistics on the relationship between queries and extended portions, and qualitative examples.
+
+4. **Add a discussion of practical significance.** Acknowledge that 15% m_tIoU on 5-minute videos is a starting point, not a solution, and discuss what performance levels would be needed for practical applications.
+
+5. **Investigate the "all temporal memories" degradation** in more detail to understand when and why memory accumulation fails, and whether simpler fixes (e.g., a learned gating mechanism) could mitigate the issue.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors:**
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/azcQJtcYTE.md` (OmniSTVG) | 6.67 | New STVG task + dataset + model with cleaner experimental execution. Our paper has comparable ambition but less rigorous baseline description. Below this. |
-| `/home/wg25r/review_agent/human_reviews_2026/gVbPWbA97s.md` (StreamingVLM) | 6.00 | Streaming approach for long videos with its own benchmark. More thorough efficiency characterization and clearer baseline protocol. Our paper is slightly below. |
-| `/home/wg25r/review_agent/human_reviews_2026/QQCrZXWG9s.md` (Invert4TVG) | 6.00 | Temporal video grounding with inversion tasks. Solid contribution with good ablations. Our paper has broader scope (spatial + temporal) but less experimental clarity. |
-| `/home/wg25r/review_agent/human_reviews_2026/vIecIscDJf.md` (HiTeA) | 5.50 | Training-free temporal grounding for long videos. Limited novelty but decent results. Our paper has more architectural novelty and better ablations. Comparable tier. |
-| `/home/wg25r/review_agent/human_reviews_2026/YCoUgpYqGP.md` (Open-o3 Video) | 5.00 | Grounded video reasoning. Dataset + training contribution. Our paper has clearer task definition and stronger ablations. |
-| `/home/wg25r/review_agent/human_reviews_2026/BOFzC3xndr.md` (ViTL) | 4.67 | Long video QA with similar experimental transparency gaps. Our paper has more thorough component ablations and a cleaner internal baseline. Above this. |
-| `/home/wg25r/review_agent/human_reviews_2026/zuPxAZgT9F.md` (STVG-R1) | 4.67 | STVG with RL, marginal improvements over baselines. Our paper demonstrates larger performance gains and more substantive architectural contributions. Above this. |
-| `/home/wg25r/review_agent/human_reviews_2026/WZB5wh0qVR.md` (VideoMolmo) | 3.33 | Weak architecture novelty. Our paper is clearly above. |
-| `/home/wg25r/review_agent/human_reviews_2026/8I8NNAcosC.md` (VideoITG) | 3.00 | Withdrawn. Our paper is clearly above. |
+| Path | Avg Score | Comparison to this paper |
+|---|---|---|
+| `/home/.../BOFzC3xndr.md` (Video-in-the-Loop) | 4.67 | Similar long-video ambition, comparable quality of evidence; this paper has more thorough ablations but a weaker evaluation protocol |
+| `/home/.../zuPxAZgT9F.md` (STVG-R1) | 4.67 | Same STVG domain; STVG-R1 has cleaner evaluation but less novel problem framing; comparable overall |
+| `/home/.../8H1HmGH8ua.md` (LongVTG-R1) | 3.50 | This paper is notably stronger in evidence breadth and evaluation depth |
+| `/home/.../vIecIscDJf.md` (HiTeA) | 5.50 | HiTeA is a more polished paper with cleaner evaluation; this paper is slightly below in overall quality |
+| `/home/.../kyLS9EhPhY.md` (Nar-KFC) | 5.00 | Similar quality tier; both have clear contributions with some evaluation limitations |
+| `/home/.../QQCrZXWG9s.md` (Invert4TVG) | 6.00 | Stronger paper with cleaner evaluation and clearer novelty attribution |
+| `/home/.../WAk6tf8VkQ.md` (Vinoground) | 3.00 | This paper is significantly stronger overall |
 
-The paper introduces a genuinely new problem (LF-STVG), constructs evaluation benchmarks, proposes a well-motivated method with strong ablations, and demonstrates clear performance improvements. The major weakness — unspecified baseline inference protocol — is a transparency issue that can be resolved in rebuttal rather than a fundamental flaw. The paper's internal baseline comparison and component ablations provide controlled evidence that does not depend on the external baseline protocol. Compared to anchors, it sits between HiTeA (5.50) and StreamingVLM (6.00), with stronger novelty than HiTeA but less experimental rigor than StreamingVLM.
+Positioning: This paper sits between the 4.67 anchors (similar tier) and the 5.50–6.00 anchors (somewhat below). It has genuine contributions (first LF-STVG formulation, autoregressive design, selective memory) and solid experimental evidence, but the evaluation gap and strong baseline weaken the core narrative. Comparable to Nar-KFC (5.00) and slightly below HiTeA (5.50).
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Score:** 5.0 — The paper makes a useful contribution to an underexplored problem with a well-designed method and thorough ablations. The evaluation limitations are real but not fatal. The contributions are sufficient for a poster presentation.
+
+**Decision:** Accept (Poster)
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

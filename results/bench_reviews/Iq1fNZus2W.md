@@ -1,22 +1,16 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me write the final consolidated review.
-
----
+Now I have strong calibration context. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes Patch-wise and Keyword-Aware Attention (PKA), a novel attention mechanism that addresses the quadratic computational bottleneck of the "concatenate-and-attend" paradigm in multi-condition Diffusion Transformers. Through analysis of attention patterns, the authors identify that spatial conditions exhibit strong diagonal localization while subject conditions activate sparse, keyword-correlated regions. They design two modules—Position-Aligned Attention (PAA) for one-to-one spatial correspondence and Keyword-Scoped Attention (KSA) for saliency-masked subject attention—along with a condition KV-cache and an early-timestep training strategy. The method achieves up to 10× inference speedup and 5.12× attention-VRAM reduction while maintaining competitive generation quality against OminiControl2 and UniCombine.
+This paper proposes Patch-wise and Keyword-Aware Attention (PKA), a framework to reduce the quadratic attention overhead in multi-condition Diffusion Transformers. It introduces two specialized modules: Position-Aligned Attention (PAA) for spatial conditions (one-to-one attention between aligned patches), and Keyword-Scoped Attention (KSA) for subject conditions (attention only in keyword-relevant regions), complemented by a Condition KV Cache and an early-timestep training sampling strategy. The approach is conceptually clean, and the reported efficiency gains are substantial (up to 10× speedup, 5.12× VRAM reduction).
 
 ## Strengths
 
-- **Strong empirical motivation from attention-pattern analysis**: Figures 2 and 3 provide clear, interpretable evidence that full attention in multi-condition DiTs is highly redundant, and that the redundancy pattern differs fundamentally by condition type (spatial-aligned vs. subject-driven). This directly and convincingly motivates the PAA/KSA decomposition.
+- **Principled attention decomposition grounded in empirical analysis.** The paper identifies and characterizes two distinct types of attention redundancy in multi-condition DiTs — spatially localized diagonal patterns for layout conditions (Figure 2) and sparse keyword-activated regions for subject conditions (Figure 3) — then designs modules (PAA, KSA) that directly exploit each pattern. This is a principled departure from generic pruning or caching approaches.
 
-- **Impressive and well-benchmarked efficiency gains**: Figures 7–8 demonstrate 3.9–10× inference speedup and 2.46–5.12× VRAM reduction for the attention module compared to the full-attention baseline (UniCombine) across varying numbers of conditions, and the method also outperforms the optimized OminiControl2. These are substantial, practical gains.
+- **Substantial efficiency gains with a plausible mechanism.** The claimed speedups (up to 10×) and VRAM reductions (up to 5.12×) are well-motivated by the complexity analysis: PAA reduces QK computation from O(N²) to O(N) per spatial condition, and KSA prunes query-key interactions via a cheap keyword-driven mask. The Condition KV Cache compounds savings across the full denoising trajectory.
 
-- **Well-motivated and simple attention redesign**: The decomposition into PAA (O(N) one-to-one attention for spatial conditions) and KSA (masked attention for subject conditions) is intuitive, cleanly maps onto the observed sparsity patterns, and is architecturally simple to implement.
-
-- **The condition KV-cache is a practical optimization**: Computing Key and Value projections for all condition tokens once and reusing them across denoising steps (Section 3.2, Figure 4a) is a simple but effective idea that compounds the efficiency benefits without any quality impact.
-
-- **Comprehensive multi-condition qualitative results**: Appendix Figures 14–16 demonstrate harmonious integration of 2, 3, and 4 simultaneous conditions, showcasing the scalability of the approach beyond the two-condition main experiments.
+- **Early-timestep sampling is an insightful training contribution.** The perturbation analysis (Appendix A.2/Figure 5) convincingly shows that visual conditions exert their strongest influence in early denoising steps. The shifted logit-normal distribution that skews training toward these steps is a practical, transferable idea beyond this specific architecture.
 
 ## Weaknesses
 
@@ -26,67 +20,89 @@ None.
 
 ### Major
 
-- **Ablation studies lack quantitative quality and controllability metrics**: Sections 4.3.1 (PAA) and 4.3.2 (KSA) report only latency and VRAM, plus qualitative visual examples. No FID, SSIM, F1, MSE, or subject-consistency metrics are provided for the PAA vs. full-attention/SWA comparison or for KSA across different mask thresholds. The paper's central claim—that efficiency gains do not degrade quality—is demonstrated for the full system (Table 1) but is not quantitatively validated at the component level. A reader cannot assess the actual quality–efficiency trade-off curve for PAA or KSA individually. This is addressable with additional experiments but represents a significant evidential gap in the current manuscript.
+1. **Uncontrolled baseline comparison.** The paper compares against OminiControl2 and UniCombine but never specifies whether these baselines were fine-tuned under conditions identical to the authors' method (same LoRA rank, same data subset, same training iterations, same optimizer). Lines 380–382 describe the authors' fine-tuning setup for "our method," but lines 385–387 simply name the baselines without stating how they were configured. If baselines were used off-the-shelf while the method received task-specific LoRA fine-tuning, the comparison is invalid for both quality and efficiency claims. This is the primary barrier to accepting the paper's central assertion that the method "maintains or even improves generative quality."
+
+2. **Ablation studies lack quality metrics.** 
+   - The PAA ablation (Figure 9) reports only latency and VRAM for full attention, SWA variants, and PAA — no FID, DINOv2, CLIP-I, or controllability metrics (F1, MSE) are provided for any variant. Without these, the claim that PAA "delivers high-quality spatial control" is unsupported.
+   - The KSA ablation (Figure 10) shows a single qualitative example with varying thresholds ε. There are no aggregate metrics across a test set showing how quality degrades as ε increases.
+   - The early-timestep sampling ablation (Figure 11) shows qualitative results at different iterations and one SSIM curve (Appendix Figure 13), but no final FID/DINOv2 numbers on the full metric suite.
+   
+   Since the paper's core claim is that efficiency is achieved "without compromising generative quality," the lack of quality metrics in ablations is a significant gap.
+
+3. **Keyword extraction is unspecified for general use.** The method requires 1–2 keyword tokens per subject condition to generate the KSA mask (Eq. 3). The paper describes curating the training set to ensure captions contain descriptive keywords (line 378–380), but provides no protocol for automatically extracting keywords from arbitrary prompts at inference time. This limits reproducibility and applicability beyond the curated dataset. A rule-based or LLM-based keyword extractor should be specified.
 
 ### Minor
 
-- **Subject-consistency metric conflates subject and background preservation**: CLIP-I and DINOv2 are computed between generated images and ground-truth images. In the multi-condition reconstruction setting (where conditions are extracted from the ground truth), this is standard and reasonable. However, as a measure of *subject consistency* specifically, these global similarity metrics do not isolate subject appearance from background/scene similarity. A localized metric (e.g., DINOv2 computed on subject bounding boxes or segmentation masks) would more precisely measure what the paper claims.
+1. **Attention visualization methodology is underspecified.** Figures 2 and 3 are central to motivating the paper, but no details are given about which model, which layer, or which timestep produced these attention matrices. The claim of "intensely localized" attention along the diagonal would be strengthened by reporting these details and showing that the pattern holds across layers/timesteps.
 
-- **Early-timestep sampling validation is partial**: The perturbation analysis (Appendix A.2) and SSIM training curves (Figure 13) plausibly support the claim that early timesteps matter more. However, the paper does not report a final-model comparison (all task metrics: FID, controllability, consistency) between the proposed Logit-N(0.5, 1.5) sampling and the standard Logit-N(0, 1). The SSIM training curve alone is suggestive but not sufficient to fully substantiate the claim that early-timestep sampling "enhances the final model's control fidelity."
+2. **KSA mask reuse is not ablated.** The mask is computed once at timestep t and reused thereafter (line 300–301), justified by "temporal consistency." No experiment compares this single-computation strategy against recomputing the mask periodically (every k steps), leaving the reader unable to assess whether accuracy is sacrificed.
 
-- **KSA mask stability across timesteps is not empirically validated**: KSA reuses the binary mask computed at timestep t for timestep t+1, citing temporal consistency (Zhou et al., 2025). However, no experiment measuring mask overlap (IoU) between consecutive timesteps or comparison against recomputing the mask at every step is provided. The risk of error accumulation, especially at aggressive thresholds, is unexamined.
+3. **Early-timestep sampling parameters lack sensitivity analysis.** The chosen parameters (μ=0.5, δ=1.5) are justified by one training curve (Appendix A.3). No multi-seed analysis or evaluation across the full metric suite is provided to establish statistical significance or robustness.
+
+4. **PAA resolution alignment is not discussed.** Equation (2) assumes aligned patches between image and condition tokens at the same spatial coordinates, but no comment is made on resizing or alignment when condition map resolutions differ from the latent resolution.
+
+5. **Evaluation is predominantly reconstruction-based.** The three tasks (Subject-Canny-to-Image, Subject-Depth-to-Image, Canny-Depth-to-Image) all generate images matching ground-truth conditions. Multi-condition control in practice often involves novel compositions (e.g., "a cat on a beach given a depth map," where no ground-truth exists). A compositional benchmark would better test generalization.
 
 ### Trivial
 
-- **"Norm" operation in KSA mask generation (Eq. 3) is undefined**: The paper writes M^t = Norm(...) but does not specify what normalization is applied (e.g., min-max, softmax, thresholding). This is a minor clarity issue.
-
-- **Keyword extraction method is not specified**: The paper states "each image caption contains a descriptive keyword" (Section 4.1) and that the keyword set K "typically contains just 1 to 2 tokens," but how keywords are identified from captions is not explained. Similarly, the encoder used for subject condition tokens (SJ) is not explicitly specified beyond references to prior work.
-
-- **The 5.12× VRAM reduction applies to the attention sub-module, not total GPU memory**: The abstract and introduction frame this prominently; while the paper does clarify this in context (e.g., Figures 7–8 labels), a reader skimming the abstract could be misled. The framing is technically correct but could be more precise.
+None.
 
 ## Nice-to-Haves
 
-- A direct end-to-end comparison of the full PKA system against a FLUX model using full attention for all conditions (i.e., "PKA w/o PAA and w/o KSA") would cleanly isolate the overall quality–efficiency trade-off beyond the external baselines.
-- Quantitative subject-consistency evaluation using localized metrics (e.g., face similarity, DINOv2 on segmented subject regions) would strengthen the subject-fidelity claims.
+- Compare against PixelPonder (Pan et al., 2025), which addresses a similar problem in multi-condition DiTs.
+- Provide an automatic keyword extraction pipeline (e.g., rule-based or LLM-based) for arbitrary prompts.
+- Report end-to-end wall-clock timing (including VAE encode/decode) in addition to attention-only timing to contextualize the 10× speedup claim.
+- Show attention mask visualizations for KSA overlaying the binary mask on generated images to demonstrate correct subject localization.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-1. **"Evaluation metric for subject consistency is invalid for the task"** (Harsh Critic Point 1): The critic argued that CLIP-I/DINOv2 against ground-truth is fundamentally invalid because prompts change the scene. However, in the quantitative evaluation (Table 1), conditions (Canny, Depth, Subject) are extracted from the ground-truth image and the model's task is reconstruction—the ground truth IS the target. Global similarity metrics are standard and appropriate in this multi-condition reconstruction setting. While a localized metric would better isolate subject consistency (kept as a Minor weakness above), the metric is not invalid and does not undermine the experimental support.
-
-2. **"Missing baseline: the same FLUX model with full attention"** (Harsh Critic Section-by-Section Notes): The PAA ablation (Section 4.3.1) already compares against "w/o PAA" (full attention), the KSA ablation uses "w/o KSA" (ε=0) as baseline, and the main results compare against UniCombine (full attention). The relevant baselines exist in decomposed form. A unified full-attention FLUX baseline for the complete multi-condition setting would be cleaner but its absence does not constitute a missing critical baseline.
-
-3. **"Table 1 is not present in the review copy; I cannot verify the numbers"** (Harsh Critic): This is a parser artifact. The table exists in the original PDF and the paper describes its contents in detail. Removed as a parser issue, not an author error.
-
-4. **"KSA's reliance on temporal consistency is not analyzed or justified" → elevated to "serious concern about soundness"**: The criticism is valid at a Minor level (kept above), but the harsh critic's framing as a "serious concern about the soundness of the method" is disproportionate. Temporal consistency of latent representations across adjacent denoising steps is a well-established phenomenon in diffusion models (the paper cites Zhou et al., 2025), and the mask reuse is a pragmatic acceleration heuristic that many caching-based DiT papers employ. The lack of empirical validation is a gap but does not threaten the method's soundness.
+- **Missing Table 1 quantitative data (Critic's Point 2).** The parsed text does not contain the numerical data from Table 1. This is a parser artifact — the table exists in the original submission. The critic's concern about missing statistical significance (variance, etc.) is a separate valid point, but the claim that "no numerical data appears" is a formatting artifact and should be disregarded.
+  
+- **Missing OminiControl2's "efficient variant" comparison.** OminiControl2 (Tan et al., 2025) *is* the efficient variant of OminiControl. The paper already compares against it. The critic appears to have conflated OminiControl with OminiControl2.
+  
+- **Missing specification of subject encoding.** The paper builds on FLUX, where conditions are encoded via the standard VAE encoder and projected into the token space — standard practice in DiT-based multi-condition frameworks. The method is clear enough for reproducibility.
+  
+- **Dynamic conditions not discussed (Condition Cache).** The paper is about static conditions; criticizing the absence of dynamic-condition analysis is scope creep.
+  
+- **Perturbation experiment details (Section 3.3).** Appendix A.2 clearly states: "the condition is removed at different timesteps." The experiment is on OminiControl (not the authors' model), which is honestly reported. The critic's concerns about transferability are noted but the experiment is described.
+  
+- **10× speedup vs. Figure 9 discrepancy.** Figure 9 is a single-condition ablation of PAA; Figure 7 reports speedup across multiple conditions. These measure different regimes — the 10× figure applies when many conditions create a large quadratic baseline, not to the single-condition ablation. The critic conflated the two.
+  
+- **Section 3.1 Eq. 1 — QKV computation.** In standard multi-modal attention, Q, K, V are computed from the full concatenated sequence. The notation is standard and unambiguous in the DiT literature.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core insight—that attention redundancy in multi-condition DiTs is condition-type-specific (spatial alignment vs. keyword-driven sparsity) and can be exploited through different sparse attention strategies—is genuinely novel and well-supported by the attention-map analysis. The decomposition into PAA and KSA follows naturally from this observation and represents a clean design contribution.
+The reviews surface an important tension not fully discussed in the paper: the method's reliance on curated keyword-bearing captions and reconstruction-based evaluation tasks means its applicability to open-ended, compositional multi-condition generation remains unvalidated. The paper's strongest conceptual insight — that different condition types exhibit qualitatively different sparsity patterns (diagonal alignment vs. keyword-triggered activation) — is genuinely useful and could inform future efficient attention designs beyond the specific PAA/KSA instantiation. However, the reviews collectively highlight that the experimental framework is not yet robust enough to support the contribution claims.
 
 ## Suggestions
 
-- Add quantitative quality metrics (FID, SSIM, F1, MSE, CLIP-I) to the PAA ablation (Section 4.3.1) and the KSA threshold sweep (Section 4.3.2). This is the single most important improvement to the paper.
-- Train one model with standard Logit-N(0,1) sampling and compare against the early-timestep model on all final metrics to fully validate the training strategy.
-- Define the "Norm" operation in Equation 3 and clarify how keyword tokens are identified from captions and how subject condition tokens (SJ) are encoded.
-- Consider a KSA mask stability experiment (IoU between consecutive timesteps) to strengthen the temporal-reuse justification, or at minimum discuss the expected impact more explicitly.
+1. **Run controlled baseline comparisons.** Fine-tune OminiControl2 and UniCombine under the same LoRA configuration, data, iteration count, and optimizer as the proposed method. Report FID, DINOv2, CLIP-I, F1, and MSE for all methods with variance. This is the single most important improvement needed.
+
+2. **Add quality metrics to ablations.** Report FID and controllability metrics (F1, MSE) for the PAA ablation comparing full attention, SWA variants, and PAA. Report CLIP-I and DINOv2 across the test set for each KSA threshold ε. Show that quality is not degraded.
+
+3. **Specify a keyword extraction pipeline.** Even a simple LLM-based keyword extractor with a few examples would significantly improve reproducibility.
+
+4. **Recompute KSA mask periodically** and ablate against single-computation reuse to verify that temporal consistency justifies the current design.
+
+5. **Test on compositional (non-reconstruction) tasks** to demonstrate generalizability beyond the current setup.
 
 ## Score and Decision
 
-**Calibration anchors consulted:**
+**Calibration anchors** (all from the human-review corpus):
 
-| Path | Avg Score | Decision | Comparison to paper under review |
-|------|-----------|----------|----------------------------------|
-| URbsHlTK8c (HyCa) | 7.00 | Accept (Oral) | Stronger: more comprehensive multi-model evaluation, deeper theoretical framing (ODE modeling of feature evolution), similar speedup range. Paper under review has narrower scope and thinner ablation. |
-| 0hy9kJ1ULB (MoGA) | 7.00 | Accept (Poster) | Stronger: tackles long video generation at 580k-token scale, learnable token routing, FlashAttention integration. Our paper's contributions are more modest in scale. |
-| 3Z3Is6hnOT (Fast-dLLM) | 7.00 | Accept (Poster) | Stronger: addresses KV-cache and parallel decoding for diffusion LLMs with both theoretical analysis and strong empirical results. Different domain but higher evaluation standard. |
-| ANKQqRicBM (DiffMoE) | 5.33 | Reject | Comparable: DiffMoE has good ablations but limited qualitative results; our paper has stronger efficiency claims and qualitative results but weaker component-level ablation. |
-| eD8IPvNoZB (SLA) | 5.00 | Accept (Poster) | Comparable: SLA proposes sparse-linear attention for DiTs with 20× attention reduction and 2.2× end-to-end speedup. Our paper has better motivation (condition-specific sparsity analysis) and similar/better efficiency numbers, but SLA has more thorough ablation and GPU kernel implementation. |
-| 92PM2kSzK1 (D²C) | 3.60 | Reject | Our paper is clearly stronger: better motivation, clearer contributions, stronger results. |
-| gT6AmJghJi (DynamicControl) | 2.00 | Reject | Our paper is much stronger: the low-score anchor has fundamentally flawed problem framing and unclear methodology. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/eD8IPvNoZB.md` (SLA) | 5.00 | SLA has similar efficient-attention motivation but provides GPU kernel implementation, quality metrics in ablations, and thorough experimental validation. Current paper is weaker on experimental rigor. |
+| `/home/wg25r/review_agent/human_reviews_2026/uXmbrTlko7.md` (ScalingCache) | 5.00 | Training-free caching with experiments across 3 major model families and comprehensive fidelity metrics. Current paper experiments on only one base model (FLUX) with less thorough metrics. |
+| `/home/wg25r/review_agent/human_reviews_2026/V3eUas3VCL.md` (DiffSparse) | 4.50 | Token sparsity with learnable allocation, tested on 4 model families. Current paper's conceptual framework is cleaner but experimental scope is narrower. |
+| `/home/wg25r/review_agent/human_reviews_2026/3Z3Is6hnOT.md` (Fast-dLLM) | 7.00 | Thorough theoretical grounding, comprehensive ablations, multiple benchmarks. Current paper lacks comparable experimental depth. |
+| `/home/wg25r/review_agent/human_reviews_2026/kI27Niy4xY.md` (VIST3A) | 8.00 | Novel framework with thorough experiments across model pairs and ablations. Current paper is far from this level of validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/OPFE1zPYbU.md` (Rethinking Diffusion...) | 1.00 | Fundamentally flawed with no real contribution. Current paper is substantially better — does have genuine contributions and plausible methodology. |
+| `/home/wg25r/review_agent/human_reviews_2026/DDcrkBwzec.md` (ECM) | 4.50 | Similar topic (efficient conditional generation), similar issues with incomplete experimental validation. Comparable quality level. |
 
-The paper under review sits between SLA (5.0, accepted poster) and DiffMoE (5.33, rejected). Like SLA, it proposes a novel attention sparsification mechanism for DiTs with strong efficiency results. The motivation via attention-pattern analysis is clearer and more compelling than SLA's. However, the ablation studies lack quantitative quality metrics (a gap SLA does not share), which weakens the evidence for the paper's central quality-preservation claim at the component level. The main results (Table 1) do validate the full system comprehensively, and the efficiency gains are substantial and well-measured. The weaknesses are addressable with additional experiments rather than fundamental methodological flaws.
+The paper's core idea is clean, well-motivated, and addresses a real bottleneck. However, the experimental validation has two major gaps — uncontrolled baseline comparisons and ablation studies that lack quality metrics — that prevent verification of the central claim. Stronger papers in the same area (SLA, ScalingCache, DiffSparse) provide more thorough experimental frameworks and were accepted at poster level. In its current form, this paper falls short of the bar set by those works.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

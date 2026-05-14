@@ -1,94 +1,85 @@
-Now I have thoroughly read the paper and the calibration anchors. Let me produce the final consolidated review.
-
----
-
 ## Summary
 
-This paper identifies and quantifies a "priming vulnerability" in Masked Diffusion Language Models (MDLMs): when affirmative tokens appear at intermediate denoising steps, generation is steered toward harmful responses even in safety-aligned models. The authors design two attacks exploiting this vulnerability — an Anchoring Attack (intervention-based, for controlled evaluation) and First-Step GCG (a practical, optimization-based attack using a theoretically-derived lower bound that is ~20× faster than Monte Carlo alternatives). Building on this analysis, they propose Recovery Alignment (RA), an RLHF-style defense that trains models to recover safe responses from adversarially contaminated intermediate states. Experiments across three MDLMs on two benchmarks show RA substantially mitigates the vulnerability while preserving general capability on 11 benchmarks, and also improves robustness against conventional conversational jailbreaks.
+This paper identifies and systematically quantifies the "priming vulnerability" in Masked Diffusion Language Models (MDLMs): injecting tokens from a harmful response at an intermediate denoising step can steer generation toward harmful content, even in safety-aligned models. The authors design the anchoring attack to measure this vulnerability, derive a theoretical lower bound (Theorem 4.1) that enables First-Step GCG (a 20× faster, stronger optimization-based attack), and propose Recovery Alignment (RA), a training method that teaches models to generate safe responses from contaminated intermediate states. RA consistently outperforms baselines across three MDLMs, seven attack methods, and three evaluators, while maintaining general capability on 11 benchmarks.
 
 ## Strengths
 
-- **Novel vulnerability identification and characterization in an underexplored area.** The priming vulnerability is specific to MDLMs' iterative parallel denoising and is clearly distinct from ARMs' prefilling attacks. The vulnerability is quantified systematically via the Anchoring Attack across intervention steps and models (Figure 2, Table 2), showing ASR rises from 2% to ~21% at t_inter=1 and exceeds 80% by t_inter=16 on LLaDA Instruct.
+- **Clear demonstration of a novel MDLM-specific vulnerability.** The anchoring attack (Section 4.1) provides a clean, controlled measurement: injecting a single token at step 1 raises ASR from 2% to 21% (LLaDA Instruct), and ASR exceeds 80% by step 16 across all models. This is the first systematic quantification of this vulnerability and goes beyond concurrent qualitative observations (PAD, DiJA).
 
-- **Theoretically grounded attack design with practical significance.** Theorem 4.1 provides a lower bound connecting the first-step predictor log-likelihood to the full generation probability. First-Step GCG achieves 58% ASR on LLaDA Instruct (vs. 20% for Monte Carlo GCG) while being ~20× faster (Table 1), demonstrating the vulnerability is exploitable by realistic adversaries.
+- **First-Step GCG is practically valuable.** Theorem 4.1 provides a tractable surrogate objective for optimization-based jailbreaks on MDLMs. First-Step GCG achieves 20× speedup and up to 4× higher ASR versus Monte Carlo GCG (Table 1: 58.0% vs 20.0% on LLaDA Instruct), offering both a stronger evaluation tool and validation of the vulnerability analysis.
 
-- **Effective and well-motivated defense.** RA directly addresses the root cause — that standard training only conditions on fully masked starting states — by training on contaminated intermediate states. On LLaDA Instruct, RA reduces ASR under Anchoring Attack at t_inter=4 from 44.0% to 1.3%, and under First-Step GCG from 58.0% to 11.3% (Table 2). The ablation "RA w/o inter" confirms that training on contaminated states (not just RLHF) is crucial for the gains.
+- **Recovery Alignment shows strong and generalizable safety gains.** RA reduces ASR to near-zero at early intervention steps (Table 2) and, crucially, generalizes to held-out attack types it was not trained on: ASR on PAIR drops from 44.3% to 10.0% (LLaDA Instruct, Table 3), and gains on Crescendo (81.3%→45.0%) are substantial. These improvements cannot be explained by circular training.
 
-- **Comprehensive evaluation.** Three MDLMs (LLaDA Instruct, LLaDA 1.5, MMaDA MixCoT), seven attack methods (four priming-based, three conversational), three safety judges (GPT-4o, LLaMA Guard 3, keyword matching), two datasets (JBB-Behaviors, AdvBench), and 11 capability benchmarks — a thorough empirical picture. Results are consistent across models and evaluators (main paper + Appendix C).
-
-- **Well-designed ablation studies.** The linear scheduling curriculum vs. constant/uniform (Figure 3b) cleanly isolates the benefit of the curriculum. The max intervention step analysis (Figure 3a) shows a clear robustness-vs-stability trade-off.
-
-- **Side benefit of improved robustness against conventional jailbreaks.** RA reduces PAIR ASR from 44.3% to 10.0% on LLaDA Instruct (Table 3), suggesting the recovery capability generalizes beyond priming-specific attacks.
+- **Thorough evaluation.** Experiments cover three MDLMs, two datasets (JBB-Behaviors, AdvBench), seven attack methods, three evaluators (GPT-4o, LlamaGuard, keyword matching), and 11 general capability benchmarks (Table 4). Results are consistent across all dimensions. The ablation studies (Figure 3) cleanly isolate the contribution of contaminated-state training and linear scheduling.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None.
+- **Baseline comparisons are confounded by RA's use of a reward model.** RA uses DeBERTaV3 as a reward model during training, providing dense safety supervision. The baselines (SFT, DPO, MOSA) are trained only on binary preference labels from PKU-SafeRLHF. The ablation "RA w/o inter" — which uses the same reward model but trains from fully masked sequences — already outperforms or matches baselines on several metrics (e.g., Anchoring at t_inter=4 on LLaDA: RA w/o inter 22.0% vs. next best MOSA 24.0%). This suggests that the reward model, not just contaminated-state training, contributes to RA's advantage. The paper acknowledges this limitation (Section 7) but does not provide a DPO-style instantiation that would control for the reward signal. A proper comparison would either give baselines access to the same reward model or implement RA without one.
 
 ### Minor
 
-- **HumanEval degradation under-discussed.** On LLaDA Instruct, HumanEval drops from 22.0% to 17.1% after RA, a ~22% relative decline. The paper claims "no substantial degradation" (line 775) and attributes PIQA's smaller drop to "potential forgetting," but the HumanEval drop is the largest single-benchmark change and goes unmentioned. The average across 11 benchmarks is indeed flat (52.2 → 52.6), and part of the drop already appears in the RA w/o inter ablation (20.7%), suggesting it stems partly from the RLHF process rather than the intervention training specifically. Still, this should be acknowledged and discussed rather than glossed over.
+- **The anchoring attack evaluation is partially on the training distribution.** RA's training creates contaminated states via the same procedure as the anchoring attack (injecting the harmful response and masking). The headline results (0% ASR at t_inter=1) are on this attack. However, this concern is substantially mitigated by (a) strong generalization to very different attack types (PAIR, Crescendo, First-Step GCG), and (b) the ablation RA w/o inter, which controls for the training procedure but not the contamination. The paper would be strengthened by training on one contamination strategy and evaluating on a distinct unseen one.
 
-- **First-step approximation used in RA training is relegated to the appendix.** The GRPO loss in RA replaces the full generation probability over T−t_inter steps with the first-step mask predictor probability (Appendix D.4.1, line 2410–2412). This is a reasonable computational shortcut, but it is a non-trivial design choice that should appear in the main text with a brief justification, since it affects how faithfully the loss reflects the actual generation process. Importantly, this does *not* create a confound with First-Step GCG evaluation — RA's first-step approximation operates from the contaminated state r_t_inter (not from r_0) and computes the probability of the model's own generated response (not the harmful target), so the two are distinct mathematical objects.
+- **Theorem 4.1's empirical validation uses anchoring-attack states rather than forward-process states.** The proof applies the monotonicity assumption inside an expectation over q(r_t|r_T) (the forward process). The empirical validation (Appendix C.2) measures the gap on states from the anchoring attack (prefix injection), not on states drawn from the forward process (random masking). While the assumption is theoretically well-motivated (richer context → higher likelihood) and the empirical results are consistent across models, a direct validation on forward-process states would close this gap more cleanly. The theorem itself is mathematically sound given its assumption.
 
-- **Abstract slightly overstates the anchoring-attack claim.** The abstract says "simply injecting such affirmative tokens can readily bypass the safety guardrails." At t_inter=1, the Anchoring Attack inserts a full harmful response and re-masks, retaining ~1 token. Appendix C.1 provides good mechanistic evidence that single affirmative tokens suppress refusal probabilities, but no end-to-end ASR experiment with a single standalone token (e.g., "Sure") is reported. The claim is substantially correct — ASR does rise sharply at t_inter=1 — but the abstract's phrasing could be more precise about what was injected. The paper already acknowledges this is a controlled evaluation tool (Section 4.1), so this is primarily a presentation issue.
+- **"Affirmative" framing is imprecise for the main attack evaluation.** The paper defines the vulnerability in terms of "affirmative tokens" but the anchoring attack injects tokens from the full harmful response (which may include non-affirmative content). The controlled study in Appendix C.1 does analyze different token types and shows affirmative tokens are particularly effective, but the headline results (Figure 2, Table 2) do not isolate affirmative tokens specifically. The mechanism being demonstrated is broader than the "affirmative" framing suggests.
 
 ### Trivial
-
-- Minor numerical inconsistency: the abstract/Figure 2 indicate ~21% ASR at t_inter=1 for LLaDA Instruct, while Table 2 reports 17.3% ± 4.6. These are likely from different runs/evaluations and the difference is within noise, but consistency would improve clarity.
-
-- The paper claims "state-of-the-art robustness" in the narrative (Section 6.2), but RA still leaves substantial ASR under strong attacks like ReNeLLM (72% on LLaDA Instruct, Table 3). The paper does acknowledge this imperfection (line 762–763), so tempering the "state-of-the-art" language would better match the actual results.
+- The paper's notation for the ELBO (Equation 10) and the proof in Appendix A have minor formatting issues from the PDF extraction (strikethroughs, broken LaTeX) that should be cleaned up.
 
 ## Nice-to-Haves
-
-- An end-to-end ASR experiment with a single affirmative token (e.g., "Sure" or "Step 1:") injected at t_inter=1, to directly validate the abstract's claim without reliance on the Anchoring Attack's oracle response. This would strengthen the practical significance of the vulnerability.
-
-- A deeper analysis of the HumanEval degradation (e.g., qualitative inspection of generated code, gradient similarity between safety and coding tasks) to understand whether it is an inherent cost of safety alignment or addressable through better training recipes.
-
-- Evaluating RA against an attack that optimizes a later-step objective (e.g., t=4 log-likelihood) would test whether the defense generalizes beyond the first-step regime used in training, though the strong results against non-first-step attacks (Anchoring, PAD, DiJA) already provide evidence of generalization.
+- A DPO-style version of RA without a reward model (acknowledged as future work in Section 7) would resolve the baseline confound and is the most impactful addition.
+- Training RA on one contamination pattern and evaluating on a structurally different one would strengthen the generalization claim.
+- Adaptive attacks where the adversary knows RA is in use would test robustness under a stronger threat model.
+- Characterizing which specific tokens (affirmative vs. harmful vs. neutral) cause the strongest steering across the full benchmark, not just on a single prompt, would sharpen the paper's claims.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+**These points are flagged to be removed; treat them with caution:**
 
-1. **Harsh Critic claim: RA uses the same surrogate objective as First-Step GCG, directly confounding evaluation.** REMOVED — This is factually incorrect. RA's GRPO loss approximates π_θ(r_T | q, r_t_inter) — the probability of the model's own generated response from the contaminated state at step t_inter. First-Step GCG maximizes log π_θ(r̃_1 = r_harmful | q ⊕ s, r_0) — the probability of the harmful target from the fully masked initial state r_0. These operate on fundamentally different states (r_t_inter vs. r_0) and different targets (model's response vs. harmful target). The paper's results against Anchoring Attack, PAD, DiJA, and conversational attacks (none of which use first-step surrogates) further demonstrate that RA's effectiveness is not limited to First-Step GCG.
+1. **"Theorem 4.1 is unsupported / conflates forward and reverse processes"** — The critic claimed the proof is invalid because it applies a denoising-process assumption to forward-process states. However, the assumption ("log πθ(˜r_{t+1}=r|q, r_t) ≥ log πθ(˜r_1=r|q, r_0) for all t") is a statement about the model's output distribution given *any* state r_t, not about the process that generated r_t. The proof correctly applies it pointwise inside the ELBO expectation. The empirical validation could be extended to forward-process states, but this is a minor completeness issue, not a structural error. **The theorem is mathematically valid; the criticism is misplaced.**
 
-2. **Strength Finder claim: "RA achieves these safety gains without harming general capability" —** PARTIALLY SOFTENED (moved to minor weakness). The average across 11 benchmarks is flat, but the HumanEval drop is notable and under-discussed. The general capability preservation is still a genuine strength, just qualified.
+2. **"Theorem 4.1's proof is the entire justification for First-Step GCG"** — The paper explicitly states (Section 4.2) that the empirical success of First-Step GCG is also supported by the observation that "even increasing the generation probability in the first step is sufficient to steer subsequent generations toward a harmful response" (citing Figure 2). The theorem provides theoretical motivation, but the empirical results stand independently.
 
-3. **Harsh Critic claim about formatting/typo issues** — REMOVED per hard rule. These are parser artifacts.
+3. **Various formatting/style nitpicks** from the harsh critic — removed per instructions.
 
-4. **Strength Finder generic claims** — REMOVED. Generic statements like "this paper addressed an important problem" without specific citation or evidence are dropped.
+4. **Criticism that RA's evaluation is "circular" (framed as fatal)** — The critic called this "circular evaluation" where "the method is designed to counter the exact attack it was trained on." While partially true for the anchoring attack, the paper evaluates on six other attack types (PAD, DiJA, First-Step GCG, PAIR, ReNeLLM, Crescendo) and shows strong generalization. The critic acknowledged this but still labeled it as central evidence against the paper. This is a minor concern, not a fatal or major one.
 
 ## Novel Insights
 
-The paper's key novel insight is that MDLM safety alignment fails because standard training only optimizes behavior from the fully masked initial state r_0 — a narrow slice of the generation trajectory. By explicitly constructing and training on contaminated intermediate states, RA teaches the model a *recovery trajectory* that generalizes surprisingly well: it not only mitigates the targeted priming vulnerability but also improves robustness against conventional conversational jailbreaks. This suggests a broader principle: training models to recover from partially harmful states may be a generally useful safety strategy beyond MDLMs, since any jailbreak that elicits harmful content necessarily passes through states where harmful tokens have begun appearing.
+The most interesting observation emerges from comparing the two concurrent attack types: the anchoring attack (intervening in denoising) and First-Step GCG (optimizing the prompt). The paper shows that even without any intervention in the denoising process, an attacker can exploit the priming vulnerability through prompt optimization alone — and that this attack is actually stronger (58.0% ASR vs. 17.3% for anchoring at t_inter=1 on LLaDA). This suggests the vulnerability is not just about what happens during generation, but about the model's overall sensitivity to harmful content in its input representation, which only manifests during the denoising trajectory. The connection between these two threat models, bridged by Theorem 4.1, is a genuinely insightful framing that goes beyond what concurrent works provide.
 
 ## Suggestions
 
-- Move the first-step approximation discussion from Appendix D.4.1 into the main text (Section 5 or 6.2), with a brief justification of why this approximation is reasonable and why it does not confound the First-Step GCG evaluation.
-- Add a sentence in Section 6.3 specifically addressing the HumanEval drop on LLaDA Instruct, noting that part of it appears in the ablation (RA w/o inter) and that the average across benchmarks remains flat.
-- Temper the abstract phrasing from "simply injecting such affirmative tokens can readily bypass" to something like "injecting tokens from a harmful response can readily bypass, and even single affirmative tokens substantially suppress refusal behavior."
+1. **Resolve the reward-model confound.** Implement a DPO-style version of RA that does not use a reward model. This is the single most impactful addition — it would cleanly separate the effect of contaminated-state training from the effect of having a stronger training signal.
+
+2. **Strengthen Theorem 4.1's empirical support.** Validate the monotonicity assumption on states drawn from the forward process (random masking), not just from the anchoring attack (prefix injection). This is a simple experiment that would close the remaining gap.
+
+3. **Train on one contamination strategy, evaluate on another.** For example, train RA on states created by injecting the *first k* tokens of the harmful response (prefix contamination) and evaluate on states created by injecting *random k* tokens. This would demonstrate that RA learns a general recovery capability rather than a specific pattern.
+
+4. **Sharpen the definition.** Either broaden the definition of the priming vulnerability to cover any tokens from a harmful response (not just affirmative ones), or provide evidence that the injected tokens in the Anchoring Attack are predominantly affirmative at small t_inter.
+
+5. **Add a discussion of adaptive attacks.** Since RA is a known defense, what happens when the attacker optimizes a suffix to inject tokens at late steps (e.g., t_inter > 32) where RA's effectiveness is reduced? This would clarify the method's limitations under a realistic threat model.
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
 
-| Path | Paper | Avg Score | Comparison |
-|------|-------|-----------|------------|
-| zBPzxhso8M | DiffuGuard (dLLM training-free defense) | 5.20 | Our paper has a more principled training-based defense, broader attack evaluation, and capability benchmarks; stronger |
-| rIPeatvPy3 | DIJA (dLLM attack only) | 5.00 | Attack-only paper with missing ablations; our paper adds a defense and has more complete experiments; stronger |
-| jKQQb8uClw | MASK-based dLLM defense | 3.00 | Had critical theoretical proof errors; our paper's theory is simpler and correct; much stronger |
-| akbtPEZnDZ | Self-Jailbreaking (RLM discovery) | 5.50 | Discovery paper with limited defense; comparable novelty but our paper provides an actionable defense with stronger empirical validation |
-| GpBo97z6GH | Deep Safety Alignment (ARM prefilling) | 3.50 | Questionable novelty and weaker evaluation; our paper is stronger |
-| 4YgvVRoSnF | JailbreakLoRA | 4.00 | Different threat model (LoRA supply chain); our paper's attack+defense contribution is more complete |
-| f9BuANYtJf | GRAF (multi-turn jailbreak) | 4.40 | Attack-only on ARMs; our paper addresses a new model class with both attack and defense |
+| Anchor Path | Avg Score | Comparison |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/rIPeatvPy3.md` (DiJA paper) | 5.00 | Concurrent attack-only paper; this paper is stronger due to both attack and defense analysis, more thorough evaluation, and generalization results |
+| `/home/wg25r/review_agent/human_reviews_2026/zBPzxhso8M.md` (DiffuGuard) | 5.20 | Similar scope (analysis + defense); this paper has stronger empirical results and a more principled defense framework |
+| `/home/wg25r/review_agent/human_reviews_2026/jKQQb8uClw.md` (From Vulnerability to Defense) | 3.00 | Weaker paper with flawed theoretical proofs; this paper is substantially stronger in both theory and experiments |
+| `/home/wg25r/review_agent/human_reviews_2026/UQK3tUsouK.md` (Jailbreak Transferability) | 6.50 | Cleaner causal methodology and broader scope; this paper has more applied contributions but is less clean methodologically |
+| `/home/wg25r/review_agent/human_reviews_2026/akbtPEZnDZ.md` (Self-Jailbreaking) | 5.50 | Similar tier — both identify novel vulnerabilities and propose mitigations with thorough evaluation |
+| `/home/wg25r/review_agent/human_reviews_2026/4YgvVRoSnF.md` (JailbreakLoRA) | 4.00 | More limited evaluation; this paper is stronger |
 
-The paper under review is clearly stronger than the topically similar dLLM papers (DiffuGuard at 5.20, DIJA at 5.00) because it provides both vulnerability discovery with theoretical grounding AND an effective, well-ablated defense with comprehensive evaluation. The minor weaknesses (HumanEval under-discussion, abstract precision, appendix-deferred detail) are presentational and addressable, not threats to the core claims. The paper sits above the 5.0–5.5 range of comparable dLLM safety papers and merits a score reflecting its completeness and empirical rigor.
+The paper makes genuine contributions: identifying and quantifying a novel MDLM-specific vulnerability, deriving a tractable attack via Theorem 4.1, and proposing an effective defense with strong generalization evidence. The main concerns — the reward-model confound in baselines and partial circularity in the anchoring attack evaluation — are real but addressable and do not undermine the paper's central claims. The generalization results on PAIR, Crescendo, and First-Step GCG are particularly compelling. Relative to the calibration anchors, this paper sits above the 5.00 DiJA paper and the 5.20 DiffuGuard paper in terms of contribution depth, but below the 6.50 Jailbreak Transferability paper in methodological rigor. A score of 5.5 reflects this positioning.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

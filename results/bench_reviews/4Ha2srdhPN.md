@@ -1,21 +1,20 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me compose the final review.
-
----
+Now I have all the evidence I need. Let me write the final consolidated review.
 
 ## Summary
-GRAID introduces a framework for generating high-quality spatial reasoning VQA data using only 2D bounding boxes from object detectors, deliberately avoiding the cascading errors of single-view 3D reconstruction and the hallucinations of caption-based generation. The framework is instantiated with 22 question templates across three driving datasets (BDD100k, NuImages, Waymo), yielding over 8.5M VQA pairs with 91.16% human-validated accuracy—substantially higher than the 57.6% measured for a comparable prior dataset. The paper demonstrates that fine-tuning VLMs on GRAID data produces transferable spatial reasoning: models trained on 6 question types improve on 16 held-out types (+47.5% on BDD) and generalize across datasets and to external benchmarks like BLINK and A-OKVQA.
+
+This paper presents GRAID, a framework for generating high-quality spatial VQA data by operating exclusively on 2D bounding boxes from object detectors, thereby avoiding compounded errors from single-view 3D reconstruction. The framework is instantiated on BDD100k, NuImages, and Waymo to produce over 8.5M VQA pairs across 22 templates (spatial relations, counting, ranking, size comparisons, localization). The authors introduce SPARQ, a lightweight predicate-check interface that accelerates generation by up to 1400× via early rejection of infeasible candidates. Fine-tuning VLMs (Llama 3.2 11B, Gemma 3 4B, Qwen2.5 3B, Qwen3 8B) on GRAID data yields substantial gains on BLINK, A-OKVQA, and RealWorldQA, and the model learns spatial primitives that generalize to unseen question types and datasets.
 
 ## Strengths
 
-- **High-fidelity data validated by human study**: GRAID-generated VQA pairs achieve 91.16% human-validated accuracy (28 problematic out of 317 pairs) vs. 57.6% for the OpenSpaces dataset from the community SpatialVLM implementation (Section 4). This directly supports the claim that avoiding 3D reconstruction and generative pipelines yields substantially cleaner training data.
+- **Clean and well-motivated design insight**: The core idea — determining qualitative spatial relationships from 2D bounding boxes alone, bypassing 3D reconstruction — directly addresses known failure modes of prior work. This is validated by the human evaluation that finds 95.58% of GRAID questions valid and 93.69% of answers correct (Section 4, lines 432–438). The contrast with SpatialVLM's issues (cascading depth+detection errors, 42.4% invalid questions) is compelling motivation.
 
-- **Generalization across held-out question types and datasets (RQ2)**: Fine-tuning Llama 3.2 11B on only 6 question types from GRAID-BDD improves accuracy on 16 held-out types by an average of 47.5% on BDD and 37.9% on GRAID-NuImages, a completely unseen dataset (Figure 3). This is strong evidence that the model learns transferable spatial concepts rather than dataset-specific memorization.
+- **SPARQ predicate system yields substantial efficiency gains**: The lightweight predicate pre-checks achieve dramatic speedups (e.g., LargestAppearance predicates complete in 0.02ms vs. 69.74ms to realize the question, a ~3487× ratio; the paper conservatively reports "over 1400×" speedups) as shown in Appendix Table 3. This makes large-scale generation (8.5M pairs in a few hours) practical.
 
-- **Consistent gains on external benchmarks over prior work (RQ3)**: Models fine-tuned on GRAID-BDD consistently outperform those fine-tuned on the OpenSpaces dataset across A-OKVQA, RealWorldQA, BLINK, NaturalBench, and VSR (Tables 4–6). For Llama 3.2 11B, GRAID fine-tuning yields +19.65% on A-OKVQA, +16.41% overall on BLINK with strong gains on spatial subtasks (Relative Depth +41.94%, Spatial Relation +35.66%). These results hold across four different VLM backbones (Llama 3.2 11B, Gemma 3 4B, Qwen2.5 VL 3B, Qwen3 VL 8B).
+- **Learned spatial primitives generalize across question types and datasets**: The RQ2 experiment (Section 5, Figure 3) is particularly strong: training on only 6 question types from GRAID-BDD improves performance on over 10 held-out types, including the entirely unseen Size & Aspect category (+47.5% on GRAID-BDD, +37.9% on GRAID-NuImages for Llama 3.2 11B). The cross-dataset transfer in RQ1 (+29.1% on unseen GRAID-NuImages) further supports that GRAID data teaches transferable spatial concepts rather than dataset-specific patterns.
 
-- **SPARQ acceleration framework**: The predicate-sieving interface yields up to 1400× speedup on the most expensive templates (e.g., LargestAppearance predicate: 0.02ms vs. realization: 69.74ms; Section 3.2, Appendix Table 3), making large-scale generation practical.
+- **Consistent improvements across multiple VLM backbones on external benchmarks**: Fine-tuning on GRAID data yields substantial gains on BLINK (+15.94% overall for Llama, with +41.13% on Relative Depth, +31.98% on Visual Correspondence, +30.77% on Spatial Relations), A-OKVQA (+19.65%), and RealWorldQA (+22.75%) while maintaining stable performance on NaturalBench (Tables 4–6). These gains hold across four different model families (Llama, Gemma, Qwen2.5, Qwen3), showing robustness.
 
-- **Domain-agnostic design with clean 2D-only core**: GRAID requires only object detection outputs, avoiding architectural changes, 3D reconstruction, and LLM-based generation. The framework is modular (supporting Detectron2, MMDetection, Ultralytics), and the core 18-template variant operates purely on 2D bounding-box geometry.
+- **Large-scale dataset contribution**: The release of 8.5M+ VQA pairs across three real-world datasets with verified quality is a substantial resource for the community.
 
 ## Weaknesses
 
@@ -23,64 +22,76 @@ GRAID introduces a framework for generating high-quality spatial reasoning VQA d
 None.
 
 ### Major
-None.
+None. No weakness identified invalidates the paper's core claims.
 
 ### Minor
 
-- **Human evaluation comparison confounds question type with generation method**: The human study compares GRAID's qualitative spatial questions (generated from ground-truth bounding boxes) against SpatialVLM/OpenSpaces's metric questions (distances, sizes). Part of the quality gap may stem from the inherently higher reliability of qualitative vs. metric question generation, rather than exclusively from GRAID's 2D-only design. The 91.16% figure is still strong on its own merits, but the head-to-head comparison does not cleanly isolate the method's advantage over prior work.
+- **VSR regression is noted but not analyzed**: Fine-tuning on GRAID causes accuracy drops on VSR (a binary spatial-relations benchmark) across all models: Llama 61.13%→53.36%, Gemma 56.87%→54.75%, Qwen2.5 78.31%→71.85%, Qwen3 86.67%→82.90% (Tables 4–6). While GRAID's degradation is substantially smaller than OpenSpaces' (e.g., Llama+OpenSpaces drops to 41.98%), and the paper accurately notes that GRAID "far less frequently incurs large regressions," the regression is not explained. A diagnostic analysis (e.g., which VSR subcategories degrade, whether the regression is due to template-specific phrasing overfitting, or whether it reflects a precision-recall trade-off) would strengthen the claim that GRAID data teaches generalizable spatial reasoning.
 
-- **No format/content ablation for external benchmark gains (RQ3)**: The improvements on A-OKVQA, BLINK, and other benchmarks could partially reflect the model learning VQA instruction-following or multiple-choice format adaptation rather than purely spatial reasoning. The paper partially addresses this through RQ2 (transfer across question types within the same generation format) and by comparing against OpenSpaces SFT (same training paradigm), but a pure content-ablation control (e.g., training on non-spatial template-generated VQA of identical format and size) would strengthen the causal claim.
+- **Human evaluation comparison is partially confounded**: The headline comparison (91.16% GRAID vs. 57.6% OpenSpaces) compares GRAID generated using **ground-truth BDD100k detection labels** (Section 4, line 331: "we select to directly leverage these high-quality labels") against OpenSpaces generated using **automatic monocular depth estimation and object detection**. The paper is transparent about this design choice (it is intended to evaluate GRAID's framework in isolation), but the presentation of the comparison as a clean method-vs-method result without prominently caveating the different input conditions could mislead readers about the source of the quality gap. An ablation generating GRAID with automatic detections would allow direct attribution of the gap to the framework design vs. annotation quality.
+
+- **Human evaluation sample is small and lacks statistical rigor**: The evaluation is based on 317 VQA pairs from a single dataset variant (GRAID-BDD without depth) evaluated by 4 people. No confidence intervals, inter-annotator agreement scores (e.g., Cohen's κ), or tests of statistical significance are reported. While the sample size is typical for human evaluations in VLM papers, the paper's central quantitative quality claim would benefit from greater rigor.
+
+- **Missing empirical comparison with SpaRE and SpatialRGPT datasets**: The paper compares against only OpenSpaces (SpatialVLM's community dataset) in RQ3 but not against datasets from SpaRE or SpatialRGPT. While the paper notes qualitative differences (SpaRE requires captions, SpatialRGPT uses region-based prompting), including a comparison on benchmarks where those models have been evaluated would strengthen the positioning of GRAID against the full landscape of prior work.
+
+- **Depth-augmented questions partially deviate from "purely 2D" framing**: The Closer, Farther, and DepthRanking templates use monocular depth estimation and SAM masks (Appendix A.1). The paper acknowledges this and frames it as an extensibility demonstration with margin-ratio safeguards (Section 4, lines 337–347). However, the paper's narrative emphasizes "2D geometry only" as the key differentiator, and this nuance could be more prominently flagged.
 
 ### Trivial
 
-- **Abstract language slightly oversells the 2D-only claim**: The abstract states GRAID "operat[es] exclusively on 2D bounding boxes," but the framework also produces a depth-enriched variant (22 templates) that uses monocular depth maps for Closer, Farther, and DepthRanking questions. The paper is transparent about this in Section 4 and clearly separates the two variants, with the human evaluation and core claims resting on the no-depth variant. Tightening the abstract's language to reflect the modular design would avoid confusion.
-
-- **VSR regression not analyzed**: For Llama 3.2 11B, GRAID fine-tuning causes a -7.77% accuracy drop on VSR (Table 4). The paper mentions regressions on threshold-counting questions in RQ2 and attributes them to overfitting, but does not investigate the VSR-specific regression or discuss whether it is concerning given VSR is a spatial reasoning benchmark.
+- Hardware/software environment for SPARQ timing benchmarks is not specified (Section 3.2).
+- The interpretability methods discussion (Saliency Maps, Grad-CAM, etc., Section 3.1) is loosely connected to GRAID's framework and could be streamlined.
 
 ## Nice-to-Haves
-
-- A per-question-type breakdown of human validation rates would help identify which templates are most reliable and where the method's limits lie.
-- Extending GRAID beyond driving datasets (e.g., COCO with a modern detector) would validate the claimed domain-agnosticity, though the cross-dataset generalization and external benchmark results already provide partial evidence.
-- A format/content control experiment for RQ3 (as discussed above) would strengthen the transfer claims.
+- An analysis of how margin thresholds (LargestAppearance margin, AreMore margin, etc.) affect dataset size and quality would help users adapt GRAID to new domains.
+- A breakdown of human validity rates per question template would identify which templates produce ambiguous or incorrect QA pairs.
+- Human evaluation of the depth-based questions (Closer, Farther, DepthRanking) specifically, since they rely on noisy monocular depth estimates.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution:
 
-These points are flagged to be removed; treat them with caution.
+1. **"1400× vs 3487× inconsistency"** — The critic claims the paper's speedup claim is inconsistent with its own table. This is factually incorrect: the paper says "over 1400× speedups on the heaviest templates" (which is conservative), while the LargestAppearance numbers from Table 3 (0.02ms predicate vs 69.74ms apply) yield ~3487×. The numbers are from different templates and the paper's claim is accurate.
 
-- **Harsh Critic's claim that the depth variant "contradicts" the paper's stated motivation**: REMOVED. The paper explicitly creates two variants—one without depth (18 templates) and one with depth (22 templates)—and states the depth questions are "selected as a demonstration of GRAID's extensibility as a framework" (Section 4, lines 336–338). The human evaluation and core claims use the no-depth variant. The modular design is clearly explained, making this not a contradiction but a presentation nuance (retained as a trivial weakness).
+2. **"91.16% not clearly defined / inconsistent with body"** — The paper's body reports 28 unique problematic instances out of 317, which equals ~91.16% valid (100% - 8.83%). The 95.58% (questions) and 93.69% (answers) are component-level breakdowns of the same evaluation. The numbers are fully consistent.
 
-- **Harsh Critic's claim that the human evaluation is "invalid" and sample size/aggregation is inconsistent**: REMOVED. The paper reports 28 unique problematic instances out of 317 VQA pairs from 4 human evaluators, yielding ~91.16% valid (Section 4, lines 424–438). The 95.58% figure for questions (7 unclear + 2 invalid = 9 out of 317 → 97.16% valid… the paper says 95.58% which doesn't match; but 28/317 = 8.83% problematic → 91.17% valid, which matches the 91.16%). The slight inconsistency between the per-dimension figures and the overall figure is noted but doesn't invalidate the evaluation; the core 91.16% figure is properly derived.
+3. **"Interpretability methods are padding"** — Subjective style judgment about discussion of Saliency Maps, Grad-CAM, etc. The discussion provides context about object detection reliability.
 
-- **Harsh Critic's claim about missing related works (GQA, CLEVR, TDIUC)**: REMOVED per instructions—DO NOT mention missing related works.
+4. **"Both RQ1 datasets are driving scenes"** — The paper acknowledges this; the RQ1 claim is about cross-dataset generalization between different driving datasets (different cities, scenes, object distributions), which is clearly stated. RQ3 and RQ2 provide the stronger cross-domain evidence.
 
-- **Harsh Critic's formatting/style nitpicks**: REMOVED per instructions.
-
-- **Strength Finder's generic "the paper identified a real failure mode" and "the generated dataset is large"**: REMOVED as insufficiently specific; the retained strengths include these points but with concrete citations and evidence.
-
-- **Harsh Critic's claim that RQ3 gains could be from "format learning" because A-OKVQA "is not a spatial reasoning benchmark"**: PARTIALLY REMOVED. A-OKVQA does contain spatial reasoning questions alongside commonsense questions. The format concern is retained as a minor weakness but the characterization of A-OKVQA is corrected.
+5. **Strawman about "missing confidence intervals" as fatal flaw** — While confidence intervals would strengthen the analysis, requesting them as evidence that results may not be "statistically significant" overstates the issue given standard practice in VLM human evaluations.
 
 ## Novel Insights
-The paper's most interesting finding is RQ2: training on just 6 fundamental spatial primitives (left-of, right-of, counting, more-than, largest, centered) transfers to 16 held-out question types spanning substantially different cognitive categories (ranking, depth ranking, clustering, localization, size comparisons). This suggests that basic 2D geometric relationships may serve as compositional building blocks for more complex spatial reasoning—an empirical finding with implications for curriculum design in spatial VQA training. The cross-dataset generalization (BDD → NuImages, +29.1% for RQ1) further suggests that spatial concepts learned from 2D geometry are surprisingly scene-invariant, even when the training data is entirely from driving scenes and the test data contains different cities and object distributions.
+None beyond the paper's own contributions. The key insight — that qualitative spatial relationships can be reliably determined from 2D geometric primitives alone — is the paper's central contribution, and the reviews do not surface any novel interpretation beyond what the authors themselves provide.
 
 ## Suggestions
-- Tighten the abstract to note that the core framework operates on 2D geometry, with depth questions as an optional extension, rather than claiming exclusivity.
-- Add a brief analysis or discussion of the VSR regression to understand whether it reflects a genuine trade-off or an evaluation artifact.
-- Consider reporting per-template human validation rates in the appendix to help future users understand which question types are most reliable.
-- The per-dimension human validation numbers (95.58% question validity, 93.69% answer validity) appear to not quite reconcile with the overall 91.16% figure; clarifying the derivation would improve transparency.
+1. **Add a controlled ablation**: Run GRAID with an automatic object detector (e.g., YOLO fine-tuned on BDD100k) and human-evaluate the resulting data to isolate the contribution of the 2D-geometry framework from the use of ground-truth annotations.
+2. **Diagnose the VSR regression**: Analyze per-category VSR performance, check whether the drop reflects a precision-recall shift (GRAID increases recall at the cost of precision), and determine if overfitting to template phrasing is responsible.
+3. **Report inter-annotator agreement** for the human evaluation and provide confidence intervals for the validity rates.
+4. **Include per-template validity rates** in the human evaluation to identify which question templates produce lower-quality data.
 
 ## Score and Decision
 
-### Anchor comparison:
-- **MapQA** (`/home/wg25r/review_agent/human_reviews_2026/dOISCbmkmG.md`, avg 2.00, Reject): Serious methodological flaws (LLM-generated questions, conflict of interest in evaluation). GRAID is far stronger—rigorous human validation, clean 2D pipeline, no such flaws.
-- **Mind the Gap** (`/home/wg25r/review_agent/human_reviews_2026/Xbq80oc3IY.md`, avg 3.00, Reject): Diagnostic benchmark with weak contribution and limited novelty. GRAID is substantially stronger—novel method, large dataset, practical training benefits.
-- **Spatial-DISE** (`/home/wg25r/review_agent/human_reviews_2026/bMINsPQpME.md`, avg 4.00, Accept Poster): Automated pipeline benchmark, solid but limited scale (559 eval pairs) and no training-dataset benefits. GRAID is stronger—8.5M training pairs, human validation, demonstrated VLM improvements.
-- **SUBench** (`/home/wg25r/review_agent/human_reviews_2026/Su3f9U54ko.md`, avg 4.00, Reject): Retrieval-based spatial benchmark. GRAID is stronger.
-- **SpatiaLab** (`/home/wg25r/review_agent/human_reviews_2026/fWWUPOb0CT.md`, avg 4.00, Accept Poster): 1,400 VQA pairs, good taxonomy but limited scale. GRAID is stronger.
-- **InternSpatial** (`/home/wg25r/review_agent/human_reviews_2026/L6bEitSMeu.md`, avg 5.50, Accept Poster): 12M QA pairs, diverse domains, but only one model evaluated, data leakage concerns, minimal diversity analysis. GRAID has comparable scale (8.5M), better evaluation (4 models, human validation, 5 external benchmarks), and demonstrates practical training benefits.
-- **OmniSpatial** (`/home/wg25r/review_agent/human_reviews_2026/6nZKT2rL0H.md`, avg 5.50, Accept Poster): 8.4K manually curated benchmark, diverse cognitive categories. GRAID provides training-scale data (8.5M vs 8.4K) with demonstrated VLM improvement benefits, making it more practically impactful.
-- **SpaCE-Eval** (`/home/wg25r/review_agent/human_reviews_2026/VAEkLS9VBr.md`, avg 5.50, Accept Poster): 1,139 human-created diagrams, rigorous curation. GRAID is much larger scale and provides training data that demonstrably improves VLMs.
+### Calibration Anchors
 
-GRAID is clearly stronger than the 4.00–5.50 anchor papers: it has a novel method, larger scale with human validation, more thorough evaluation (4 VLMs, 5 external benchmarks), and demonstrated practical benefits for improving VLM spatial reasoning. The weaknesses (imprecise abstract language, confounded human eval comparison, missing format control) are real but minor—none threatens the core claims.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/L6bEitSMeu.md` (InternSpatial) | 5.50 | Similar contribution (large spatial VQA dataset + FT experiments). GRAID has stronger human evaluation, tests across more model families, and includes generalization experiments InternSpatial lacks; VSR regression is a weakness InternSpatial doesn't have. GRAID is slightly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/bMINsPQpME.md` (Spatial-DISE) | 4.00 | Benchmark-focused paper accepted as poster. GRAID has a more substantial contribution (framework + dataset + experiments) and stronger evidence. |
+| `/home/wg25r/review_agent/human_reviews_2026/fWWUPOb0CT.md` (SpatiaLab) | 4.00 | Benchmark paper with careful analysis. GRAID is stronger in contribution scope but has weaker evaluation rigor in some aspects. |
+| `/home/wg25r/review_agent/human_reviews_2026/Xbq80oc3IY.md` (Mind the Gap) | 3.00 | Weaker paper making unsupported claims about benchmark novelty; rightly rejected. GRAID is substantially stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/ddFN3lWpIr.md` (Everything in Its Place) | 5.00 | Different domain (T2I evaluation). Similar review quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/8LAc5kzjhz.md` (Spatial CAPTCHA) | 6.00 | Novel application area. Similar overall quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/kkBOIsrCXh.md` (NavFoM) | 8.00 | Much more impactful work with SOTA across multiple benchmarks. GRAID is not at this level. |
+| `/home/wg25r/review_agent/human_reviews_2026/ZhdpXY0BwV.md` (Do MLLMs Really Understand Space?) | 5.50 | Related spatial reasoning evaluation. Similar quality tier. |
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Evaluation on key axes:**
+- **Originality**: Good — the 2D-geometry-only insight is clean and practically useful, though template-based generation itself is not entirely novel.
+- **Importance of research question**: High — spatial reasoning is a recognized VLM weakness, and better training data is a clear bottleneck.
+- **Claims well-supported**: Mostly yes. The headline quality claim is partially confounded but the generalization experiments (RQ2, RQ3) independently support the contribution.
+- **Soundness**: Solid. Multiple model families, diverse benchmarks, ablation studies. Minor gaps in human evaluation rigor and VSR analysis.
+- **Clarity**: Good. The paper is well-structured and the methodology is clearly described.
+- **Value to community**: High. The dataset, framework, and SPARQ library are practically useful resources.
+
+GRAID is stronger than InternSpatial (5.50) which was accepted, and comparable to Spatial CAPTCHA (6.00). It is clearly above the 3–4 range of rejected/weaker papers but below the 8-range of exceptional contributions. The paper makes a solid, well-supported contribution with manageable weaknesses.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

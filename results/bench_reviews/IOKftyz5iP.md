@@ -1,104 +1,95 @@
-Now I have read the paper thoroughly and examined calibration anchors. Let me produce the consolidated review.
-
----
+Now let me write the consolidated review.
 
 ## Summary
 
-This paper proposes AWML, a framework for data-efficient learning that combines structured priors in latent world models, modular counterfactual generation through recombination, and calibrated uncertainty filtering. The theoretical contribution centers on two bounds: (1) a product-TV bound (Lemma 3.2, Theorem 3.5) showing how per-module estimation errors aggregate into a generator bias _D_ while modular recombination increases effective sample size; (2) a certified acceptance bound (Theorem 3.8) showing that thresholding an uncertainty score converts opaque generator bias into a tunable quantity _Q_(_U_ > _u_) + _u_. Experiments include a synthetic AR(1) study confirming _N_eff^{–1/2} scaling and an LSMS low-label study showing AUC gains from 0.88 to 0.94 at _n_=25 labels.
+The paper introduces **Adaptive World Models for Data-Efficient Learning (AWML)**, a framework combining structured latent world models, modular counterfactual data augmentation, and calibrated uncertainty filtering with provable finite-sample guarantees. The theory derives bounds for modular amplification (Theorem 3.5), certified acceptance (Theorem 3.8), and deployment-level excess risk (Corollary 3.9). Experiments include a synthetic AR(1) modular dynamics study and a real-world evaluation on the Uganda LSMS 2019 household survey dataset (binary electrification prediction). The core claim is that AWML yields substantial AUC gains (e.g., 0.8797→0.9402 at *n*=25 labels) with diagnostic control of augmentation bias.
 
 ## Strengths
 
-- **Certified acceptance bound (Theorem 3.8):** The insight that thresholding a calibrated uncertainty score converts generator bias into a deployment-level control _Q_(_U_ > _u_) + _u_ is genuinely novel and practically useful. This replaces an opaque bias term with tunable quantities that depend only on the threshold and tail mass. The paper provides an explicit estimator for the calibration constant _L_ (Appendix A.7.2) and diagnostic procedures (Appendix A.9).
-
-- **Product-TV bound for modular generators (Lemma 3.2, Theorem 3.5):** The decomposition of aggregate generator bias into per-module TV errors aggregated via a product formula (1 − ∏(1 − δ_m)) is clean and provides an explicit bias-variance trade-off: more modules increase _N_eff but accumulate bias through _D_. The synthetic AR(1) experiment confirms the predicted _N_eff^{–1/2} scaling of RMSE and shows augmentation bias staying below the theoretical 2_D_ bound.
-
-- **Practical diagnostic pipeline (Section 4.3, Appendix A.9):** The paper includes ensemble calibration, denominator clamping, audit flags, and a calibration robustness ablation (Appendix B.1) that tests sensitivity to the choice of calibrator and scaling of the estimated _L_. These engineering details make the framework auditable in principle and go beyond purely theoretical claims.
-
-- **Synthetic validation of core mechanisms:** The AR(1) study cleanly demonstrates the amplification mechanism. RMSE decreases with _N_eff following the predicted −1/2 slope, and the modular ablation varying _M_ and the scaling exponent _s_ (Appendix B, Table 6) explores robustness under imperfect independence assumptions.
+- **Clean theoretical unification.** The paper brings together Rademacher complexity, product total-variation bounds, submodular maximization, and uncertainty-based filtering into a single framework with an explicit bias–variance–acceptance trade-off (Cor. 3.9). The bounds are stated precisely and proofs are provided in the appendix.
+- **Synthetic validation of *N_eff*  scaling.** The AR(1) experiment (Section 4.1) shows that test RMSE versus effective sample size follows the predicted *N_eff⁻¹/²* rate for both Ridge and MLP predictors (log–log slopes close to −1/2, Table 2). This directly validates the variance term in Theorem 3.5.
+- **Robustness ablations for calibration.** Appendix B.1 systematically varies the calibration method (isotonic, Platt, temperature scaling) and the estimated calibration constant *L̂* (0.5×–2×). Final AUC remains stable across moderate perturbations (e.g., 0.9402→0.9412 for temperature scaling at *s_L*=0.5), showing the method is not brittle to calibration choices.
+- **Self-aware limitations.** Appendix A.10 explicitly discusses the strong assumptions (factorization, uniform TV control, difficulty of density-ratio estimation), giving a realistic picture of when the guarantees might be loose.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The core theoretical claims are internally coherent and the experiments, while limited, provide some empirical support.
+None.
 
 ### Major
 
-- **Gap between the AWML framework and its experimental instantiation:** The paper's introduction and abstract describe AWML as combining structured latent world models, neural-operator backbones, modular causal blocks, and counterfactual generation through interventions on learned latent modules. The LSMS experiment (Section 4.2) deploys an ensemble of small MLPs generating pseudo-labels filtered by predictive variance — there is no learned latent world model, no modular latent dynamics, no neural-operator parameterization, and no counterfactual generation based on intervening in a learned causal structure. The paper never specifies what "modules" mean in the tabular LSMS setting or how recombination is performed. This means the central claim — that AWML as a unified framework combining all these components yields data-efficient learning — is only partially tested. The synthetic AR(1) experiment tests modular recombination but uses _known_ independent modules (equation 6) and ordinary least squares per-module estimators, so it does not test the framework's ability to _learn_ modular structure from data. What remains untested is the core premise: that a latent world model with learned modular dynamics, recombined to generate counterfactuals, and filtered by calibrated uncertainty, outperforms alternatives. The paper demonstrates that uncertainty-filtered pseudo-labeling helps (LSMS) and that modular recombination helps when modules are known (AR(1)), but not that these pieces work together as proposed.
+1. **The LSMS experiment does not implement the modular world model described in the paper.**  
+   The paper's central empirical result (AUC gain on LSMS) comes from an experiment that uses an ensemble of 20 MLPs with isotonic calibration and uncertainty-thresholded pseudo-labeling (Section 4.2). There is no description of how the LSMS tabular features are decomposed into modules, how a modular transition model is learned, or how modular recombination operates in feature space — all of which are core to the AWML framework (modular latent dynamics, neural-operator backbones, modular causal blocks). The paper states "Modular recombination generates synthetic candidates with pseudo-labels" but offers no mechanism for how this is done on a static household survey dataset. The LSMS experiment tests uncertainty-filtered pseudo-labeling, not the full AWML pipeline. Because the headline empirical gains are attributed to AWML as a whole, this disconnect substantially undermines the paper's central claim.
 
-- **No ablation isolating AWML components on LSMS:** The LSMS experiment reports aggregate AUC improvement but does not ablate which component — the ensemble calibration, the pseudo-label generation mechanism, the variance-based filtering, or the final retraining — drives the gain. Without ablations, it is impossible to distinguish AWML from a generic uncertainty-filtered augmentation pipeline. The paper does provide a calibration robustness ablation (Appendix B.1) testing different calibrators and _L_ scalings, which is useful, but this tests only the filtering component, not the modular recombination.
+2. **Insufficient baselines to attribute gains to AWML's specific components.**  
+   AWML augments training with a large number of synthetic samples (e.g., 1110 accepted samples at *n*=25 labels, Table 3). The factual-only baselines train on only 25–100 real labels. The self-supervised and active learning baselines also do not use synthetic data at this scale. The paper omits standard semi-supervised methods that also scale training with pseudo-labels — self-training with confidence thresholding, MixMatch, or even simple data augmentation (SMOTE) — that would control for the effect of merely adding more (pseudo-labeled) training examples. Without such controls, the reported AUC improvements could stem from the increase in training set size rather than AWML's specific modular recombination or certified acceptance mechanisms.
 
-- **The certified acceptance assumption (Assumption 3.6) is not empirically verified:** Theorem 3.8's deployment-level control relies on the assumption that the uncertainty score _U_ upper-bounds a per-sample discrepancy between _P_ and _Q_. The practical _L_ estimator (Appendix A.7.2) is intentionally conservative but heuristic, and the paper acknowledges (Appendix A.10) that "high-dimensional density or density-ratio estimation is statistically difficult." Without empirical verification that the calibration assumption holds on the LSMS data, the term "certified" is aspirational rather than operational. The TV diagnostics in Table 3 are derived from the acceptance rule and are circular as verification of the assumption.
+3. **No ablation isolates the contributions of the claimed components.**  
+   The synthetic experiment varies *N_eff* and reports RMSE, but does not ablate away modular recombination (e.g., replace the modular world model with a monolithic one). The LSMS experiment has no ablation at all — it does not test whether the uncertainty filter, the calibration step, or simply training on more (pseudo-labeled) data drives the results. The calibration robustness ablation (Appendix B.1) perturbs *L̂* but does not test whether modularity or recombination matter, and in fact shows that ensemble-variance filtering alone gives similar results across calibrators, which undermines the claimed importance of the world-model component.
 
 ### Minor
 
-- **The LSMS AUC gains, while directionally positive, are reported without standard errors or confidence intervals in the main text** (Table 3 states "Per run values and bootstrap confidence intervals appear in Appendix B"). The paper claims means and standard errors over _n_ = 8 seeds are reported (line 601), and Appendix B (lines 2143-2153) describes paired _t_-tests and bootstrap CIs. Since the appendix is referenced, the statistical rigor likely exists, but the main text would be strengthened by including these directly.
+4. **The theoretical bounds rely on assumptions that are not empirically verified.**  
+   Theorem 3.8 requires Assumption 3.6 (pointwise calibration: *U*(*τ*) ≥ *d*(*τ*)), but the paper never checks whether this holds for the ensemble variance score used on LSMS. The "TV bound" reported in Table 3 (*B/(N+B)*·*L̂u*) is described as a "conservative diagnostic" but its relationship to the theoretical bound in Theorem 3.10 is not formally established or empirically compared — no plot shows the empirical distribution of *U* versus an estimate of *d*. The diagnostic flags are reasonable heuristics but do not constitute verification of the theoretical guarantees.
 
-- **The theory, while assembled into a coherent story, relies heavily on standard building blocks.** Lemma 3.2 (product TV), Lemma 3.3 (risk shift via TV), Lemma 3.4 (uniform convergence under covering numbers) are well-known or straightforward extensions. The novel contributions are their assembly into Theorems 3.5 and 3.8 and the resulting trade-off interpretation. The modular amplification bound (Theorem 3.5) essentially applies Lemma 3.2 + Lemma 3.3 + Lemma 3.4 in sequence, which is clean but not deep.
+5. **The synthetic experiments test only an unrealistically simple setting.**  
+   The AR(1) modules are independent and estimated by OLS (Section 4.1). This is the simplest possible instantiation — modules are known a priori, dependencies are zero, and dynamics are linear. The paper provides no evidence that the method works when modules are dependent, transitions are nonlinear, or module discovery from raw data is required. The RMSE reductions (Ridge 0.227→0.219, MLP 0.253→0.233) are very small.
+
+6. **AWML's gains vanish at *n*=100 labels, which is under-discussed.**  
+   Appendix B (Table 9) shows that at *n*=100 labels, the augmented model underperforms the baseline for logistic regression (mean diff −0.015, CI −0.038 to 0.001). The main text (Section 4.2) mentions only that AWML "improves AUC in all low label regimes," which is misleading. Understanding when and why the method backfires is central to its practical utility.
 
 ### Trivial
-
-- Figure 1 and Figure 2 are described in text but not interpretable from the extracted format (parser artifact; not the authors' problem).
-
-- The operator-form and structured hypothesis class _HP_ are discussed theoretically but never instantiated concretely in any tested model.
+None.
 
 ## Nice-to-Haves
 
-- A demonstration on a task where a structured latent world model with genuinely learned modular dynamics is implemented end-to-end (e.g., a simple multi-object physics simulation) would substantially strengthen the paper's claim of a unified framework.
-
-- An ablation on LSMS comparing AWML to baselines that use simple Gaussian noise augmentation or VAE-based augmentation would help isolate the contribution of modular recombination versus generic augmentation.
-
-- A concrete specification of how modular latent dynamics are _learned_ from data — the learning objective, architectural constraints, and training procedure — is described only at a high level (Section 2) and in pseudocode (Algorithm 1 in Appendix A.8) without domain-specific detail.
+- Comparing the LSMS experiment to a simple pseudo-labeling baseline (train-on-all, filter by confidence) would help separate the effect of the uncertainty-based acceptance rule from the effect of having more training data.
+- A modular decomposition of the LSMS features (e.g., grouping covariates by thematic blocks) with a brief justification would help readers assess whether the modular framework is applicable to this domain.
+- Reporting the empirical risk gap versus the theoretical bound *2Q(U>u)+2u* as a scatter plot for multiple thresholds would strengthen the claim that the bound is predictive in practice.
 
 ## Removed Points
 
-_These points are flagged to be removed, treat them with caution._
-
-- **Harsh Critic claim: "The Uganda LSMS 2019 experiment contains no structured latent world model, no modular latent dynamics, no neural-operator backbone, and no counterfactual generation based on learned modular recombination."** — The core factual observation (that these components are absent in the LSMS implementation) is correct and I have retained it as a major weakness. However, the harsh critic's framing that "the paper does not support its thesis" and "this disconnect cannot be fixed by additional experiments" overstates the case. The paper does test the certified acceptance mechanism and provides synthetic validation of modular amplification. The framework is partially tested. I have reformulated this as a gap between framework and instantiation rather than claiming the methodology is entirely unsubstantiated.
-
-- **Harsh Critic claim: "The reported AUC jumps (e.g., 0.88 → 0.94 with only 25 labels) are implausibly large."** — This is a subjective judgment without evidence. The paper provides bootstrap confidence intervals in Appendix B and reports results over _n_ = 8 seeds. The critic offers no statistical argument for why the gain is "implausible." Removed.
-
-- **Harsh Critic claim: "The theoretical 'certified acceptance' bound relies on a strong pointwise calibration assumption that the algorithm does not enforce or verify in practice."** — The paper acknowledges this limitation (Appendix A.10) and provides heuristic estimators. I have retained a weakened version as a major weakness noting the lack of empirical verification, but removed the framing that this makes the contribution empty.
-
-- **Strength Finder: "Integration of multiple machine-learning threads under a single bound."** — This is a valid observation but somewhat generic. The integration is conceptual rather than algorithmic. Moved to Removed Points rather than including as a standalone strength, though it is noted in context.
-
-- **Strength Finder: "Rigorous theoretical appendix with implementation recipes."** — The appendix is stripped in the extracted version, making this claim unverifiable from our reading. The main text references complete proofs, which is standard. Moved to Removed Points as unverifiable.
-
-- **Strength Finder: "Practical safeguards and diagnostic pipeline."** — Retained as a strength, as the diagnostic content is visible in the main text (Section 4.3) and Appendix A.9 (lines 1405-1418).
-
-- **"Missing appendix, missing proofs"** — Parser artifact. The appendix sections are partially present (Appendices A and B are included in the extracted text). Removed.
-
-- **"Figures missing/not interpretable from extracted text"** — Parser artifact. Removed.
-
-- **"Formatting nitpicks, typos, garbled text"** — Parser artifacts. Removed.
+- **Criticism that AWML "omits standard semi-supervised baselines (self-training with confidence thresholding, MixMatch, SMOTE)"** — This is kept as Major weakness #2 because it is a genuine omission that would control for pseudo-labeling effects. However, the criticism that "AWML effectively uses far more 'training examples'" and the active-learning comparison is unfair is **weakened**: the paper already includes a self-supervised autoencoder baseline that uses unlabeled data, though not the specific requested methods. The core concern (no control for simple pseudo-labeling) remains valid.
+- **Criticism that "the theory is decoupled from the experiments — the key guarantee is assumed, not tested"** — **Partially removed** as stated. The paper does test the deployment-level bound (empirical risk gaps vs 2Q+2u in Section 4.2). The specific point about Assumption 3.6 not being verified is kept as Minor weakness #4.
+- **Criticism about "missing appendix, missing proofs"** — **Removed**. The appendices are present with full proofs and additional tables.
+- **Criticism that "no attempt is made to compute the bound constants"** — **Removed as overstated**. The paper reports *D*, *L̂*, *B*, *u*, *Q(U>u)*, and the TV diagnostic, which are the relevant measurable quantities from the bounds. Computing every constant (e.g., the covering number constant *C*) is not standard practice.
+- **"Pure formatting/style nitpicks"** — Removed.
+- **Strength Finder claim that "The experiments directly test the theoretical bound (Theorem 3.10) by showing that empirical risk gaps stay below the predicted 2Q(U>u)+2u curve, bridging theory and practice"** — **Weakened**. The claim is partially true (Section 4.2 mentions this), but the verification is qualitative and no detailed plot is presented in the main text. Moved from "core strength" to something more modest.
+- **Strength Finder's "Practical algorithm with built-in safeguards and actionable diagnostics"** — Kept as a genuine strength (Algorithm 1, diagnostic flags, calibration checks) but de-emphasized relative to the theoretical contributions since the safeguards are straightforward implementation details.
+- **"The paper does not discuss how to discover such a factorization from data"** — The paper acknowledges this in Appendix A.10 as a limitation. It is a valid concern but not a clean "weakness" since the paper treats modularity as an assumption. I'll keep it as part of weakness #1 (the LSMS experiment doesn't show any modular decomposition).
 
 ## Novel Insights
 
-The most interesting insight from the paper is the structural decomposition of augmentation risk into a variance term (scaling as 1/√_N_eff) and a bias term controlled by _Q_(_U_ > _u_) + _u_. This reframes augmentation from a heuristic data-expansion technique into a controlled bias-variance trade-off where the practitioner can tune the acceptance threshold _u_ to explicitly manage risk. The product-TV bound (Theorem 3.5) further decomposes generator bias into per-module contributions, suggesting that improving individual module estimators directly reduces the aggregate bias — a decomposition that, while simple in retrospect, provides actionable guidance for modular system design.
+The reviews surface a deeper issue beyond any single experimental gap: the paper presents AWML as an integrated framework (modular world model + counterfactual recombination + certified acceptance), but the experiments are decoupled into two settings that test only isolated components — and the real-world setting tests only the acceptance component, not the modular world model. This creates a situation where the paper's theoretical contribution (clean unified bounds) and its empirical claims (strong AUC gains on LSMS) operate at different levels of fidelity. The synthetic experiment validates the *N_eff* scaling prediction, and the LSMS experiment validates uncertainty-filtered pseudo-labeling, but neither validates the full *combination* of modular dynamics with certified acceptance. The paper would benefit from either (a) a controlled experiment where the full pipeline is deployed end-to-end on a domain where modular structure can be clearly defined, or (b) honest reframing as two separate contributions: a theory of certified augmentation and an empirical study of uncertainty-filtered data augmentation, without the modular world model framing for the latter.
 
 ## Suggestions
 
-- Strengthen the LSMS experiment by specifying what the "modules" are (e.g., feature groups, data clusters) and how recombination is operationalized. Even if the modules are simple (e.g., grouped covariates), making this explicit would help readers understand whether modular recombination is genuinely happening or whether the method reduces to ensemble pseudo-labeling.
-
-- Add an ablation that removes the ensemble and modular recombination, leaving only the variance-filtered pseudo-labeling, to isolate which component drives the AUC gains.
-
-- Report the estimated calibration constant _L_ and the verification of Assumption 3.6 (or its failure modes) directly alongside the main results to give the "certified" label more substance.
+1. **Either implement the full AWML pipeline on a suitable domain** (e.g., a dynamical system with natural modular structure, such as multi-body physics or multi-agent trajectories) or **honestly reframe the LSMS experiment** as a study of calibrated pseudo-labeling with diagnostic control, decoupling it from the modular world model claims.
+2. **Add a pseudo-labeling or self-training baseline** to the LSMS experiments to isolate whether gains come from AWML's specific filtering mechanism versus simply having more training examples.
+3. **Provide empirical verification of Assumption 3.6** or at least a diagnostic plot showing *U*(*τ*) vs. an estimate of the per-sample discrepancy *d*(*τ*) on a validation set.
+4. **Discuss the *n*=100 failure case** (Table 9) in the main text — understanding when the method stops being beneficial is important for practitioners.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors:**
 
-| Anchor | Avg Human Score | Comparison |
-|--------|----------------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/8KcjEygedc.md` (Why Less is More) | 7.50 | Much stronger: tight theory-empirics connection, clear experimental validation on ImageNet, clean theoretical model with precise predictions. AWML has a larger theory-experiment gap. |
-| `/home/wg25r/review_agent/human_reviews_2026/BqOmsYIe7M.md` (Credal Prediction) | 6.50 | Stronger: novel method, extensive experiments across diverse tasks, clear practical value. AWML is more ambitious in scope but less concretely demonstrated. |
-| `/home/wg25r/review_agent/human_reviews_2026/N7ziRPTNdT.md` (Generation for Perception) | 5.50 | Slightly stronger: compositional generalization with both theory and generative/non-generative comparisons. AWML shares the theory-first approach but with weaker empirical grounding. |
-| `/home/wg25r/review_agent/human_reviews_2026/BjYJKqyCCa.md` (Model Merging Certifiable) | 4.50 | Comparable: novel connection between practice and theory, but limited scope and some conceptual imprecision. AWML has a larger gap between claimed framework and demonstrated results. |
-| `/home/wg25r/review_agent/human_reviews_2026/RYwtJyOP3k.md` (PAC Labels) | 4.00 | Somewhat similar: reasonable theoretical framing but limited practical gains. AWML has more theoretical novelty but comparable empirical limitations. |
-| `/home/wg25r/review_agent/human_reviews_2026/MSL8gSuCj2.md` (Weak Quantization World Models) | 3.00 | AWML is stronger: has real theoretical contributions that are partially validated, vs. limited validation of core claims. |
-| `/home/wg25r/review_agent/human_reviews_2026/imb1oWYpa8.md` (Uncertainty in AL) | 2.50 | AWML is clearly stronger: theory is better-motivated and partially validated, vs. fundamentally misguided theoretical framework. |
+| Path | Avg. Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/lTaPtGiUUc.md` (LPWM) | **7.33** (Oral) | Much stronger: fully implements the proposed architecture, thorough ablations, validates on realistic benchmarks. This paper's experimental validation is far less complete. |
+| `/home/wg25r/review_agent/human_reviews_2026/pFyzqbUiF9.md` (Vid2World) | **5.20** (Poster) | Stronger: implements the claimed method end-to-end with extensive experiments across domains, though some evaluation gaps exist. |
+| `/home/wg25r/review_agent/human_reviews_2026/pZuZWRuPyi.md` (HAUWM) | **4.67** (Poster) | Comparable but stronger: the core method is implemented and tested as described, experiments are adequate. This paper's theory is cleaner but the experimental disconnect is more severe. |
+| `/home/wg25r/review_agent/human_reviews_2026/I3spHvRHqo.md` (Non-vacuous Guarantee) | **4.00** (Reject) | Mixed reviews; experiments do directly test the proposed theory. This paper has cleaner theory presentation but a larger gap between theory and experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/W7QcymYxXK.md` (Synthetic Anomalies) | **3.33** (Reject) | Similar profile: theory + experiments, but theory assumptions not fully validated, and core idea is simplistic. This paper has more elaborate theory but similar experimental gaps. |
+| `/home/wg25r/review_agent/human_reviews_2026/By4u7V6tAx.md` (Train-Test Gap) | **3.50** (Reject) | Weak experiments, missing implementation details. This paper has stronger theory but a more fundamental experimental disconnect. |
+| `/home/wg25r/review_agent/human_reviews_2026/rbNOhbdQ0v.md` (Offline MBRL Real Robots) | **3.33** (Reject) | Lacks novelty, insufficient baselines. This paper has stronger theoretical novelty but weaker empirical grounding. |
 
-AWML has genuine theoretical ideas (the certified acceptance bound and product-TV decomposition) and provides some empirical support, but the gap between its promised unified framework and its demonstrated components is substantial. The paper is an interesting theoretical proposal whose practical instantiation lags behind its conceptual ambition. It compares most closely to the 4.0–4.5 band: better than papers with fundamentally flawed theory, but not yet at the level where theoretical and empirical contributions are tightly integrated and convincingly demonstrated.
+The paper under review has a clean theoretical framework and a well-validated *N_eff⁻¹/²* scaling result on synthetic data, which are genuine contributions. However, the LSMS experiment — which produces the headline AUC numbers — does not implement the modular world model described in the framework; it tests uncertainty-filtered pseudo-labeling instead. The lack of semi-supervised baselines, the missing ablations isolating component contributions, and the fact that the theory's key assumptions go unverified in the real experiment all prevent the paper from supporting its central claims. Compared to the anchor papers, this submission falls between the medium-scoring rejects and the low-scoring accepts — the theory is above average, but the experimental validation is below the bar for an ICLR publication.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+**Score: 3.5**
+
+**Decision: Reject**
+
+The paper has theoretical merit and a clean presentation, but the experimental core is disconnected from the claimed method to a degree that cannot be addressed in a rebuttal. The LSMS experiment would need to be redesigned to either implement the full AWML pipeline or be honestly reframed, and the baseline set would need substantial expansion. A substantially revised version could be competitive.
+
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

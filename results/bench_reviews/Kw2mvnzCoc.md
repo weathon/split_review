@@ -1,78 +1,78 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
+Now I have everything I need. Let me write the consolidated review.
 
 ## Summary
-TSPulse introduces a family of ultra-light (1M parameter) pre-trained models for time-series diagnostic tasks. The key innovation is a pre-training framework that produces three complementary embedding types (temporal, spectral, semantic) through disentangled masked reconstruction across both representation spaces and abstraction levels, combined with a hybrid masking strategy and task-specific post-hoc fusers (MHT for anomaly detection, TSLens for classification). The model achieves SOTA or competitive results across four diagnostic tasks — anomaly detection (+20% on TSB-AD leaderboard), classification (+5–16% on UEA), imputation (+50% over UniTS), and similarity search (+25–100%) — while being 10–340× smaller than competing pre-trained models.
+
+This paper proposes TSPulse, a family of ultra-lightweight (1M parameter) pre-trained time-series models designed for diagnostic tasks (anomaly detection, classification, imputation, similarity search). The core innovations are: (1) disentangled masked reconstruction across time, frequency, and semantic abstraction levels producing three complementary embedding views; (2) a hybrid masking scheme that mixes block and point-level masking to mitigate pre-training mask bias; and (3) lightweight post-hoc fusers (MHT, TSLens) that selectively combine disentangled views for task specialization. Despite its compact size, TSPulse achieves strong results across four tasks on 75+ benchmark datasets, outperforming models 10–100× larger while enabling CPU-only inference.
 
 ## Strengths
-- **Exceptional empirical breadth and performance**: TSPulse achieves SOTA results across 4 diverse diagnostic tasks spanning 75+ datasets while using only 1M parameters. On the TSB-AD anomaly detection leaderboard, it ranks first in both univariate (VUS-PR 0.48 ZS) and multivariate (0.36 ZS) tracks, outperforming all 40 baseline methods including ones trained on target data. The Headensemble variant alone (0.44 UV, 0.31 MV, Table 1a) matches or beats the previous SOTA without any per-dataset head selection.
 
-- **Well-motivated architectural contributions with strong ablation support**: Hybrid masking prevents a 79% MSE degradation in imputation (Table 1c); TSLens avoids an 11–16% accuracy drop vs. simple pooling (Table 1b); channel-mixer identity initialization prevents a 9% drop. Each component's contribution is isolated and quantified.
+- **Ultra-lightweight design that consistently outperforms much larger models.** At 1M parameters, TSPulse achieves +20% VUS-PR on the TSB-AD anomaly detection leaderboard, +5–16% accuracy on UEA multivariate classification, +50% MSE reduction on zero-shot imputation under hybrid masking, and +25% PREC@3 on similarity search, all while using models that are 10–100× smaller than competitors (Figures 4–7, Table 3). This efficiency-accuracy combination is a genuine practical contribution.
 
-- **Convincing sensitivity analysis demonstrating complementary embedding properties** (Section 6, Appendix A.3): Semantic embeddings show 4.6% distortion under missing data vs. 8.3% for temporal embeddings, while temporal embeddings exhibit 130% distortion under phase shifts vs. only 12% for semantic embeddings. These complementary behaviors directly map to downstream task utility. The PCA visualizations in Appendix A.4 provide additional qualitative evidence of structure in the embedding space.
+- **Disentangled representation learning is empirically validated through controlled sensitivity experiments.** Table 2 shows that temporal embeddings exhibit 130% distortion under phase shifts, FFT embeddings 21%, and semantic embeddings only 12%, confirming that the three views capture genuinely complementary properties. Further PCA analyses on semantic embeddings (Appendix A.4, Figures 8–12) demonstrate invariance to magnitude scaling, noise, and missing data while preserving sensitivity to frequency content—exactly the pattern needed for robust retrieval.
 
-- **Extreme computational efficiency for practical deployment**: Table 3 shows TSPulse requires 0.39 GB max memory and 7.16 ms GPU inference time — 10–100× faster than Chronos and MOMENT variants while being 33–320× smaller, enabling real-time CPU-only deployment.
+- **Hybrid masking demonstrably mitigates pre-training mask bias.** The ablation in Table 1(c) shows that removing hybrid pre-training causes a 79% increase in MSE under hybrid-mask evaluation. The MAR/MNAR analysis (Table 31) shows TSPulse substantially outperforms MOMENT under realistic missingness patterns (e.g., 0.147 vs. 0.575 MSE on MAR scenario S1), validating that variable-length masking during pre-training transfers to real-world missingness.
+
+- **Thorough empirical scope.** The paper evaluates across four distinct diagnostic tasks on over 75 datasets with extensive ablations (Tables 1a–d), sensitivity analyses (Section 6), robustness checks (MAR/MNAR in Appendix A.16), and ablation studies isolating the contributions of dual-space learning, hybrid masking, TSLens, identity initialization, and channel expansion.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+- **Presentation inflates headline results by conflating task-specialized models with a single unified model.** The abstract and introduction present the reported gains (+20%, +25%, +50%, +5–16%) without clarifying that these come from *task-specialized* pre-training checkpoints (different masking strategies, patch sizes, and loss weightings per task, as detailed in Appendix A.9). The paper does disclose this in the appendix and appropriately frames the contribution as a "family" of models, but the main text's presentation strongly implies a single model achieving all listed gains. The unified model experiment (Appendix A.15) shows a single checkpoint underperforms specialized variants—e.g., univariate AD VUS-PR drops from 0.48 to 0.42, classification accuracy from 0.73 to 0.71. This presentation choice inflates the perceived contribution and should be corrected.
+
+- **The imputation headline emphasizes gains under hybrid masking, which matches TSPulse's pre-training distribution but not the baselines'.** The abstract's "+50% on imputation" and Section 4.3's "70% over MOMENT" are reported under hybrid masking, whereas MOMENT and UniTS were pre-trained with block masking only. The paper does include block-masking results (Figure 13, Table 19) where TSPulse still outperforms but by smaller margins (e.g., +40% over UniTS under block masking vs. +56% under hybrid masking). The hybrid-masking numbers should give way to block-masking comparisons as the primary fairness-neutral evaluation, with hybrid-masking positioned as demonstrating TSPulse's specific advantage rather than general superiority.
+
+- **The disentanglement claim, while supported by necessary-condition evidence, lacks a direct causal isolation experiment.** The sensitivity analysis (Table 2) and ablations (Table 1) show that the three embedding views respond differently to perturbations and that removing components hurts performance. However, this is correlational evidence—removing dual-space learning also reduces model capacity and removes the FFT reconstruction signal. A more direct comparison (same architecture and total capacity, but with all heads predicting the same reconstruction target) would isolate whether explicit disentanglement or simply having more reconstruction signals drives the gains. Without this, attributing performance improvements to "disentanglement" specifically remains partially under-supported.
 
 ### Minor
-- **"Disentanglement" framing is operational but imprecise**: The paper uses "disentangled" to mean that embeddings are separated into distinct optimization pathways and exhibit complementary sensitivity profiles. This is well demonstrated, but the term conventionally implies statistical independence (e.g., mutual information, DCI). The sensitivity analysis (Section 6) proves complementarity, not formal disentanglement. The paper would benefit from either (a) adopting a more precise term like "factorized" or "complementary" embeddings, or (b) adding a simple redundancy test (e.g., predicting one embedding type from another) to strengthen the claim. This does not undermine the core contribution but creates a slight mismatch between claim and evidence.
+- **The similarity search evaluation uses a custom benchmark rather than a standard retrieval protocol.** The paper constructs synthetic + UCR-derived datasets with a specific augmentation scheme. While the setup is reasonable and well-described (Appendix A.14), the lack of a standard benchmark (e.g., k-NN classification on UCR using zero-shot embeddings) makes the similarity search claims harder to compare against future work. The baselines (MOMENT, Chronos) are also forecasting/imputation models not specifically designed for retrieval, which further limits the evaluation's conclusiveness.
 
-- **AD head selection confounds pure zero-shot interpretation**: The TSB-AD leaderboard protocol allows using a labeled tuning set for head selection (Section A.11.3), and all 40 methods use it. However, the paper should emphasize more prominently that Headensemble — which requires no per-dataset selection — already achieves VUS-PR of 0.44 (UV) and 0.31 (MV), beating or matching the previous SOTA (Sub-PCA 0.42, CNN 0.31). These numbers are currently buried in Table 1a; highlighting them in the main text would preempt concerns about the "zero-shot" label.
+- **No confidence intervals or statistical significance reported.** Given the high variance across UEA datasets (some tiny, some large), reporting standard deviations or significance tests for main results would substantially strengthen the claims.
 
-- **Similarity search baselines could be stronger**: MOMENT and Chronos embeddings are compared as-is without retrieval-specific adaptation. While comparing zero-shot embeddings is reasonable, adding a contrastive representation learning baseline (e.g., TS2Vec) would contextualize TSPulse's invariant properties. The current comparison may overstate the gap attributable to TSPulse's architecture vs. the baselines' lack of retrieval optimization.
-
-- **Ablation study on 17/29 UEA datasets** (Table 1b): The subset restriction is pragmatic for analysis speed but limits generalizability of the ablation conclusions. The authors should note this limitation explicitly.
+- **The similarity search findings that TSPulse outperforms Chronos by +100% are likely inflated by Chronos being a forecasting model with embeddings not designed for retrieval at all** — this comparison is of limited informativeness and should be de-emphasized.
 
 ### Trivial
-- The paper could more clearly distinguish its "disentanglement" from prior time-frequency fusion work (BTSF, TF-C) and from formal disentanglement learning (TimeDRL). A brief positioning paragraph would help readers understand the novelty gradient.
+- Figure 2's annotations (callouts 1–6) are dense and hard to follow on first reading; the text compensates but visual clarity could be improved.
+- The unified model experiment (Appendix A.15) is important enough to appear in the main paper rather than the appendix.
 
 ## Nice-to-Haves
-- A redundancy analysis (e.g., linear regression predicting one embedding type from another) would strengthen the disentanglement / complementarity claim beyond the current sensitivity analysis.
-- Per-dataset classification results for Headensemble vs. Headtriangulation on the AD benchmark would help readers assess how much the tuning-set selection contributes.
-- A data-scale ablation (training with fractions of the ~1B pretraining corpus) would help disentangle the contributions of data volume vs. architectural design.
-- Extending TSLens-style fine-tuning to few-shot classification would strengthen the task-specialization narrative.
+- Reporting k-NN classification accuracy on UCR (128 datasets) using TSPulse's zero-shot embeddings as a standard similarity-search proxy would make the retrieval claims more easily comparable.
+- Ablating the number of register tokens R and testing whether all heads predicting the same reconstruction target changes performance would strengthen the disentanglement claim.
+- A qualitative example (query time-series + top-3 retrievals from TSPulse vs. baselines) would make the similarity search gains more concrete.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
 
-1. **"UniTS imputation comparison is unfair"** — Factually incorrect. UniTS is evaluated with prompt-tuning on 10% data (an advantage), while TSPulse is strictly zero-shot. The asymmetry favors the baseline, making TSPulse's win more impressive, not less. Per the Hard Rules, this criticism is removed.
-
-2. **"No mechanism or loss that actively discourages entanglement"** — The paper explicitly describes separate loss heads operating on distinct embedding segments (lines 242-258): L_time1, L_time2 on TimeE segments; L_fft on FFTE segments; L_sign on RegE segments. The criticism misunderstands the architecture.
-
-3. **"No zero-shot UniTS baseline"** — UniTS's native mode is prompt-tuned; the paper uses the model as designed. Additionally, the paper already compares against MOMENT in pure zero-shot mode and beats it by 70%.
-
-4. **"Headensemble not shown"** — Factually incorrect. Table 1a reports Headensemble at 0.44 (UV) and 0.31 (MV). The criticism missed these results.
-
-5. **"The 79% drop when removing hybrid pre-training partly reflects that the evaluation uses hybrid masks"** — This is the intended point: hybrid pre-training is needed precisely because real-world missingness is hybrid. The ablation shows the model trained without hybrid masking fails under realistic missing patterns.
-
-6. **Strength Finder generic strengths** — Claims like "TSPulse enables real-time CPU-only deployment" and "comprehensive ablation" are retained as they are specific and supported. Generic framings were filtered.
+Points flagged for removal, treated with caution:
+- **Criticism about "MOMENT and Chronos are not similarity search models" being a fatal flaw:** This is a minor point. The paper compares against the best available alternatives for obtaining zero-shot embeddings. While Chronos was designed for forecasting, it is common practice to evaluate pre-trained embeddings on downstream tasks they weren't explicitly designed for, and the paper is transparent about what it's comparing.
+- **Criticism about missing related works:** Removed per instructions (cannot verify existence of omitted references).
+- **Criticism about missing confidence intervals for large-scale benchmarks:** Moved to Minor weakness; single-run evaluation is the norm in this setting and not a fatal flaw.
+- **Formatting/style nitpicks, typos, grammar issues:** Removed per instructions (parser artifacts).
+- **Claim that "the paper does not ablate number of register tokens R":** Moved to Nice-to-Have; this is one hyperparameter among many and the paper already contains extensive ablations.
 
 ## Novel Insights
-Beyond the paper's own contributions, the sensitivity analysis reveals an interesting property: the semantic (register) embeddings achieve robustness to multiple perturbation types (missing data, noise, phase shift) simultaneously, while carrying only 256 dimensions vs. 1536 for temporal/spectral embeddings. This suggests that the signature-based reconstruction objective (predicting a softmax distribution over log-magnitude frequency spectrum) acts as a strong information bottleneck, forcing the register tokens to learn compact, invariant representations. This finding has implications beyond TSPulse — it suggests that reconstruction targets operating on compressed global signatures can produce more robust representations than full-signal reconstruction, a design principle potentially useful for other representation-learning frameworks.
+
+The most insightful observation that emerges from cross-referencing the reviews with the paper is that TSPulse's core trade-off—task-specialized vs. unified pre-training—is actually a feature, not a bug. The paper shows that pre-training a 1M-parameter model per task costs only ~1 day on 8×A100 GPUs, making task specialization practical rather than prohibitively expensive. This reframes the "one model to rule them all" narrative dominant in foundation-model research toward a more pragmatic "family of small specialists" paradigm, which may be more suitable for resource-constrained deployment scenarios where practitioners would rather download a 1M-parameter classification model than a 340M-parameter generalist.
 
 ## Suggestions
-- Adopt more precise terminology for the embedding properties: "complementary" or "factorized" rather than "disentangled," or add a simple redundancy analysis to bridge the gap between the demonstrated complementarity and the "disentanglement" claim.
-- In the anomaly detection results section, prominently report that Headensemble alone (0.44 UV / 0.31 MV) already matches or exceeds the previous SOTA, to address the inevitable concern about per-dataset head selection.
-- Explicitly note that the classification ablation uses 17/29 datasets as a limitation.
-- Consider adding TS2Vec or a similar contrastive baseline to the similarity search comparison, even if using off-the-shelf embeddings.
 
-Now, evaluating against calibration anchors:
+1. **Restructure the main paper to clarify the task-specialized vs. unified distinction up front.** Move the unified model experiment (Appendix A.15) into the main text, and report all four tasks' results for both the specialized checkpoints and the unified checkpoint. The abstract should say "family of task-specialized models" or report the unified model's gains as the headline figure.
+2. **Give the block-masking imputation results equal visual weight** to the hybrid-masking results in the main paper. The abstract's imputation claim should reflect the block-masking gain (which is still strong at ~40% over UniTS) rather than relying primarily on the hybrid-masking comparison.
+3. **Add a direct disentanglement isolation experiment** where all output heads predict the same (time-domain) reconstruction with matched total loss weighting, to test whether the explicit disentanglement objective or simply having more reconstruction signals drives the improvements.
 
-- **IJDztMLEXw (avg 2.50, Reject)**: Weak novelty, missing ablations, poor presentation. TSPulse is dramatically stronger on all axes — broader empirical scope, thorough ablations, clear contributions.
-- **1ndthBqbyK (avg 2.50, Reject)**: Limited novelty (applying DINO to TS), weak experiments. TSPulse has substantially more originality and empirical backing.
-- **71GdLqicyH (avg 3.50, Withdrawn/Reject)**: Decent idea but specific limitations. TSPulse is clearly stronger.
-- **kYLEBMmkE7 (avg 3.33, Withdrawn/Reject)**: Benchmark paper, limited contribution. TSPulse has more substance.
-- **Z4T26VztkU (avg 5.00, Reject)**: TimeRCD — single-task (AD), decent results but missing ablations, efficiency concerns. TSPulse spans 4 tasks with comprehensive ablations and stronger results. TSPulse is stronger.
-- **ZOLUTSU5gk (avg 5.00, Accept Poster)**: SarSim — clever synthetic data idea, narrower scope (forecasting only). TSPulse has comparable or greater novelty with broader applicability.
-- **p9azaewKgh (avg 5.33, Reject)**: Comprehensive benchmark study, no methodological contribution. TSPulse provides both methodology and results, clearly stronger.
+## Score and Decision
 
-TSPulse sits above all retrieved anchors in terms of contribution quality and empirical thoroughness. The methodology is sound, the scope is broad, the results are impressive, and the efficiency angle is compelling. The minor weaknesses around terminology and presentation do not threaten the core claims.
+**Calibration anchors** (all from the same corpus, same ICLR 2026 cycle):
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+| Anchor | Avg Score | Comparison to TSPulse |
+|--------|-----------|----------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/1ndthBqbyK.md` (TSDINO) | 2.50 (Reject) | Much weaker—limited novelty (DINO port), weaker experiments. TSPulse is significantly stronger methodologically and empirically. |
+| `/home/wg25r/review_agent/human_reviews_2026/RRJ7Djz58u.md` (SATS) | 3.50 (Withdrawn) | Scale-aware pretraining with marginal ablation gains (1.56% MSE). TSPulse has substantially stronger empirical validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/WcEbBJeqQ0.md` (TempoPFN) | 4.50 (Reject) | Synthetic-only pre-training for forecasting. Mixed reviews (2,6,2,8). TSPulse has more architectural novelty and broader evaluation across 4 tasks. |
+| `/home/wg25r/review_agent/human_reviews_2026/H27kvyG4qf.md` (One-Liners) | 5.00 (Accept) | Meta-analysis critical of TSFMs for AD (includes TSPulse as evaluated model). Different genre. TSPulse's own AD results on TSB-AD leaderboard are strong. |
+| `/home/wg25r/review_agent/human_reviews_2026/NXThkM7Iym.md` (PaAno) | 5.00 (Accept) | Lightweight AD method. TSPulse is broader (4 tasks vs. 1) with more thorough evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/5jkzTzV5Ao.md` (Implicit Biases) | 5.50 (Accept) | Analysis paper, different category. Well-regarded. TSPulse's method contributions are more concrete. |
+| `/home/wg25r/review_agent/human_reviews_2026/I94Eg6cu7P.md` (SRT) | 5.50 (Accept) | Super-resolution via disentangled rectified flow. Comparable rigor but narrower scope. |
+
+TSPulse sits above the 4.5–5.5 band of accepted/rejected time-series papers in terms of empirical thoroughness and the practical impact of its efficiency-accuracy trade-off. However, the presentational inflation (task-specialized gains framed without sufficient caveat, imputation headline favoring the evaluation mode that advantages TSPulse) keeps it from scoring higher. A clean revision addressing these framing issues would strengthen the paper further.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

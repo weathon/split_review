@@ -1,100 +1,90 @@
-Now I have a complete picture. Let me produce the final consolidated review.
-
----
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-PIRN proposes a prototype-based reconstruction framework for few-shot multimodal (RGB + 3D surface normals) anomaly detection. It introduces three components: (1) Balanced Prototype Assignment (BPA) using optimal transport to prevent codebook collapse, (2) Adaptive Prototype Refinement (APR) for test-time prototype adaptation via GRU gating, and (3) Multimodal Normality Communication (MNC) that exchanges normalcy knowledge across modalities through graph-aligned cross-attention. Evaluated on MVTec-3D-AD, Eyecandies, and Real-IAD D3, PIRN demonstrates consistent improvements over existing baselines under few-shot settings.
+PIRN proposes a prototype-driven reconstruction framework for few-shot multimodal anomaly detection, combining RGB and surface-normal inputs. The method introduces three components: Balanced Prototype Assignment (BPA) using optimal transport to prevent codebook collapse, Adaptive Prototype Refinement (APR) to update prototypes during inference, and Multimodal Normality Communication (MNC) for cross-modal knowledge exchange. Experiments on MVTec-3D-AD, Eyecandies, and Real-IAD D3 show strong results, with the method achieving 0.922 AUROC_I on 10-shot MVTec-3D-AD while being 4× faster and using 85% fewer FLOPs than prior SOTA FIND.
 
 ## Strengths
 
-- **Consistent SOTA few-shot performance**: PIRN achieves substantial AUROC_I gains over the best baseline across MVTec-3D-AD (+3.9 at 5-shot, +3.7 at 10-shot, +2.4 at 50-shot) and Eyecandies (+3.6 to +4.0), as shown in Table 1. These gains are consistent across all shot settings and metrics, not cherry-picked.
+- **BPA via balanced optimal transport is a clean, well-validated solution to codebook collapse.** The paper provides direct evidence (Fig. 1 Right, t-SNE visualization) that BPA yields uniform prototype utilization compared to softmax collapse. Ablations confirm BPA contributes +5.5 AUROC_I over softmax attention (0.828 → 0.883) in the same architecture, and Tab. 9 shows BPA outperforms softmax, linear, and sigmoid attention (0.832–0.878 vs. 0.922).
 
-- **Well-motivated architectural design**: Each component addresses a clearly identified failure mode of existing approaches: BPA tackles codebook collapse from softmax assignment (validated via t-SNE visualization in Fig. 1 Right), APR addresses the train-test distribution gap under scarce data, and MNC enables cross-modal knowledge transfer without unreliable dense patch-to-patch alignment. The design follows a logical progression from intra-modal to cross-modal constraints.
+- **Consistent SOTA across multiple few-shot regimes and datasets.** On MVTec-3D-AD, PIRN beats INP-Former by +3.9, +3.7, +2.4 AUROC_I at 5/10/50 shots. On Eyecandies, gains are +3.6, +4.0, +2.2. Results also hold in the full-shot setting (0.963 vs. 0.954 CFM), showing the method is not narrowly tuned to few-shot.
 
-- **Strong computational efficiency**: Table 4 shows PIRN achieves the best AUROC_I (0.922) on 10-shot MVTec-3D-AD while requiring only 103.36G FLOPs and 17.49ms latency — ~85% fewer FLOPs and 4.35× faster than FIND, the previous SOTA. This makes the method genuinely practical for deployment.
+- **Exceptional computational efficiency.** Tab. 4 shows PIRN achieves the best AUROC_I (0.922) with 103.36G FLOPs and 17.49ms latency — 85% fewer FLOPs and 4.35× faster than FIND (728.46G, 76.09ms). This is a genuine practical contribution.
 
-- **Thorough ablation coverage**: The paper evaluates prototype count (Table 5), decoder depth (Table 6), token aggregation strategies in APR (Table 7), prototype assignment methods (Table 9), and backbone variants (Table 10), providing reasonable evidence for most design choices.
-
-- **Generalization to real-world data**: On the challenging Real-IAD D3 benchmark (Table 8), PIRN achieves best pixel-level localization (AUROC_P 0.961) using only two modalities, outperforming tri-modal methods in several categories.
-
-- **Complementary modality analysis**: Table 3 shows surface normals outperform RGB alone, and the fusion gain is largest at 5-shot (where individual modalities are most starved), directly supporting the paper's claim that cross-modal communication matters most under extreme data scarcity.
+- **Thorough ablation and analysis.** The paper systematically ablates each component (Tab. 2), prototype count (Tab. 5), decoder depth (Tab. 6), backbone choice (Tab. 10), and prototype assignment variants (Tab. 9). The feature displacement visualization (Fig. 4) provides interpretable evidence that the information bottleneck works as intended.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **FIND omitted from main benchmark tables**. FIND (Li et al., 2025) is the most directly comparable recent few-shot multimodal method and is acknowledged as SOTA. It appears only in the efficiency table (Table 4, one shot setting), not in the main results (Table 1, all shot settings) or Real-IAD (Table 8). Table 4 does show PIRN edges FIND (0.922 vs 0.921) on 10-shot MVTec-3D-AD, which partially mitigates the concern. However, the absence of FIND across the full range of shot settings and on Eyecandies means the paper does not fully establish its margin over the most relevant competitor. This can be addressed in rebuttal.
+- **APR and MNC contributions are incremental relative to BPA, but the paper's framing implies they are on par.** The ablation (Tab. 2) shows: BPA alone contributes +5.5 AUROC_I (0.828 → 0.883), adding APR yields +3.3 (0.883 → 0.916), and adding MNC yields +0.6 (0.916 → 0.922). Tab. 7 further shows that the OT-based aggregation in APR is only 0.1 points better than top-k averaging (0.922 vs. 0.921). The paper's narrative treats all three modules as co-equal innovations, but the evidence shows BPA is doing the heavy lifting while APR and MNC are marginal improvements. This overclaiming needs to be corrected.
+
+- **No standard deviations reported for any experiment.** This is particularly concerning in the few-shot setting (5-shot, 10-shot) where variance across random seeds is expected to be high. Without variance estimates, it is impossible to determine whether the reported gains over baselines (e.g., +3.7 AUROC_I on 10-shot MVTec-3D-AD) are statistically significant. This is a standard reporting requirement that should have been included.
 
 ### Minor
 
-- **No variance reporting in few-shot experiments**. The few-shot protocol involves random selection of a small number of normal training samples, yet no standard deviations, confidence intervals, or number of random seeds are reported. While many papers in this subfield similarly omit variance, the very small gains in some ablations (e.g., APR contributing +0.006 AUROC_I in Table 2; balanced OT vs top-k only +0.001 in Table 7) would benefit from statistical context. This does not invalidate the main results but weakens confidence in marginal improvements.
+- **APR's robustness to anomalous context is claimed but not directly validated.** The paper argues that OT assigns "negligible mass" to anomalous patches and that the GRU gate closes on unreliable context. However, no analysis of GRU gate values on anomalous vs. normal patches is provided. The claim in Appendix C.2 that OT assigns "negligible mass" is also oversimplified: the balanced OT constraint forces each patch's total mass to be distributed across prototypes, so an anomalous patch's mass is spread diffusely rather than being zero. This does not invalidate APR (the per-prototype contribution from an anomalous patch is small due to diffuse assignment), but the paper's wording overstates the protective mechanism. A simple visualization of gate values per patch type would resolve this.
 
-- **Ablation table (Table 2) does not cleanly isolate each component**. The table reports only 5 of 8 possible factorial combinations for the three binary components. Crucially, the row for {BPA=✓, APR=✓, MNC=✗} is absent, making it impossible to directly read off MNC's contribution over a model that already has both BPA and APR. The paper's textual claim that "removing each component from the full model results in a consistent performance drop" cannot be verified from the table as presented. A full 2³ factorial ablation would strengthen the paper substantially.
+- **MNC's complexity is not proportional to its benefit.** The cross-modal graph attention (GAT) + cross-attention pipeline adds significant complexity, yet removing MNC from the full model only drops AUROC_I by 0.6 points (0.922 → 0.916). An ablation separating GAT alignment (Stage 1) from cross-attention injection (Stage 2) would clarify whether both stages are needed.
 
-- **APR's gating against anomalous context is not quantitatively validated**. The paper argues that the GRU update gate prevents prototype corruption by anomalous patches, and Appendix B.1 describes the mechanism. However, there is no ablation comparing the GRU-based update against a simpler non-gated alternative (e.g., weighted average), and no experiment measuring prototype drift under anomalous inputs. The qualitative evidence (Fig. 6) is suggestive but not conclusive. This remains a design claim rather than an empirically demonstrated property.
-
-- **No failure case discussion**. The paper presents only successful detection examples. A discussion of where PIRN still fails — e.g., anomaly types that are well-reconstructed by the prototypes, categories where performance is below baselines — would delineate the method's limitations and better serve the community.
+- **APR's OT solve appears redundant with BPA's.** Both APR and BPA solve the same balanced OT problem between the same patch tokens and prototypes (Eq. 1). APR uses column-normalized weights, BPA uses row-normalized weights. The paper could compute both from a single OT plan, avoiding a second Sinkhorn iteration. This would improve the already-impressive efficiency further.
 
 ### Trivial
 
-- **Missing hyperparameter details for MNC components**: the number of KNN neighbors for the graph, number of GAT heads, and whether prototypes are ℓ₂-normalized before graph construction are not specified. The Sinkhorn entropic regularization strength ε is mentioned conceptually but its value is never stated.
-
-- **The gating scalars g_rgb, g_sn introduced in Eq. (4)**: their final learned values across layers are not reported. While the paper's claim does not hinge on these values, reporting them would help readers understand the MNC module's behavior.
+- The "first multimodal AD framework to integrate a vector-quantized prototype codebook into a ViT encoder–decoder architecture" claim (line 191) is a narrow qualification that should be softened or removed — it adds little and invites dispute.
 
 ## Nice-to-Haves
 
-- A comparison of MNC with a simpler alternative (e.g., cross-attention without the graph-alignment stage, or direct prototype concatenation) would strengthen the claim that the two-stage design is necessary.
-- Reporting learned gating values across layers would help verify that the MNC module is actively contributing rather than being gated to near-zero.
-- Extending FIND to Table 1 and Table 8 across all shot settings would fully close the comparison gap.
-- Measuring prototype drift under controlled anomalous inputs would convert the APR robustness claim from design intent to empirically validated property.
+- Show a few failure cases (false positives, missed anomalies) to establish honest limitations.
+- Report results over 3-5 random seeds for few-shot settings.
+- Ablate the GAT-based prototype alignment (Stage 1 of MNC) vs. cross-attention alone.
+- Consider deriving APR's context vectors from BPA's transport plan to avoid redundant OT solves.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+The following criticisms from the harsh critic are removed because they are invalid or factually wrong:
 
-- **"MNC contributes negligibly (+0.006)"**: This claim from the harsh critic compares the {BPA=✗, APR=✓, MNC=✗} row (0.916) to the full model {BPA=✓, APR=✓, MNC=✓} (0.922). The +0.006 difference conflates the addition of both BPA and MNC, not MNC alone. This is a misreading of Table 2 and does not reflect the paper's actual ablation. **Removed.**
+1. **"APR is circular — requires knowing which patches are normal, which is what the system detects."** Removed because the mechanism does not require hard knowledge of normality. OT-based soft assignment naturally downweights patches with low affinity to all prototypes, and the GRU provides additional gating. This is a standard soft-attention mechanism, not a circular dependency.
 
-- **"GRU training not described"**: The paper states (line 425) that PIRN is trained end-to-end with an intra-modal reconstruction loss, and Appendix B.1 provides the full GRU equations and gating mechanism description. The training regime is adequately described. **Removed.**
+2. **"Model capacity advantage confounds results."** Removed because the paper already includes controlled baselines using the same architecture with softmax attention (Tab. 9: 0.832) and the "w/o all modules" baseline (0.828). These serve exactly as the capacity-controlled baselines the critic demands.
 
-- **"Gating scalars could simply be zero, making MNC inactive"**: Pure speculation without evidence. The paper reports that MNC contributes to performance; if the gates were zero, MNC would have no effect and the ablation would not show any difference. **Removed.**
+3. **"The OT cost function in APR is identical to BPA, so APR has no additional mechanism."** Removed because using the same OT plan for different purposes (row-normalized for reconstruction, column-normalized for context aggregation) is perfectly sensible. Tab. 7 validates that the OT-based context aggregation outperforms alternatives.
 
-- **"Figure 1 (left) misleadingly plots PIRN's performance"**: I cannot verify the figure's content from the extracted text alone. The paper text describes it as a comparison with SOTA methods on the Eyecandies dataset. This is an unverifiable visual critique. **Removed.**
+4. **"D3M outperforms PIRN on Real-IAD D3, undermining claims."** Removed because the paper explicitly acknowledges D3M uses 3 modalities while PIRN uses 2, and contextualizes the comparison honestly. PIRN actually achieves better localization (AUROC_P 0.961 vs. 0.937).
 
-- **Strength finder: "MNC provides the largest cross-modal benefit (0.922 to 0.867 drop)"**: The claimed drop conflates MNC removal with BPA removal in Table 2. The actual isolated contribution of MNC cannot be cleanly read from the table as presented. This specific numeric claim is unreliable. **Removed.**
+5. **"FIND FLOPs comparison is suspicious."** Removed because it is speculation without evidence. FLOPs and latency for FIND are reportable metrics that could come from the cited paper or measurement.
 
-- **Strength finder: "APR enables robust test-time adaptation" with +0.006 gain**: The +0.006 gain is small and the Table 2 reading conflates components. While APR has qualitative support (Fig. 4, 6), the quantitative evidence is ambiguous. **Weakened in main review.**
+6. **"The balanced OT constraint forces mass from anomalous patches onto prototypes."** Removed as a fatal criticism but noted as a minor overclaim (see Minor weaknesses above). The critic's mathematical objection confuses row constraints (for BPA) with column-normalized context aggregation (for APR). Anomalous patches contribute small per-prototype weight due to diffuse assignment.
+
+7. **Claims about missing citations or prior work.** Removed per the rules: unverifiable without external knowledge of the cited papers.
 
 ## Novel Insights
 
-The paper's most interesting empirical finding is that surface-normal features alone substantially outperform RGB features for anomaly detection (0.879 vs 0.827 AUROC_I at 10-shot, Table 3), and that the cross-modal fusion gain is inversely proportional to the amount of training data — largest at 5-shot where individual modalities suffer most from underrepresentation. This suggests prototype-level cross-modal knowledge transfer is not merely additive but serves a compensatory role when per-modality coverage is thin, a dynamic that goes beyond simple late fusion. This pattern, if robust, has implications for when multimodal architectures are truly worth their added complexity in data-scarce regimes.
+Beyond the paper's own contributions, the most interesting finding is the dramatic asymmetry in modular contributions: BPA alone accounts for ~5.5 points of gain, while APR and MNC together contribute only ~3.9 points, with MNC alone contributing only 0.6 points. This suggests that for few-shot MAD, preventing codebook collapse via balanced assignment is far more critical than adaptive refinement or cross-modal communication. The paper's framing does not reflect this hierarchy, which is arguably more informative for future work than the uniform "three innovations" narrative.
 
 ## Suggestions
 
-- Add FIND to Table 1 (all shot settings) and Table 8. This is the highest-impact change the authors can make and is feasible within a rebuttal period.
-- Report at minimum the standard deviation over 3–5 random seeds for the few-shot settings, at least for the final model and the strongest baseline.
-- Present a complete 2³ ablation in Table 2 showing all eight {BPA, APR, MNC} combinations, or clearly state which reference model is used for each "removal" comparison.
-- Include one quantitative experiment on APR robustness: e.g., inject synthetic anomalies into normal test images and measure prototype drift with vs. without the GRU gating, or ablate the GRU against a simple weighted-average update.
+1. Add standard deviations over multiple random seeds to all few-shot experiments. This is essential for credibility.
+2. Restructure the narrative to honestly reflect the relative contribution sizes: BPA is the primary contribution, APR is a helpful add-on, MNC is a nice but marginal extra.
+3. Add a simple analysis of GRU gate values on normal vs. anomalous patches during inference to validate the APR robustness claim.
+4. Report whether APR's OT plan can be reused from BPA's computation, avoiding duplicate Sinkhorn iterations.
 
 ## Score and Decision
 
-### Anchor comparison:
+**Calibration anchors** (from human-review corpus):
 
-| Path | Avg Score | Comparison to PIRN |
-|------|-----------|---------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/Mam9PS8ENb.md` (UIP-AD) | 4.00 | Similar topic (multimodal AD with prototypes) but weaker: missing core ablations, missing baselines, rejected. PIRN has substantially more thorough experiments and clearer contributions. |
-| `/home/wg25r/review_agent/human_reviews_2026/iO9CRytDvf.md` (DPNR) | 2.00 | Very weak prototype-based AD paper with factual errors and missing results. PIRN is far stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/tRO6G20Qba.md` (D²4FAD) | 5.00 | Few-shot anomaly detection (medical). Accept poster. PIRN has more architectural novelty, more benchmarks, and better ablations. |
-| `/home/wg25r/review_agent/human_reviews_2026/ny5Jrfhy61.md` (TokenCLIP) | 5.50 | Zero-shot AD with OT. Strong results but rejected due to unclear OT mechanism and missing sensitivity analysis. PIRN is more complete experimentally. |
-| `/home/wg25r/review_agent/human_reviews_2026/fNFbGqu6Rg.md` (MindTS) | 5.50 | Multimodal time series AD. Accept poster. PIRN has comparable novelty and better efficiency analysis. |
-| `/home/wg25r/review_agent/human_reviews_2026/YRrlJ8oVEH.md` (FoundAD) | 6.00 | Few-shot AD with foundation encoders. Accept poster. Simple but effective. PIRN has more methodological depth (3 novel components vs 1), multimodal scope, and comparable empirical strength. |
-| `/home/wg25r/review_agent/human_reviews_2026/yKDqg9HwZX.md` (MetaEmbed) | 7.00 | Multimodal retrieval. Accept oral. Different subfield, not directly comparable. |
+| Anchor Path | Avg Score | Comparison to PIRN |
+|---|---|---|
+| `/home/.../YRrlJ8oVEH.md` (FoundAD) | 6.00 | FoundAD is simpler but less thorough; PIRN has stronger ablations and multimodal scope. Comparable quality. |
+| `/home/.../Mam9PS8ENb.md` (UIP-AD) | 4.00 | UIP-AD had missing ablations and weak credibility. PIRN is significantly more rigorous. |
+| `/home/.../iO9CRytDvf.md` (DPNR) | 2.00 | DPNR had factual errors and incomplete results. PIRN is far stronger. |
+| `/home/.../OXOGZxjCsN.md` (MAD) | 4.00 | MAD had saturated metrics and narrow validation. PIRN is more thoroughly evaluated. |
+| `/home/.../fNFbGqu6Rg.md` (MindTS) | 5.50 | Comparable thoroughness; PIRN has stronger relative gains on benchmarks. |
+| `/home/.../qqlWHIjJ24.md` (DCR²-AD) | 5.00 | DCR²-AD had overclaiming issues similar to PIRN but weaker empirical grounding. |
+| `/home/.../AAT3rwlR4r.md` (TAD-UP) | 6.00 | Similar score range; PIRN compares favorably in experimental thoroughness. |
 
-PIRN is clearly stronger than the 4.0–5.5 band (UIP-AD, DPNR, D²4FAD, TokenCLIP, MindTS). It is comparable to FoundAD (6.0) in empirical rigor and exceeds it in methodological novelty and multimodal scope, but has a notable weakness (FIND omission from main tables) that FoundAD did not have in its baseline coverage. PIRN does not reach the 7.0 band represented by MetaEmbed (oral-quality work in a different subfield with stronger theoretical grounding). I place PIRN at **6.0**, consistent with a solid accept (poster) — strong, well-executed work with addressable weaknesses.
+PIRN is a well-executed paper with a clear contribution (BPA) and thorough empirical validation. The main weaknesses are overclaiming on APR/MNC and missing variance estimates — real issues but not fatal. The paper sits above the typical reject-range papers (3-4) in this space and is comparable in quality to accepted poster-level papers (5.5-6.5). I calibrate the score relative to FoundAD (6.00, accept) and MindTS (5.50, accept) as lower anchors and UIP-AD (4.00, reject) as a floor — PIRN clearly exceeds the reject-level papers in this topic area.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

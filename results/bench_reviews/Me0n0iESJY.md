@@ -1,108 +1,90 @@
-Now I have all the information needed. Let me write the final consolidated review.
-
----
+Now I have enough calibration data. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces a model merging benchmark for Multimodal LLMs that categorizes five capabilities (VQA, Geometry, Chart, OCR, Grounding) and explores merging across modalities (vision, audio, video). The authors also propose **OptMerge**, a method that applies SVD-based low-rank approximation to denoise task vectors and uses SGD with centroid initialization to stabilize merged-vector optimization. Experiments on InternVL2.5 and Qwen2-VL show OptMerge consistently outperforms 10 merging baselines, and the merged model can approach or exceed mixture training while requiring dramatically less GPU memory and time for the merge step. All checkpoints and code are publicly released.
+This paper introduces OptMerge, a model merging method for Multimodal LLMs, along with a benchmark that divides MLLM capabilities into five categories (VQA, Geometry, Chart, OCR, Grounding) across two architectures (InternVL2.5 full fine-tuning and Qwen2-VL LoRA). The method combines SVD-based task vector denoising with robust optimization (SGD + mean initialization) to improve upon prior merging techniques. The paper further explores modality merging (vision+audio+video) and evaluates on real Hugging Face checkpoints. The core claim is that model merging can closely match or outperform mixture training at dramatically lower computational cost.
 
 ## Strengths
 
-- **Comprehensive MLLM merging benchmark with capability categorization.** The benchmark covers five distinct capabilities with at least 100k training samples each (Table 1), carefully selected evaluation suites (e.g., MathVista, ChartQA, TextVQA, RefCOCO), and is evaluated using unified toolkits (VLMEvalKit, LMMs-Eval). This fills a genuine gap: prior work either merges only two models (AdaMMS) or treats each dataset as an independent task without capability grouping (UQ-Merge).
+- **Comprehensive, purpose-built benchmark for MLLM merging.** The paper collects and releases fine-tuned checkpoints across five distinct capability categories with standardized evaluation protocols, covering both full fine-tuning (InternVL2.5) and LoRA (Qwen2-VL) scenarios. This fills a genuine gap — prior work (AdaMMS, UQ-Merge) either only merges two models or lacks capability categorization. The scale (100k+ samples per task, two architectures) makes this a useful community resource.
 
-- **Cross-architecture and cross-paradigm evaluation.** Testing on both InternVL2.5 (full fine-tuning) and Qwen2-VL (LoRA fine-tuning) reveals meaningful differences in task vector distributions (Figure 2) and merging behavior — for instance, Iso-C works on full FT models but collapses on LoRA models. This breadth makes the benchmark immediately useful.
+- **Extensive baseline coverage and thorough evaluation.** Ten merging methods are compared under consistent settings across multiple dimensions: capability merging (Tables 2-3), modality merging (Table 5), real Hugging Face checkpoints (Table 6), larger model scales (Table 9), and general QA benchmarks (Table 10). The consistency of OptMerge's results across such diverse settings — achieving best or near-best average performance in nearly every table — demonstrates genuine robustness.
 
-- **Modality merging experiments (Table 5).** Merging vision-language, audio-language, and video-language models into a single model is a valuable direction beyond same-modality capability merging. OptMerge achieves 67.00 avg vs. 65.38 for Task Arithmetic, and as a static merge (one model) it is competitive with online composition methods that require 3× parameter storage.
+- **Dramatic computational savings are clearly quantified.** Table 7 shows OptMerge requires 3.78 GPU-hours and 21.97 GB memory vs. 24.56 hours and 256 GB for data mixing. Even if the accuracy is comparable rather than superior, this efficiency gain alone is a meaningful practical contribution.
 
-- **Practical validation on community-released Hugging Face checkpoints (Table 6).** Testing on independently fine-tuned models (math reasoning, OCR, Vietnamese VQA, Pokemon domain) demonstrates that OptMerge works outside controlled benchmark settings, supporting decentralized development.
-
-- **Consistent empirical gains across scales.** OptMerge achieves best or second-best average across nearly all settings: 57.44 on InternVL2.5-1B (Table 2), 63.30 on Qwen2-VL-7B (Table 3), 66.70 on Hugging Face models (Table 6), and 72.52 on Qwen2.5-VL-32B (Table 9, +1.56 over next-best individual model). The ablation study (Table 4) cleanly decomposes contributions: centroid initialization provides the largest boost (+4.43%), with low-rank approximation adding further gains.
-
-- **Released artifacts.** The paper provides all fine-tuned checkpoints, merging code, and evaluation scripts, which will accelerate follow-up work.
+- **Practical validation on community models.** The Hugging Face checkpoint experiment (Table 6) merges independently-developed models (GRPO math, Pokemon, PDF OCR, Vietnamese OCR) and shows OptMerge achieving the highest average score (66.70%). This validates real-world applicability beyond controlled laboratory settings.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None. The core contributions — the benchmark and the OptMerge method — are well-supported.
+- **The claim that model merging "can outperform mixture training" is misleading.** The one controlled experiment (InternVL2.5, Table 2) shows OptMerge at 57.44 vs. genuine mixture training at 57.66 — slightly *worse*. For Qwen2-VL (Table 3), the "mixture training" baseline is Qwen2-VL-Instruct, a separate model checkpoint with extensive prior SFT on undisclosed data — this is not a controlled comparison. The paper honestly discloses this asymmetry (lines 693-695), but the abstract (line 33) and conclusion (line 126-128) nevertheless assert superiority without acknowledging these caveats. The data does support "closely matches mixture training at a fraction of the cost," which is a strong enough claim on its own.
+
+- **The "2.48% average performance gain" is poorly specified.** The paper cites this number in the abstract and methodology contribution, but never clearly states what it is relative to (absolute percentage points? relative gain?), over what baseline (WUDI? over all baselines?), or across which experiments. The ablation table (Table 4) shows gains of 4.65% (Qwen2-VL, absolute points) and 2.35% (Vicuna-7B, absolute points), whose average is 3.50, not 2.48. This imprecision in reporting a headline number undermines trust in the paper's quantitative claims.
+
+- **Table 10 (general QA tasks) lacks merging baselines.** The paper compares OptMerge only against individual expert models on these benchmarks, not against other merging methods (Task Arithmetic, TIES, WUDI, etc.). The resulting 10.85% improvement over individual models is expected — any reasonable merging method should improve over a single-expert baseline. Without merging-method baselines, the claim of "emergent integrated capabilities" (line 878) is not properly supported.
+
+- **OptMerge's improvements over the strongest baselines are small.** On InternVL2.5 (Table 2), OptMerge averages 57.44 vs. WUDI's 57.00 — a 0.44 point gap. On the Hugging Face checkpoints (Table 6), OptMerge is 66.70 vs. TIES w/ DARE's 66.58 — essentially identical. On Qwen2-VL, OptMerge's 63.30 vs. TIES w/ DARE's 61.88 is the largest gap, but still modest. These incremental gains raise the question of whether the additional complexity of SVD + optimizer selection (applied only to linear layers with the rest averaged) is justified over simpler baselines.
 
 ### Minor
 
-- **Theoretical framework loosely connected to method.** Theorem 3.1 derives an upper bound on merged model loss involving cross-task interference (δ) and curvature (η²T²), which motivates controlling parameter drift during fine-tuning. However, OptMerge does not operationalize δ, ηT, or any bound-derived quantity. The theorem serves as qualitative motivation (≈ "don't fine-tune too aggressively") rather than directly deriving or validating the SVD truncation, SGD, or centroid initialization choices. The paper would be stronger if it either measured these quantities empirically or derived a more specific connection between the bound and OptMerge's design.
+- **Theorem 3.1 is disconnected from the OptMerge method.** The theorem provides a bound on merged loss in terms of convergence error, cross-task interference, and curvature, motivating why small η and T matter. However, OptMerge's specific components (SVD denoising, SGD vs. Adam, mean initialization) are not derived from or guided by this bound. The theorem could apply to *any* merging method and is used primarily to justify benchmark construction. The paper would benefit from either operationalizing the bound (e.g., predicting which layers benefit from denoising) or separating the theoretical motivation from the method contribution.
 
-- **Source of the "2.48% average performance gain" is unclear.** The abstract and contributions section cite this number prominently, but it is not traced to a specific table or calculation. Table 4 shows +4.65% for Qwen2-VL and +2.35% for Vicuna-7B over the WUDI baseline — neither matches 2.48%. Clarifying how this figure is computed (e.g., averaged across which settings) would improve transparency.
+- **The rank size k selection is ad hoc.** The paper sets k = rank_of_task_vector / 5 (line 650-651). While the ablation (Table 8) shows stability for 10-30% ratios, there is no principled criterion (e.g., cumulative explained variance threshold) for choosing k. This is a minor practical concern given the demonstrated robustness.
 
-- **Mixture training comparison framing could be more precise.** Table 7 reports merging time (3.78h) vs. mixture training time (24.56h), but the merging time excludes the cost of the 5 separate fine-tuning runs needed to produce the expert models. In the community model reuse scenario (Hugging Face, Table 6) this cost is already sunk and the comparison is valid. In the "from scratch" scenario, total cost is 5 × fine-tuning + merging, which should be acknowledged. The paper already uses appropriately hedged language ("closely match or even surpass," "potentially surpasses") and the numbers do show near-parity, so this is a presentation issue rather than a claim validity problem.
-
-- **No variance estimates across seeds.** The paper reports single-run results without standard deviations or confidence intervals. While single-run evaluation is standard practice in the model merging literature (none of the competing baselines originally reported variance either), reporting at least 2-3 seeds for the main result would strengthen confidence in the small-margin comparisons (e.g., OptMerge 57.44 vs. TSV 57.00 in Table 2).
-
-- **General benchmark evaluation (Table 10) compares only against individual specialists, not against other merging methods.** Showing that OptMerge's merged model outperforms individual specialists on MMMU, DocVQA, ScienceQA, AI2D, and InfographicVQA is valuable, but evaluating at least the top 2-3 competing merging methods on these same benchmarks would clarify whether this integrated-capability benefit is unique to OptMerge or a general property of model merging.
+- **No analysis of failure cases or when OptMerge underperforms.** The limitations section (D.2) acknowledges resource constraints and data quality, but does not analyze when merging fails — e.g., when task vectors have large norms or strong directional conflicts. Providing even one concrete failure case would strengthen the paper's scientific rigor.
 
 ### Trivial
 
-- The paper claims "outperforms online composition methods" for modality merging (Table 5), but the margins against NaiveMC (66.88) and DAMC (66.79) are 0.12-0.21 points — essentially tied. The language should reflect this. Note that OptMerge has the structural advantage of being a static merge (single model) vs. online composition requiring separate storage per modality.
+- The 2.48% number should be clearly defined with the reference baseline and whether it is absolute or relative improvement.
+- No statistical significance or variance is reported, though this is standard practice for large-scale model merging evaluations in this field.
 
 ## Nice-to-Haves
 
-- **Failure mode analysis.** The benchmark exposes interesting failure cases (e.g., Iso-C collapsing on LoRA, some task pairs degrading more than others). A deeper analysis of *which* capability pairs conflict most and why would provide valuable insight beyond method comparison.
-
-- **Scaling to more tasks/modalities.** The benchmark has 5 capabilities and 3 modalities. How does performance degrade as more tasks are added? These scaling curves would strengthen the paper's claim about model merging as a scalable approach.
-
-- **Task vector interference visualization.** Showing pairwise cosine similarity matrices between task vectors before and after OptMerge's denoising would make the method's mechanism more intuitive.
+- A controlled mixture training experiment on Qwen2-VL-Base (training on the same task-specific data) would cleanly resolve the "outperforms mixture training" claim.
+- Including merging baselines in Table 10 would substantially strengthen the "emergent integrated capabilities" claim.
+- Visualizing the task vector cosine similarity matrix (as suggested by Theorem 3.1's assumptions) would help explain why certain methods work better on these specific benchmarks.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
-
-- **"Overclaiming surpasses mixture training with an invalid comparison."** REMOVED because the paper does *not* overclaim. The language is carefully hedged ("closely match or even surpass," "potentially surpasses"). In Table 2, OptMerge (57.44) is slightly *below* mixture (57.66) — the paper reports this honestly and uses "closely match." In Table 3, OptMerge (63.30) does surpass Qwen2-VL-Instruct (62.23) which is used as the upper bound. The claim as stated is accurate.
-
-- **"DARE drop rate and TIES density not discussed."** REMOVED because these are standard defaults from the original papers. The paper states it follows standard practice with λ grid search over [0.1, 0.3, 0.5, 0.7, 1.0, 1.5] for all methods — this is the established protocol from Task Arithmetic and subsequent work. OptMerge's additional hyperparameters (rank k, learning rate, optimizer) are fully disclosed, and k is set by a simple formula (rank / number of tasks), not tuned per-setting.
-
-- **"The paper never uses Theorem 3.1 to derive OptMerge."** Partially removed as a standalone fatal criticism. The theorem does inform the benchmark design (small learning rates, conservative fine-tuning) as stated in Section 3.2. The connection is loose but not absent. Retained as a minor weakness above.
-
-- **"Weight Averaging being competitive (60.55) suggests limited task vector conflict, reducing practical significance."** REMOVED. Weight Averaging performs reasonably well on Qwen2-VL (LoRA) because LoRA task vectors are already low-rank and have smaller magnitude, but it is substantially worse on InternVL2.5 (49.12 vs. OptMerge 57.44). The benchmark's difficulty is heterogeneous — some settings are harder than others, which is a feature, not a bug.
-
-- **"Qwen2-VL-Instruct as upper bound is unclear because models are fine-tuned by different groups."** REMOVED. The paper explicitly states Qwen2-VL-Instruct is used as an upper bound because it was trained on extensive diverse SFT data, making it a reasonable proxy for the best achievable multi-task performance on this architecture.
-
-- **"Substituting ΣV^T for x is unclear / not justified."** REMOVED as a standalone criticism calling the method invalid. The paper provides explicit justification: the SVD-truncated version discards secondary row space information while preserving column feature space (principal components), yielding "more accurate estimates of x_i,l than using τ_i,l^T" (lines 551-556). Whether this argument is fully convincing is debatable, but the paper does provide reasoning, and the empirical results support it.
-
-- **"SGD mechanism not fully explained."** REMOVED as a demand for theoretical proof of an empirical observation. The paper provides an empirical observation (Figure 3: Adam leads to magnitude shortcuts) and a grounded explanation (SGD provides implicit regularization, better escapes flat local optima in null-space directions). This is a reasonable level of explanation for an empirical systems paper.
+- **"OptMerge and TIES w/ DARE are tied at 63.30 on Qwen2-VL"** — Factually incorrect. From Table 3, OptMerge achieves 63.30, TIES w/ DARE achieves 61.88. The critic misread the table.
+- **"AdaMMS and UQ-Merge already propose benchmarks for MLLM merging"** — The paper explicitly addresses this and distinguishes its contribution (fine-grained capability categorization, multi-model merging). The "first" claim is qualified appropriately.
+- **"Modality merging experiment lacks a joint-training baseline"** — This demands the paper solve a different problem (joint training) that contradicts its "data-free" framing. The comparisons against individual modalities and online composing methods (NaiveMC, DAMC) are appropriate for the scope.
+- **Various formatting/style nitpicks from the reviewer** — These are parser artifacts or trivial presentation issues.
 
 ## Novel Insights
 
-The paper's most interesting insight is that **model merging can integrate capabilities in a way that produces emergent multi-task competence beyond any individual expert** (Table 10). The merged model outperforms every individual specialist on general QA benchmarks (MMMU, DocVQA, ScienceQA, AI2D, InfographicVQA) by an average of 10.85%, suggesting that the complementary knowledge from different capabilities synergizes rather than merely summing. This goes beyond the standard "merged model ≈ average of experts" finding and hints at genuine knowledge integration. A second useful insight is the demonstration that merging behavior differs fundamentally between full fine-tuning and LoRA — Iso-C works on full FT but collapses on LoRA — which has practical implications for anyone building on LoRA-tuned community models.
+None beyond the paper's own contributions. The reviews do not surface a novel perspective or synthesis that the paper's authors have missed.
 
 ## Suggestions
 
-- Clarify how the 2.48% average gain is computed (which settings, against which baselines) or replace it with per-setting gains that are directly traceable to tables.
-- In Table 7, add a footnote clarifying that the merging time excludes the cost of individual fine-tuning, and note that in the Hugging Face reuse scenario this cost is already amortized.
-- Tone down the "outperforms online composition" language for modality merging, since the margin is negligible; instead highlight OptMerge's structural advantage (single model vs. 3× storage).
-- Consider reporting results for at least 2 random seeds on the main benchmark to address variance concerns, or cite precedent from the model merging literature establishing single-run evaluation as standard.
+1. **Reframe the core claim.** Replace "model merging can outperform mixture training" with "model merging closely matches mixture training at a fraction of the computational cost" — this is equally impactful and factually supported by the evidence (Tables 2, 3, and 7).
 
----
+2. **Run the controlled Qwen2-VL-Base mixture training experiment.** This single experiment would either validate or retire the paper's strongest claim and could be done relatively cheaply given the infrastructure already in place.
 
-## Score Calibration
+3. **Add merging baselines to Table 10.** Include at least Task Arithmetic, TIES, and WUDI so the "emergent integrated capabilities" claim can be properly benchmarked.
 
-Anchor papers retrieved and compared:
+## Score and Decision
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| Expert Merging (`Awf3ebMpKw`) | 5.00 (Accept Poster) | Similar MLLM merging scope; requires unlabeled calibration data vs this paper's data-free approach; weaker benchmark contribution |
-| AdaRank (`fTygcJVOni`) | 4.50 (Accept Poster) | SVD-based merging method, vision/language only; no MLLM benchmark; narrower scope |
-| Learn to Merge (`NYUxN6plEh`) | 4.50 (Reject) | Meta-learning for merging coefficients; method-focused, no MLLM benchmark |
-| PAVE (`IBRldWTC3F`) | 4.00 (Reject) | SVD-based task vector purification; requires training data access |
-| Subspace Boosting (`0Rn9oMU6g9`) | 3.50 (Reject) | SVD-based merging; training-free but vision/language only; no MLLM benchmark |
-| Mixup Model Merge (`HZ0YvjVzpj`) | 3.50 (Withdrawn/Reject) | Simple interpolation; limited to 2 models |
-| Model Merging Scaling Laws (`vpKXTmMtBQ`) | 5.50 (Reject) | Strong empirical contribution with scaling law; rejected for limited practical implications |
-| Is Extending Modality (`nsMow1yhEE`) | 3.50 (Reject) | Related modality merging investigation; limited novelty |
+**Calibration anchor comparison:**
 
-The current paper is stronger than Expert Merging (5.00) because: (a) it provides a more comprehensive benchmark with released artifacts, (b) OptMerge is data-free (no calibration data needed), and (c) it covers modality merging in addition to capability merging. It is comparable to Model Merging Scaling Laws (5.50) in empirical contribution quality — the scaling laws paper was rejected for limited practical implications while this paper has clearer practical value through the benchmark and method. The paper's weaknesses (loose theory connection, no variance estimates, Table 10 missing method comparisons) are real but do not undermine the core benchmark + method contributions. The benchmark alone is a substantial community resource.
+| Anchor Paper | Avg Score | Comparison to This Paper |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/nsmow1yhEE.md` — "Is Extending Modality The Right Path..." | 3.50 | Weaker: that paper was a descriptive study without a novel method or benchmark. This paper has a concrete method and benchmark, making it stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/fObtmKj0Ok.md` — "Model Merging Beyond Image Classification" | 3.60 | Similar tier: both have genuine contributions but limited scope and oversold claims. This paper's benchmark is more comprehensive. |
+| `/home/wg25r/review_agent/human_reviews_2026/IBRldWTC3F.md` — "Purifying Task Vectors (PAVE)" | 4.00 | Closely comparable: both propose task-vector denoising for merging with modest improvements. This paper has a broader evaluation and benchmark. |
+| `/home/wg25r/review_agent/human_reviews_2026/y0gom847Oy.md` — "Gram-weighted Mahalanobis Fréchet Mean" | 5.33 | Stronger: cleaner theoretical framing, hyperparameter-free advantage. This paper's theory is less connected to the method. |
+| `/home/wg25r/review_agent/human_reviews_2026/awyJs71tE7.md` — "FlexMerge" | 5.00 | Stronger: more novel framework (accuracy-size tradeoff), clearer contribution, accepted. |
+| `/home/wg25r/review_agent/human_reviews_2026/NYUxN6plEh.md` — "Learn to Merge" | 4.50 | Similar tier: both propose merging methods with thorough experiments but marginal gains and oversold claims. |
+| `/home/wg25r/review_agent/human_reviews_2026/HZ0YvjVzpj.md` — "Mixup Model Merge" | 3.50 | Weaker: simpler method, less evidence. This paper is more comprehensive. |
+| `/home/wg25r/review_agent/human_reviews_2026/SKtC3JTCyr.md` — "Variational Model Merging" | 5.00 | Stronger: cleaner theoretical framing, accepted-level work. |
+| `/home/wg25r/review_agent/human_reviews_2026/Awf3ebMpKw.md` — "Expert Merging" | 5.00 | Stronger: training-light with calibration data, accepted poster. |
 
-**Score: 6.0, Accept (Poster)**
+This paper's profile most closely matches PAVE (4.00) and Learn to Merge (4.50). It has a genuine benchmark contribution that distinguishes it from purely method-focused papers, but its central claims are overstated relative to the evidence, and the method's improvements are small. The benchmark contribution is real but does not rescue the paper from its overclaiming.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Final score: 4.5**
+
+The paper has a solid benchmark contribution and the computational efficiency angle is genuinely useful. However, the headline claims about outperforming mixture training are not supported by the controlled experiment, the 2.48% gain is poorly defined, key baselines are missing from Table 10, and the method's improvements over strong baselines are marginal. These issues could be addressed with major revisions (reframing claims, adding controlled experiments), but the paper as submitted does not adequately support its central arguments.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

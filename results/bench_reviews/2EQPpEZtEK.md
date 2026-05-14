@@ -1,107 +1,101 @@
-Now I have all the information I need. Let me write the consolidated review.
-
----
+Now I have all the calibration material I need. Let me write the consolidated review.
 
 ## Summary
 
-DiSTAR proposes a zero-shot TTS framework that couples an autoregressive language model (serving as a patch-level "sketcher") with a masked-diffusion model (serving as a parallel "infiller"), operating entirely in a discrete RVQ code space. The design eliminates the need for duration predictors or forced alignment and introduces practical inference-time controllability via RVQ layer pruning and decoding heuristics. Experiments on LibriSpeech-PC and SeedTTS benchmarks show strong WER, speaker similarity, and subjective quality, with a relatively compact model (0.15B–0.3B parameters).
+DISTAR proposes a zero-shot text-to-speech framework that operates entirely in the discrete RVQ code space, coupling an autoregressive language model (for drafting patch-level tokens) with a masked diffusion transformer (for intra-patch parallel infilling). The approach builds on the patch-wise factorization of DiTAR but replaces continuous diffusion with discrete masked diffusion (inspired by LLaDA), and is evaluated on LibriSpeech-PC and Seed-TTS benchmarks against strong baselines including DiTAR, F5TTS, E2TTS, and IndexTTS.
 
 ## Strengths
 
-- **Clean architectural unification.** Pairing an AR sketcher with a masked-diffusion infiller in a shared discrete RVQ code space is conceptually elegant. The design naturally handles both long-range coherence (via autoregressive patches) and intra-patch parallelism (via discrete masked diffusion), without forced alignment or a duration predictor. This genuinely simplifies the TTS pipeline compared to cascaded or multi-stage alternatives.
+- **Strongest WER among compared systems.** DISTAR-medium achieves 1.66% WER on LibriSpeech test-clean (beating the human baseline of 1.80%) and 1.32% on Seed-TTS test-en — the best reported among all baselines in Table 1, including F5TTS (2.02%), DiTAR (2.39%), and IndexTTS (2.57%). These WER improvements are substantial in absolute terms (0.73% absolute / ~30% relative over DiTAR) and are not "tiny" as one reviewer claimed.
 
-- **Strong WER and speaker similarity across benchmarks.** On LibriSpeech-PC test-clean, DiSTAR-medium achieves 1.66% WER and 0.67 SIM; on SeedTTS test-en, 1.32% WER and 0.66 SIM (Table 1). These are the best WER numbers among all compared systems. Subjective evaluation (Table 2) shows CMOS of 0.22 and SMOS of 3.31, also leading all competitors.
+- **Practical engineering contributions that work.** The RVQ-specific decoding heuristics (layer-wise temperature shaping, position-wise temperature shaping, hybrid sampling) are well-motivated by the observed "tail-first bias" and Table 3 shows they yield measurable gains: greedy decoding with temperature shaping achieves 1.91% WER vs 2.11% for uniform sampling. The embedding transplantation trick for initializing from codebook vectors is a useful practical idea for stabilizing training.
 
-- **Practical inference-time controllability without retraining.** Stochastic layer truncation during training (randomly dropping upper RVQ layers) enables test-time bitrate/compute control by simply pruning RVQ layers. Figure 2 shows a smooth speaker-similarity vs. compute trade-off, with WER remaining stable. This is a well-executed practical feature.
+- **Inference-time RVQ layer pruning without retraining.** Enabled by stochastic layer truncation during training, DISTAR supports variable bitrate and controllable compute at test time. Figure 2 demonstrates a monotonic quality improvement as more RVQ layers are retained, with WER stabilizing around 6 layers while SIM continues to improve — a genuinely useful capability for deployment under latency/bandwidth constraints.
 
-- **Healthy scaling behavior with modest model size.** DiSTAR-base (0.15B) already outperforms larger baselines like IndexTTS (0.5B) and DiTAR (0.6B) on WER, and scaling to 0.3B improves all metrics (Table 1).
+- **Strong results under purely greedy decoding.** DISTAR achieves competitive WER (1.91%) under fully deterministic greedy decoding (Table 3), demonstrating inherent robustness that reduces sensitivity to sampling hyperparameters. This is a practical advantage over systems that require careful stochastic sampling for acceptable quality.
 
-- **Reasonable ablation breadth.** The paper ablates decoding strategies (Table 3), CFG configurations (Table 5), and patch size (Table 6), providing evidence that design choices matter.
+- **Scaling behavior is consistent and well-documented.** DISTAR-medium (0.3B) improves over DISTAR-base (0.15B) on all metrics and both benchmarks, validating that the architecture scales positively with model capacity. The patch-size ablation (Table 6) provides clear design guidance: P=4 achieves best WER (1.85%) and UTMOS (4.33), while P=2 suffers from insufficient context (4.50% WER).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Uncontrolled baseline comparisons weaken the SOTA claim.** The main Table 1 draws DiTAR results from the original paper (marked ♦) without re-running under the same codec, training data, or evaluation pipeline. DiTAR uses a different codec (continuous) and different training data; IndexTTS, E2TTS, and F5TTS each have their own codec/data/eval setups. While cross-paper comparison is common in TTS, the paper's central claim of surpassing these systems cannot be rigorously attributed to the proposed method versus differences in codec quality, dataset scale, or evaluation software. The subjective evaluation (Table 2) additionally omits DiTAR and IndexTTS while including FireRedTTS and CosyVoice 2, creating an incomplete picture.
+- **NFE mismatch undermines the primary WER comparison with DiTAR.** DiTAR is reported at NFE=10 (taken from the original paper) while DISTAR uses NFE=24. E2TTS and F5TTS are evaluated at NFE=32. If DiTAR were run at NFE=24 or 32 (its architecture supports variable NFE), its WER would likely improve substantially, narrowing the reported gap. The paper does not provide DiTAR results at matched compute, nor does it justify why 10 NFE is the "correct" setting for DiTAR while 24 is appropriate for DISTAR. This is the single most significant weakness because the paper's central quantitative claim (WER superiority over DiTAR) rests on an apples-to-oranges comparison.
 
-- **Inference-efficiency claims are unsupported by measurements.** The paper claims DiSTAR "maintains inference cost close to its continuous counterpart DiTAR" and offers "comparable or lower computational cost." No wall-clock time, RTF, FLOP counts, or throughput measurements are reported for any system. Figure 2 shows the relative trade-off from RVQ pruning, which demonstrates controllability but does not substitute for absolute efficiency comparison. This is a statement about a claimed contribution that lacks evidence.
+- **DiTAR is conspicuously absent from the subjective evaluation (Table 2).** The paper's core framing is that DISTAR improves over the "continuous next-patch diffusion" paradigm of DiTAR, yet DiTAR is not included in the human listening tests. The SMOS (3.31 ± 0.25) and CMOS (0.22 ± 0.13) are compared against FireRedTTS, CosyVoice 2, E2TTS, and F5TTS — none of which use the same patch-wise architecture. Without DiTAR in subjective evaluation, the paper's claim of subjective superiority over its most directly comparable baseline is unsubstantiated.
+
+- **"State-of-the-art speaker similarity" claim is directly contradicted by the paper's own data.** In Table 1, E2TTS achieves higher SIM on both LibriSpeech (0.70 vs 0.67) and Seed-TTS (0.71 vs 0.66). The Abstract states DISTAR surpasses "state-of-the-art zero-shot TTS systems in robustness, naturalness, and speaker/style consistency." The SIM data does not support this. The UTMOS claim is also debatable: IndexTTS achieves 4.35 vs DISTAR-base 4.29 on LibriSpeech, and DiTAR (4.15) beats DISTAR-base (3.93) on Seed-TTS. The paper should distinguish between metrics where it truly leads (WER, subjective SMOS) and those where it is competitive but not best (SIM, UTMOS).
 
 ### Minor
 
-- **Anomalous quantitative results deserve discussion.** DiSTAR-medium achieves WER of 1.66%, below the RVQ-resynthesized baseline of 1.83% (Table 1, LibriSpeech). Subjective results show CMOS 0.22 (above the human anchor at 0.00) and SMOS 3.31 (above human at 3.07). While these are not "physically impossible" as one reviewer claimed — generative models can produce cleaner speech than codec reconstruction, and human reference recordings can contain artifacts that clean synthesis avoids — the paper should acknowledge and discuss these anomalies rather than passing over them in silence. The brief attribution to "reduced sensitivity to high-frequency artifacts" (Section 4.2) is a start but insufficient.
+- **The paper never ablates the core architectural claim: the benefit of coupling AR with masked diffusion.** DISTAR combines an AR LM (for patch-level drafting) with a masked diffusion model (for intra-patch infilling). The paper claims this "tight coupling" is superior to either component alone, but it never trains a pure-AR variant (no diffusion, AR predicts all intra-patch tokens) or a pure masked-diffusion variant (no AR, condition directly on text + history codes) with matched data and compute. Without this ablation, we cannot attribute the results to the AR-diffusion coupling rather than to the high-quality codec, training data scale, or hyperparameter choices. The decoding strategy ablations (Table 3) and patch-size ablations (Table 6) do not address this.
 
-- **Decoding heuristics are motivated but not deeply analyzed.** The paper describes a "tail-first" overconfidence bias and proposes three heuristics (layer-wise temperature, position-wise temperature, hybrid sampling). Table 3 shows these improve WER from 2.11 to 1.99 and SIM from 0.626 to 0.640. While this is empirical evidence of effectiveness (contrary to claims that none exists), the specific temperature values (0.8, 0.95) and the 50-50 sampling/greedy split are not justified through sweeps or held-out validation. A confidence distribution plot demonstrating the claimed tail-first bias would strengthen the motivation.
+- **Decoding heuristics lack individual ablation and sensitivity analysis.** The paper introduces three decoding tricks (layer-wise temperature, position-wise temperature, hybrid sampling) to address "tail-first bias." Table 3 shows their combined effect but does not ablate each trick individually. The hyperparameters (T_layer=0.8, T_time=0.95, 50/50 split) appear hand-tuned with no sensitivity analysis. A per-trick ablation would clarify which component drives improvement, and a sensitivity analysis would show how robust the method is to parameter choices.
 
-- **Some evaluation details are underspecified.** The UTMOS checkpoint version is not reported (this predictor is known to be domain-sensitive). For baselines cited from prior work, it is unclear whether the same Whisper-large-v3 ASR version was used for WER computation. These details matter for reproducibility.
+- **The "tail-first bias" is described but not analyzed.** Section 3.4 gives a plausible intuition for why the bias occurs ("later positions are easier, leading to overconfidence") but provides no quantitative evidence — no plot of per-position confidence across decoding iterations, no comparison of mask patterns under different schedules. A simple visualization would strengthen the motivation for the proposed heuristics.
 
 ### Trivial
 
-- Overlapping patches in the aggregator are motivated by a brief analogy to CNNs but not ablated — this is a small design choice that does not affect the core contribution.
-- The patch-size ablation (Table 6) shows severe degradation at P=2 (WER 4.50%) with only a brief explanation. A slightly deeper analysis would strengthen this section but is not essential.
+- The paper's technical novelty is incremental — DISTAR combines DiTAR's patch factorization with LLaDA's discrete masked diffusion, using a MAGICODEC-based RVQ codec. The individual components are established, and the contribution lies in their specific combination and the engineering to make it work. This is not a fatal flaw but should be reflected in how the contribution is framed.
 
 ## Nice-to-Haves
 
-- Re-running the most direct baseline (DiTAR) with the same RVQ codec and training data would substantially strengthen the SOTA comparison.
-- Reporting end-to-end RTF or GFLOPS for DiSTAR versus DiTAR and at least one other system would substantiate the efficiency claims.
-- A confidence-histogram or mask-ratio plot demonstrating the tail-first bias would better justify the decoding heuristics.
-- Side-by-side spectrograms comparing DiSTAR, DiTAR, and codec reconstruction would make quality claims more tangible.
+- Running DiTAR at NFE=24 or 32 and including it in Table 1 (matched compute comparison) would resolve the most significant evaluation concern.
+- Adding DiTAR to the subjective evaluation (Table 2) would substantiate the central claim of superiority over continuous next-patch diffusion.
+- A controlled ablation removing the AR module (pure masked diffusion + text conditioning) and removing the diffusion module (pure AR with same codec) would validate whether the coupling is necessary.
+- Reporting statistical significance for the subjective metrics (SMOS/CMOS differences) would strengthen the evaluation.
+- Individual ablation of the three decoding tricks would clarify their relative contributions.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points from the source reviews are flagged for removal; treat them with caution:
 
-- **"Physically impossible" WER claim (DiSTAR WER < RVQ resynth).** Removed. The RVQ-resynthesized baseline is NOT a theoretical lower bound for WER — ASR models can find clean synthetic speech easier to transcribe than codec-reconstructed speech that contains quantization artifacts. The generative model can implicitly act as a denoiser. This is a known phenomenon in TTS, not a physical impossibility.
+1. **Parameter count ambiguity** (Harsh Critic #1 second bullet): The paper clearly separates the codec (0.3B, Section 3.5.1) from the generative model (0.15B/0.3B, Table 1). This is standard practice in TTS. The table header "#Params" refers to the generative model parameters, consistent with how baselines report theirs. The ambiguity claim is unfounded.
 
-- **"Not fully discrete" framing complaint.** Removed. The paper's claim that it "operates entirely in a discrete RVQ code space" clearly refers to the token space (inputs and outputs are discrete RVQ tokens), not to internal continuous embeddings. All discrete-token Transformer models use continuous embeddings internally — this is standard and not misleading.
+2. **WER improvements are "tiny"** (Harsh Critic #1 third bullet): 0.73% absolute and ~30% relative WER improvement over DiTAR is substantial, not tiny. DISTAR-medium also beats human WER (1.66% vs 1.80%). This criticism is factually incorrect.
 
-- **"No empirical evidence" for decoding heuristics.** Removed as stated. Table 3 directly compares sampling without heuristics (WER 2.11, SIM 0.626) against sampling with the proposed heuristics (WER 1.99, SIM 0.640), providing direct empirical evidence of their effect. The criticism is reframed above as a call for deeper analysis rather than absence of evidence.
+3. **Training loss is not novel** (Harsh Critic #4 second bullet): The paper does not claim novelty for the masked diffusion objective. It explicitly cites MaskGIT (Chang et al., 2022) for the cosine schedule and LLaDA (Nie et al., 2025) for the formulation. This is a strawman.
 
-- **Demand for "equitable baseline re-evaluation."** Moved to Nice-to-Haves. While cross-paper comparison is standard practice in TTS benchmarking, re-running under matched conditions would strengthen claims.
+4. **English-only despite multilingual framing** (Harsh Critic Section-by-Section notes): The Limitations section (Appendix A) explicitly states "we trained our model solely on a around-50k-hour English corpus." The paper is transparent about this. References to multilingual systems appear in the context of related work, not as a claim about DISTAR.
 
-- **Demand for spectrogram visualizations.** Moved to Nice-to-Haves. Numerical scores are the primary evaluation modality in this literature.
+5. **Figure 2 RVQ layer axis ambiguity** (Harsh Critic Section-by-Section notes): The x-axis is labeled "RVQ Layers" ranging 2-9, which clearly means retaining layers 1 through ℓ. The finding about upper layers encoding acoustic detail is a well-known result, but reporting it is not a weakness of the paper.
 
-- **Complaint about missing appendix sections.** Removed. The parser strips appendix sections; they exist in the original submission.
+6. **Core innovation is "straightforward combination"** (Harsh Critic #4): While the novelty is incremental, this framing is overly dismissive. Many accepted papers at top venues make contributions through effective combinations of existing ideas. The engineering to make the combination work at scale (64 A100s, 0.6M steps, Cut Cross-Entropy, Liger kernels) and the specific design choices (aggregator design, embedding initialization, stochastic layer truncation) are non-trivial.
 
-- **Criticism of evaluation data/checkpoint existence.** Removed. All cited baselines (DiTAR, IndexTTS, E2TTS, F5TTS, etc.) are publicly available models.
-
-- **"Half-sampling/half-greedy appears hand-tuned on evaluation set."** Removed as speculation. The paper explicitly states "we adopt a simple half–half scheme to avoid over-tuning" (Section 3.4).
+7. Several generic strengths from the Strength Finder were generic/did not survive comparison with verified weaknesses.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core insight — that an AR drafter + masked-diffusion infiller can be unified within a shared discrete RVQ code space, eliminating alignment modules while enabling controllable inference — is the paper's original contribution, and the reviews do not surface a deeper insight beyond this.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a brief discussion in Section 4.2 acknowledging that DiSTAR's WER can fall below the RVQ-resynth baseline and that subjective scores can exceed the human reference, and explain why this can legitimately occur (cleaner synthesis vs. reference artifacts, Whisper sensitivity to codec noise).
+1. **Run DiTAR at matched NFE (24 or 32)** and replace the cited DiTAR scores with your own measurements. This is the single most impactful thing the authors can do to make the WER comparison fair and convincing. The gap may narrow but DISTAR's WER advantage (1.66% vs ~2.0-2.4%) is large enough that it could still hold.
 
-2. Either report RTF/GFLOPS for DiSTAR vs. DiTAR on matched hardware, or soften the efficiency claims in the introduction and conclusion to reflect only the demonstrated RVQ-pruning controllability.
+2. **Include DiTAR in subjective evaluation.** Without this, the paper's central narrative — that discrete-space AR+diffusion coupling beats continuous-space counterparts — lacks perceptual validation.
 
-3. Clarify in the experimental settings which UTMOS checkpoint and Whisper version were used, and whether the same ASR was used for baseline WER numbers cited from prior work.
+3. **Tone down the SOTA claims for speaker similarity.** The SIM numbers are clear: E2TTS outperforms DISTAR on both benchmarks. Reframe the contribution as "competitive or best on WER and subjective similarity, with strong performance on other metrics" rather than claiming across-the-board SOTA.
 
-4. Consider a brief ablation of the temperature shaping parameters or note that they were selected on a small held-out validation set to preempt concerns about test-set overfitting.
+4. **Add an ablation of the AR module and the diffusion module.** Even a small-scale experiment on a subset of the data would help validate the core design choice. The field has strong pure-AR (VALL-E 2) and pure-diffusion (MaskGCT) baselines; a direct comparison under the same codec and data would be informative.
+
+5. **Provide individual ablations of the three decoding tricks** and sensitivity analysis for T_layer and T_time to demonstrate robustness and clarify which trick matters most.
 
 ## Score and Decision
 
-### Calibration anchors used:
+### Calibration Anchors
 
-| Path | Avg Human Score | Comparison to DiSTAR |
-|---|---|---|
-| `/home/wg25r/review_agent/human_reviews_2026/FaGDopTTTC.md` (DiFlow-TTS) | 2.50 | Similar domain (discrete TTS). DiSTAR is substantially stronger: better WER, more extensive evaluation, cleaner architecture, and includes subjective results. |
-| `/home/wg25r/review_agent/human_reviews_2026/YsrswIqSZ9.md` (UniTTS) | 3.20 | LLM-based TTS with codec. DiSTAR has stronger objective results, better-substantiated claims, and a more clearly novel architecture. |
-| `/home/wg25r/review_agent/human_reviews_2026/im2a2MHoke.md` (Soft Alignment TTS) | 2.50 | Non-autoregressive TTS. DiSTAR is clearly more novel and better evaluated. |
-| `/home/wg25r/review_agent/human_reviews_2026/ADRwyhQWzY.md` (BELLE) | 3.00 | Codec TTS. DiSTAR has more competitive results and more extensive evaluation. |
-| `/home/wg25r/review_agent/human_reviews_2026/h5KLpGoqzC.md` (VoxCPM) | 5.20 | Hierarchical semi-discrete TTS, end-to-end, 0.5B params, accepted as poster. DiSTAR is comparably strong: cleaner architecture (no multi-stage complexity), better WER, smaller model, similar evaluation gaps (no latency data). |
-| `/home/wg25r/review_agent/human_reviews_2026/yh7MV2V0ba.md` (VADD) | 5.50 | Discrete diffusion with latent variables, accepted as poster. DiSTAR is more applied with stronger empirical validation, but VADD has stronger theoretical novelty. Comparable in overall contribution quality. |
-| `/home/wg25r/review_agent/human_reviews_2026/uGai5lYHlV.md` (TTSDS2) | 5.33 | Evaluation benchmark, accepted as oral. Different type of contribution; not directly comparable. |
-| `/home/wg25r/review_agent/human_reviews_2026/43LvSiz6af.md` (TTS-Hub) | 4.40 | Controllable TTS with LoRAs. DiSTAR has stronger core results and a more principled architecture. |
-| `/home/wg25r/review_agent/human_reviews_2026/pz1tpHPiM3.md` (MOS-RMBench) | 3.33 | Evaluation benchmark, different contribution type. |
+| Path | Avg Human Score | Comparison to This Paper |
+|------|----------------|--------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/e3XLWHFrnr.md` | 4.40 (Accept Poster) | Similar hybrid AR+NAR architecture for speech. Had missing SOTA comparisons and no human eval — DISTAR has stronger evaluation but similar overclaim issues. Roughly comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/h5KLpGoqzC.md` | 5.20 (Accept Poster) | Stronger novelty (differentiable FSQ bottleneck), end-to-end, more careful claims. DISTAR has better WER but less novelty and overclaims. Slightly weaker paper. |
+| `/home/wg25r/review_agent/human_reviews_2026/FaGDopTTTC.md` | 2.50 (Withdrawn) | Weak baselines, evaluation issues, implausible claims. DISTAR is substantially stronger in experimental rigor and results. |
+| `/home/wg25r/review_agent/human_reviews_2026/im2a2MHoke.md` | 2.50 (Reject) | Cherry-picked test sets, unreliable comparisons. DISTAR is much more rigorous. |
+| `/home/wg25r/review_agent/human_reviews_2026/zjaV5zmlkl.md` | 5.50 (Accept Poster) | Different task (speech-to-speech). Stronger novelty and more comprehensive evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/juM14y0caI.md` | 6.00 (Accept Poster) | Different domain (VQ codebook training). Strong theory + experiments. Not directly comparable. |
 
-DiSTAR is clearly stronger than the 2.5–3.3 range papers (DiFlow-TTS, UniTTS, BELLE). It is comparable to VoxCPM (5.20, accepted poster) and VADD (5.50, accepted poster). Compared to VoxCPM, DiSTAR has a cleaner design and stronger WER but similar weaknesses (no latency data, some evaluation gaps). Compared to VADD, DiSTAR has much more extensive empirical validation but less theoretical depth.
+### Decision Rationale
 
-The core contribution — a clean, well-motivated architectural unification of AR and masked diffusion in discrete RVQ space — is genuinely novel and well-executed. The empirical results are strong across multiple benchmarks. The main weaknesses are evaluation rigor (uncontrolled baselines, missing efficiency data) that weaken the SOTA claim but do not undermine the architectural contribution. These are addressable in a rebuttal or camera-ready.
+This paper presents a well-engineered zero-shot TTS system with genuinely strong WER results (1.66%, beating human at 1.80%) and useful practical contributions (decoding heuristics, RVQ pruning). However, the evaluation has significant gaps: the NFE mismatch with DiTAR makes the primary quantitative comparison unfair; DiTAR is missing from the subjective evaluation; and the "state-of-the-art speaker similarity" claim is factually wrong given the paper's own SIM numbers. The core architectural novelty (AR+diffusion coupling) is not validated by ablation. These issues are addressable but real. The paper's contributions are solid enough to warrant acceptance conditionally, with the understanding that the claims must be revised and the missing comparisons addressed.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

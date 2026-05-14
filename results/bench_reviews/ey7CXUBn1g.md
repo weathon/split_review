@@ -1,107 +1,91 @@
-Now I have all the information needed. Let me write the consolidated meta-review.
-
----
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-AdaSVD proposes two improvements to SVD-based LLM compression: (1) **adaComp**, a post-truncation alternating least-squares optimization using the Moore-Penrose pseudoinverse to compensate for truncation errors, and (2) **adaCR**, a layer-wise adaptive compression ratio assignment based on input-output cosine similarity. Experiments across OPT, LLaMA2, Mistral, and Vicuna (7B scale) show consistent perplexity and reasoning-accuracy improvements over SVD-LLM, particularly at higher compression ratios (60%+).
+The paper proposes AdaSVD, an SVD-based LLM compression method with two components: (1) **adaComp**, which alternately updates the truncated singular matrices $U_k^\sigma$ and $V_k^\sigma$ using Moore-Penrose pseudoinverses to reduce the reconstruction error $\|\hat{W}X - WX\|_F$ on calibration data, and (2) **adaCR**, which assigns layer-specific compression ratios based on the cosine similarity between each layer's input and output. Experiments on OPT, LLaMA2, Mistral, and Vicuna models across language modeling and reasoning benchmarks show consistent perplexity reductions over SVD-LLM, FWSVD, and ASVD.
 
 ## Strengths
 
-- **Effective post-truncation compensation (adaComp):** Reformulating the truncation error minimization as a least-squares problem solved via Moore-Penrose pseudoinverse yields stable and smooth error reduction (Figure 3a). The resulting improvements over SVD-LLM are consistent across all tested compression ratios, with the most dramatic gains at 60%+ (e.g., WikiText-2 perplexity drops from 89.90 to 50.33 on LLaMA2-7B at 60% compression, Table 1).
+- **Consistent empirical improvements across multiple model families and compression ratios.** On LLaMA2-7B at 60% compression on WikiText-2, AdaSVD achieves 50.33 perplexity vs. SVD-LLM's 89.90 (44% reduction). Similar improvements hold for OPT-6.7B (86.64 vs. 92.10), Mistral-7B (67.22 vs. 72.17), and Vicuna-7B (56.97 vs. 64.06) (Table 2). This breadth of evaluation makes the empirical case non-trivial.
 
-- **Simple and effective layer-wise adaptive ratio (adaCR):** The importance metric (cosine similarity between layer input and output, mean-normalized) provides an intuitive basis for allocating compression budgets per layer. Integrating adaCR yields additional gains over uniform compression (Table 3b), and the importance curves (Figure 4) reveal interpretable patterns — e.g., first and last layers consistently receive the highest importance across model families.
+- **Ablation studies isolate the contribution of each component.** Table 3a shows that adaComp alone improves over the SVD-LLM baseline (e.g., 78.82 vs. 89.90 at 60% on WikiText-2). Table 3b shows that adaCR adds further gains on top of adaComp (e.g., 50.33 vs. 69.46 at 60%). This decomposition is clean and reproducible.
 
-- **Broad empirical coverage:** The method is evaluated on four model families (OPT-6.7B, LLaMA2-7B, Mistral-7B, Vicuna-7B), three language modeling datasets, and five commonsense reasoning benchmarks across compression ratios from 40% to 80%. Orthogonality to weight quantization (GPTQ-INT4) is also demonstrated (Table 4).
+- **Orthogonality with quantization is demonstrated.** AdaSVD+GPTQ-INT4 consistently beats SVD-LLM+GPTQ-INT4 across all compression ratios (Table 4), showing the compensation is additive with other compression techniques.
 
-- **Stack-of-batch calibration:** A practical memory-efficient strategy that partitions calibration data into fixed-size mini-batches and averages them, enabling larger effective calibration sets without additional GPU memory. This yields additional error reduction (Figure 3b).
+- **Practical engineering contribution.** The stack-of-batch strategy (averaging calibration samples into buckets) is a simple but practical technique for fitting more calibration data into limited GPU memory, and the paper validates it empirically in Figure 3(b).
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None.
+1. **The adaCR importance metric (cosine similarity between input and output) lacks theoretical justification and appears conceptually inverted.** The paper defines $I(W) = \text{similarity}(X, WX)$ as "importance" and assigns more parameters (lower compression) to layers with higher similarity. This means a layer whose weight is near-identity (trivially compressible, high cosine similarity) gets *more* retained parameters, while a layer doing significant representational transformation (low cosine similarity) gets *fewer* — the opposite of what a compressibility-aware allocation would suggest. The paper cites Men et al. (2024) and Dumitru et al. (2024), but those works use similarity to *prune entire layers* (where high similarity → redundancy → removable), not to assign low-rank budgets. The connection is not established, and no alternative importance metrics are compared. While the empirical results (Table 3b) show that adaCR improves over a constant ratio, the paper does not explain *why* this particular metric works or test a control (e.g., randomly shuffled per-layer ratios), leaving the mechanism unclear.
+
+2. **The advantage of adaComp over SVD-LLM's whitening pipeline is not clearly articulated.** The paper's calibration-aware objective (Equation 5) minimizes $\|\hat{W}X - WX\|_F$ given finite calibration data $X$. However, AdaSVD also uses the data whitening procedure from SVD-LLM (Algorithm 1, line 6). After whitening transforms $W$ to $WS$, the calibration data has approximately identity covariance, making the Frobenius-norm-optimal SVD truncation approximately optimal for the calibration-aware objective as well. The paper never explains why alternating pseudoinverse updates on top of whitened SVD truncation should yield a different or better solution — it simply states that the naive gradient update (Equations 6-7) is numerically unstable and the pseudoinverse version is stable. The improvement over SVD-LLM could stem from the alternating optimization finding a better fixed point for the *finite-sample* calibration objective, but this is not analyzed, and no comparison against a one-step least-squares baseline (no iterations) is provided.
 
 ### Minor
 
-- **Ablation presentation is confusing (Table 3a):** The ✗ symbol used across both SVD-LLM rows and AdaSVD rows is undefined in the table itself, and evaluating adaComp's contribution requires cross-referencing Table 3a (AdaSVD without adaComp) against Table 1 (full AdaSVD). The comparison is logically valid but the exposition makes it harder than necessary to parse. The authors should present adaComp on/off on the same AdaSVD base in a single table.
+1. **The two hyperparameters $mrr$ and $trr$ require per-compression-ratio tuning.** Table 3d shows that the optimal $mrr$ value changes across compression ratios (0.40-0.45 at 40%, 0.45 at 50%, 0.35 at 60%), and the paper provides no principled way to select them. This adds a tuning burden in practice.
 
-- **No quantitative VLM evaluation (Section 4.2):** The claim that AdaSVD generalizes to visual language models is supported only by a single qualitative image-captioning example (Figure 5). Reporting standard captioning metrics (e.g., CIDEr, BLEU-4) on the COCO validation set would substantiate this claim. Given that the VLM extension is a secondary contribution, this does not undermine the core LLM results.
+2. **The iterative update behavior is inconsistent across compression ratios.** Table 3c shows that at 40% compression, 1 iteration outperforms 3 and 15 iterations, while at 60%, more iterations help. The paper acknowledges potential overfitting at low compression ratios, but this inconsistency means the method's optimal configuration is compression-ratio-dependent.
 
-- **No non-alternating optimization baseline:** While Figure 3a compares the Moore-Penrose pseudoinverse update against naive matrix inversion (showing the stability benefit), and Table 3c varies iteration count (3 vs. 15), the paper does not compare against a one-shot joint solution of the coupled least-squares problem (i.e., alternating for 1 round without iteration). The authors state in text that 1 iteration already outperforms SVD-LLM at low compression ratios, but including this explicitly in the table and comparing against a gradient-descent or single-round baseline would strengthen the claim that the alternating scheme specifically matters.
+3. **Qualitative VLM results lack quantitative evaluation.** The image captioning examples in Figure 5 are cherry-picked. No standard VLM metrics (CIDEr, BLEU, CLIP score) are reported, making it impossible to assess whether the improvement is systematic or anecdotal.
 
-- **No real-hardware speed/latency measurements:** The paper motivates SVD compression by its hardware-agnostic nature and potential for inference acceleration, but reports only compression ratios and perplexity. Measuring actual inference throughput or memory savings on at least one GPU would strengthen the practical impact claim.
+4. **The baseline perplexities for FWSVD and ASVD are catastrophically high** (e.g., FWSVD at 8,060 and ASVD at 1,609 at 40% compression on LLaMA2-7B, Table 1). While the paper states these were reproduced using official repositories, the values are so extreme that they merit independent verification. If these baselines are incorrectly configured, the claimed improvements over them would be uninformative. The paper does not report whether the original authors were consulted to validate the reproduction.
 
 ### Trivial
 
-- The ✗ markers in Table 3 are used inconsistently across sub-tables (some use ✗, some use "Const", some use "-"), and their meanings are not uniform. A consistent notation would improve readability.
+- The paper does not report confidence intervals or statistical significance tests for any of its perplexity results.
+- The figure captions and table formatting are severely garbled by the parser but appear to reflect original formatting issues.
 
 ## Nice-to-Haves
 
-- A convergence analysis or empirical loss-curve plot for the alternating updates would help justify the iteration count choices. This is not required for an empirical paper but would add rigor.
-- Sensitivity analysis of adaCR to the choice and size of calibration data would address natural questions about robustness.
-- Visualization of the actual per-layer compression ratios assigned by adaCR alongside the importance curves (Figure 4) would make the mechanism more concrete.
+- A comparison against randomly shuffled per-layer compression ratios would strengthen the case that adaCR's specific allocation matters, rather than just having any non-uniform allocation.
+- A comparison against the naive gradient update (Equations 6-7) with proper numerical stabilization would isolate the benefit of the pseudoinverse formulation.
+- Reporting per-layer compression ratios actually assigned by adaCR for a representative model would help readers understand what the method does.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+- **adaComp optimization is "ill-posed by construction" (Harsh Critic #1):** REMOVED — The critic misunderstands the objective. Equation (5) minimizes $\|\hat{W}X - WX\|_F$, not $\|\hat{W} - W\|_F$. These differ when $X$ has structure, and with finite calibration data (256 samples), the SVD truncation is not necessarily optimal for the former. However, the related concern about whitening making SVD truncation approximately optimal is kept as Major Weakness #2.
 
-- **"Core comparison is confounded by an extra optimization step" (Harsh Critic Point 1):** This criticism is logically inverted — adaComp *is* the contribution. Comparing AdaSVD against baselines that lack post-truncation optimization is exactly the right comparison. The sub-point about isolating alternating-vs-non-alternating is retained above as a minor weakness, but the claim that the entire comparison is "confounded" or "unfair" is incorrect.
-- **"SVD, FWSVD, ASVD add no information" (Harsh Critic):** Including these standard baselines is appropriate practice and provides useful context even when they collapse at high compression ratios.
-- **"No statistical significance or variance reported" (Harsh Critic):** Standard practice in LLM benchmark evaluation; running multiple seeds for large-scale perplexity evaluation is not customary in this literature.
-- **"Abstract overstates closeness to original model" (Harsh Critic):** The abstract and introduction claim superiority over SVD-based methods, not parity with uncompressed models. The language is appropriately scoped.
-- **"No convergence guarantee" (Harsh Critic):** Alternating least-squares without formal convergence proofs is standard in empirical ML papers.
-- **"Moore-Penrose pseudoinverse is a standard remedy, not a contribution" (Harsh Critic):** The contribution is the application of this technique to the SVD truncation compensation problem with demonstrated stability benefits, not the pseudoinverse itself.
-- **"adaCR importance metric is straightforward; no comparison with other non-uniform strategies" (Harsh Critic):** The simplicity of adaCR is a feature, not a bug. Comparing against alternative importance metrics (e.g., weight norm) would be nice-to-have but is scope creep for the ablation.
-- **Strength Finder's "comprehensive and rigorous empirical evaluation":** Moderated — the evaluation breadth is good but not exceptional. Retained with adjusted language above.
-- **Formatting/style/typo concerns from the Harsh Critic:** These are parser artifacts from PDF extraction, not present in the original submission. Removed per hard rules.
+- **"Circular definition" claim about adaCR conflating compressibility with importance (Harsh Critic #2, first paragraph):** WEAKENED — The critic's characterization that "a layer whose weight matrix is close to the identity... would have high cosine similarity... and would therefore be deemed 'important'" is factually correct as a description of the metric's behavior. However, "close to identity" layers are uncommon in practice; the empirical results validate the approach. The concern is kept as Major Weakness #1 but reframed as a lack of theoretical justification rather than a "circular definition."
+
+- **"Stack-of-batch is not a methodological contribution" (Harsh Critic, Section 3.1):** REMOVED — This is a trivial nitpick. Simple engineering techniques can still be practical contributions, and the paper validates it empirically.
+
+- **"The paper's claim of 'significantly reduced memory requirements' is vacuous" (Harsh Critic, Abstract):** REMOVED — At the same compression ratio, all SVD methods have the same memory footprint. The claim is about "superior performance with significantly reduced memory requirements" [compared to the full model], which is standard phrasing.
+
+- **"The comparison figure at the top is unreadable" (Harsh Critic, Introduction):** REMOVED — This is a formatting artifact from PDF parsing.
+
+- **Missing comparison against non-SVD compression methods (Harsh Critic, Missing Experiments):** WEAKENED to Nice-to-Haves — The paper explicitly scopes itself to SVD-based methods, which is appropriate.
 
 ## Novel Insights
 
-The interaction between adaCR and adaComp revealed in the ablation is genuinely interesting: at 50% compression, adaCR alone *hurts* perplexity (30.00 vs. SVD-LLM's 27.19 on WikiText-2), yet when combined with adaComp, the full method improves to 25.58. This suggests that non-uniform ratio assignment increases per-layer error variance in a way that the compensation step specifically remedies — the two components are synergistic rather than merely additive. The paper notes this but could explore it more explicitly.
+None beyond the paper's own contributions. The reviews do not reveal any perspective on the method that the paper itself does not articulate.
 
 ## Suggestions
 
-- Make Table 3 self-contained: explicitly define what ✗, "Const," and "-" mean in each sub-table, and present adaComp on/off on the same AdaSVD base rather than requiring cross-referencing with Table 1.
-- Add a row for 1 iteration of adaComp in Table 3c rather than only mentioning it in the text.
-- Report at least one quantitative VLM metric (CIDEr or BLEU-4) to support the generalizability claim.
-- Consider measuring wall-clock inference throughput on one GPU configuration to strengthen the practical motivation.
+1. Replace or augment the adaCR importance metric with a theoretically grounded one. Options include: (a) the actual reconstruction error $\|\hat{W}_i X_i - W_i X_i\|_F$ for each layer under a uniform baseline rank, (b) the spectral decay rate of each layer's singular values, or (c) a sensitivity metric based on how perplexity changes when each layer is compressed individually.
+
+2. Add a control experiment where adaCR-assigned per-layer ratios are randomly shuffled across layers. If adaCR's gains disappear under shuffling, the specific allocation matters.
+
+3. Provide explicit validation that the SVD-LLM, FWSVD, and ASVD baselines reproduce the numbers from their original papers at comparable settings. This would address concerns about inflated baselines.
+
+4. Include one-step (non-iterative) adaComp as a baseline to isolate whether the improvement comes from the alternating procedure or just from solving the least-squares problem once.
+
+5. Add quantitative VLM evaluation with standard metrics (e.g., CIDEr, BLEU-4) rather than only qualitative examples.
 
 ## Score and Decision
 
-**Originality:** The combination of adaptive post-truncation optimization and importance-aware ratio assignment is a reasonable but incremental advance over SVD-LLM. The specific design choices (alternating pseudoinverse updates, cosine-similarity importance) are well-motivated but not surprising.
+**Calibration Anchors (all from the same review corpus):**
 
-**Importance:** SVD-based LLM compression is an active and practically relevant area. The paper addresses two real limitations of prior work (truncation error compensation, layer-wise ratio assignment).
+| Path | Avg Score | Comparison to AdaSVD |
+|------|-----------|---------------------|
+| AA-SVD (`fIpDd5UlFP.md`) | 2.50 | Weaker: AA-SVD tests only LLaMA-7B and has no per-layer adaptive CR. AdaSVD has broader experimentation but shares similar theoretical gaps. |
+| ERC-SVD (`WL4qCY0nBk.md`) | 2.50 | Similar: ERC-SVD also proposes post-truncation compensation, but received strong criticism that residual SVD is theoretically equivalent to single truncation. AdaSVD's alternating pseudoinverse is more distinct but not fully justified. |
+| DF-SVD (`TuzsCiHocG.md`) | 5.00 | Stronger: DF-SVD has a theoretically grounded rank allocation (singular value decay modeling) and provides speedup analysis. AdaSVD has comparable empirical breadth but weaker theoretical backing. |
+| m2nupeHqV7 | 3.50 | Comparable: Layer-collaborative SVD with automatic rank search. Similar level of empirical contribution with analogous theoretical concerns. |
+| W5kV18hrYO (AFORA) | 4.00 | Comparable: Activation-aware factorization with rank allocation. Both papers make empirical contributions with partial theoretical grounding. |
 
-**Claims supported:** The central claim — that AdaSVD outperforms SVD-LLM — is well-supported by consistent results across models and compression ratios. Secondary claims about VLM applicability and ablation insights are less thoroughly supported.
+After comparing against these anchors, AdaSVD sits between the clearly rejected SVD papers (2.5) and the better-grounded but still-rejected DF-SVD (5.0). It has more extensive experiments than AA-SVD or ERC-SVD, but the adaCR metric is conceptually questionable and the advantage of adaComp over SVD-LLM's whitening pipeline is not adequately explained. The paper's empirical evidence is its strongest asset, but the theoretical weaknesses and the absence of key control experiments prevent a confident acceptance.
 
-**Soundness:** The methodology is sound. The ablation presentation has clarity issues but the underlying comparisons are valid.
-
-**Clarity:** The method is clearly described and the pseudocode is helpful. Table 3 formatting undermines an otherwise well-structured paper.
-
-**Value to community:** AdaSVD provides a simple, practical, and training-free improvement over the current SOTA (SVD-LLM). The method is reproducible and orthogonal to other compression techniques.
-
----
-
-### Calibration anchors compared:
-
-| Anchor | Path | Avg Score | Comparison to AdaSVD |
-|---|---|---|---|
-| AA-SVD | fIpDd5UlFP.md | 2.50 | AdaSVD has far broader experiments (4 model families vs. 1) and consistent gains; clearly stronger |
-| ERC-SVD | WL4qCY0nBk.md | 2.50 | AdaSVD has clearer contributions and more thorough ablation; clearly stronger |
-| LoRA-SVD | Xg0u7lAIrs.md | 2.67 | Different sub-problem (LoRA adapter compression); AdaSVD tackles a more general problem with better experiments |
-| LayerDecompose | 0IWZjbMmry.md | 3.00 | Different paradigm (weight sharing); AdaSVD's SVD-based approach has more direct baselines and clearer gains |
-| LC-SVD | m2nupeHqV7.md | 3.50 | Similar scope; AdaSVD has cleaner method and broader model coverage despite simpler contributions |
-| DF-SVD | TuzsCiHocG.md | 5.00 | Very comparable — both add two components to SVD-LLM; AdaSVD has broader model coverage but DF-SVD has more theoretical grounding and speed measurements; similar quality |
-| SoCo | SNVu84wBhH.md | 5.00 | SoCo requires training, different paradigm; AdaSVD is simpler and training-free; comparable quality |
-| SAES-SVD | KMAYsQO8pU.md | 5.00 | Closest comparator — both SVD-based LLM compression accepted as poster; SAES-SVD has more theoretical depth (inter-layer error propagation) but tested only on LLaMA; AdaSVD has broader model coverage and orthogonal quantization results; comparable overall |
-| LeSTD | 0oHaazjMUX.md | 5.50 | Different approach (tensor decomposition); slightly stronger contribution |
-
-AdaSVD fits comfortably alongside SAES-SVD (5.00, Accept Poster) and DF-SVD (5.00, Reject). It has broader model coverage than SAES-SVD but less theoretical depth, and cleaner presentation than DF-SVD. The ablation clarity issues and missing quantitative VLM evaluation prevent a higher score, but the core contribution is solid and the improvements over SVD-LLM are consistent and meaningful.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

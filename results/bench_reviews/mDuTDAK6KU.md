@@ -1,86 +1,111 @@
-Now I have enough information. Let me write the final consolidated review.
-
----
+Now I have enough information to write a thorough, calibrated review. Let me compile the final consolidated assessment.
 
 ## Summary
 
-KOALA proposes a lightweight adversarial detector that flags inputs as attacks when class predictions from two complementary similarity metrics—KL divergence and an L0-based score—disagree. The core idea is that dense vs. sparse perturbations stress these metrics differently, forcing disagreement that enables detection. The paper includes a theoretical proof that, under certain prototype-separation conditions, no bounded perturbation can simultaneously fool both metrics, and evaluates the method on ResNet/CIFAR-10 and CLIP/Tiny-ImageNet.
+The paper proposes KOALA, an adversarial detector that flags attacks when predictions from two complementary similarity metrics—KL divergence and an L0-based score—disagree. The method requires only a lightweight fine-tuning on clean images, uses a nearest-prototype classifier, and comes with a claimed formal proof of correctness (Theorem 1). Experiments are conducted on ResNet-18/CIFAR-10 and CLIP ViT-B/32/Tiny-ImageNet.
 
 ## Strengths
 
-- **Novel detection principle grounded in metric complementarity**: The idea of using disagreement between KL divergence (sensitive to dense, low-amplitude shifts) and an L0-based metric (sensitive to sparse, high-impact changes) is fresh and geometrically well-motivated. The ablation study (§4.3, Table 2) shows that the KL+L0 combination consistently outperforms alternative metric pairs (L0+Cosine, KL+Cosine) on ResNet/CIFAR-10, providing empirical support for the claimed complementarity.
+- **Well-motivated complementarity intuition.** The idea that dense, low-amplitude perturbations and sparse, high-impact perturbations are naturally captured by different metrics (KL vs. L0) is conceptually appealing and clearly explained in Section 3.1 and Figure 1. The ablation study in Table 2 does show the KL+L0 combination outperforming individual metrics or other pairings on ResNet/CIFAR-10.
 
-- **Ambitious theoretical framework**: The paper attempts to provide a formal correctness guarantee (Theorem 1), which distinguishes it from the majority of empirical adversarial detection work. The proof structure—showing that KL-flip and L0-flip conditions are mutually exclusive under bounded perturbations—is conceptually clear and offers useful geometric intuition about why the detector should work.
+- **Lightweight training recipe.** KOALA requires no adversarial training or architectural changes—only fine-tuning with clean images (Section 3.3). This is a practical advantage over methods that need attack examples or model modification.
 
-- **Practical, lightweight design**: The method requires only clean-image fine-tuning with no adversarial training or architectural changes. This plug-and-play property is demonstrated across two different architectures (ResNet-18, CLIP ViT-B/32), showing some generality.
+- **Theoretical condition is empirically verified on compliant samples.** Table 1 confirms that on the subset of test samples satisfying Theorem 1's conditions, KOALA achieves perfect detection (precision=1.0, recall=1.0) across all attack budgets, demonstrating that when the precondition holds, the mechanism works as intended.
+
+- **Systematic ablation over metric combinations.** Experiment 2 (Table 2) and Experiment 3 (Tables 3-4) compare seven different metric objectives, providing a fairly thorough picture of trade-offs between detection and classification accuracy.
 
 ## Weaknesses
 
 ### Fatal
 
-None.
+None. However, the combination of the following major issues collectively undermines the paper's core contributions.
 
 ### Major
 
-- **Non-standard detection metrics make results uninterpretable for comparison**: The confusion matrix definitions in §4.2 are highly non-standard for adversarial detection. TP counts adversarial examples that are *not flagged* but happen to be correctly classified as true positives. FN only covers undetected attacks that are *also misclassified* — adversarial examples that evade detection but are classified correctly by both metrics escape the FN count entirely. This conflates classification correctness with detection correctness, inflating recall and making the reported precision/recall numbers (e.g., 0.94/0.81 on ResNet/CIFAR-10) impossible to compare with any standard detection benchmark. The paper's detection claims cannot be evaluated against prior work using these metrics.
+1. **The formal proof contains significant mathematical gaps.** This is the paper's main distinguishing feature, so these issues are serious.
 
-- **No comparison to any existing adversarial detector**: Despite surveying Feature Squeezing, LID, Mahalanobis, MagNet, NIC, and others in §2, the paper compares KOALA only against itself (different metric combinations). Without even a single baseline detector on the same models and attacks, there is no evidence KOALA advances the state of the art in adversarial detection.
+   - **Unjustified claim about δ.** Line 1198 states that δ lies in [0,1] "thanks to Assumption A1." But A1 only normalizes feature embeddings (coordinates sum to 1). The perturbation δ is bounded by A3 as |δ_i| ≤ (3/2)|p_i^*|, which permits individual |δ_i| > 1 when p_i^* is small. The subsequent remainder bounding relies on this claim.
 
-- **Theorem applies to only 10% of Tiny-ImageNet test samples**: Table 1 shows that Theorem 1's conditions are satisfied on only 510/5,000 (10%) of Tiny-ImageNet test samples and 3,345/5,000 (67%) of CIFAR-10. On the non-compliant majority of Tiny-ImageNet samples, precision drops to 0.62–0.63. A detection guarantee that covers 10% of the data distribution in one setting is a severe practical limitation that the paper does not adequately address.
+   - **Inequality direction in Equation 14 is not justified.** The proof drops the negative second-order Taylor term plus remainder, concluding (ĉ − c^*)(δ/p^*) > Δ_KL(p^*). However, (ĉ_i − c_i^*) can be negative for some coordinates i, which would flip the inequality direction for those components. The proof does not account for this sign issue, so the claimed inequality does not follow from the preceding steps without additional assumptions not stated.
 
-- **No adaptive attack evaluation**: An attacker aware of KOALA's detection mechanism (disagreement between KL and L0 predictions) can explicitly optimize to cause agreement between the two heads. The paper does not evaluate any such adaptive attack, which is a standard requirement for adversarial detection research. The paper mentions adaptive adversaries in §2 but never tests against them. While Theorem 1 purports to guarantee detection under certain conditions, for the substantial fraction of inputs where conditions are not met (33–90% depending on dataset), adaptive attack vulnerability is entirely unexplored.
+   - **Assumption A1 (softmax normalization) is non-standard for feature embeddings** and would fundamentally alter the geometry of the representation space. Assumption A3 (|δ_i| ≤ (3/2)|p_i^*|) is a per-coordinate bound that no standard attacker respects—attackers constrain ℓ_∞ or ℓ_2 norms, not coordinate-wise ratios to original values. The theorem's guarantee therefore applies in a setting that does not correspond to common threat models.
+
+   These gaps mean the "formal guarantee" is not, in its current form, a valid mathematical proof.
+
+2. **No comparison to any existing adversarial detector.** The entire experimental section is an ablation over metric combinations within KOALA's own framework. There is no comparison to NIC, MagNet, LID, Mahalanobis, CADet, or any other prior detection method. Without baselines, there is no evidence that KOALA is competitive with the state of the art. For a detector paper, this is a critical omission.
+
+3. **No evaluation against adaptive attacks.** The decision rule is fully known (flag when ŷ_KL ≠ ŷ_L0). An attacker aware of this rule can optimize a perturbation to make both metrics predict the same wrong class, trivially bypassing detection. The paper never tests this scenario. Without adaptive attack evaluation, detection claims are unsubstantiated—prior work has shown that many detectors are broken under adaptive adversaries (see Tramer et al., 2020; Athalye et al., 2018).
+
+4. **Non-standard confusion matrix definitions inflate detection metrics.** Under the paper's definition (lines 496-499), an attacked input that is *not* flagged by the detector but is still correctly classified (ŷ = y*) is counted as a True Positive rather than a False Negative. This means TP includes cases where the detector failed to detect the attack but the classifier happened to predict the right class. Standard evaluation treats "input is attacked" as the positive condition and "detector flags attack" as the positive prediction; applying that standard would lower the reported recall and precision. The paper should report standard confusion counts and justify why its definition is preferable.
 
 ### Minor
 
-- **Attack generation details are underspecified**: §4.1 lists the attack methods (PGD, CW, AutoAttack) but does not specify whether they were generated against the baseline classifier and then evaluated on KOALA (a transfer setting) or generated white-box against the full KOALA model. This affects the interpretation of all detection results.
+5. **Theorem's conditions are satisfied by very few CLIP/Tiny-ImageNet samples.** Only 510/5000 (10.2%) of CLIP/Tiny-ImageNet test samples satisfy the theorem's conditions. The paper notes this (attributing it to CLIP's compact embedding space) but does not discuss what this means for practical deployment—on CLIP, the formal guarantee is essentially vacuous for 90% of inputs. The ResNet/CIFAR-10 proportion (≈67%) is a majority, but still leaves a substantial non-compliant fraction.
 
-- **Proofs rely on KKT conditions applied to a cardinality-constrained set without justification**: Claim B.1 involves a feasible set defined by a minimum-cardinality constraint (`|δ_i| ≥ min_i` for at least Δ_L0(p*) coordinates), which is non-convex and disconnected. The proof applies KKT conditions (necessary only for local optima of smooth constrained problems) to this set without addressing the combinatorial selection of which coordinates to activate. The greedy selection heuristic is not proven optimal, which weakens the claim that the constructed δ' achieves the maximum inner product.
+6. **Key hyperparameters lack sensitivity analysis.** The L0 threshold τ = 0.75 and loss weights ω_L0 = 0.9, ω_KL = 0.1 are set without any ablation study. The paper says ω_L0 = 0.9 because "L0 is harder to optimize" but provides no evidence. The detector could be brittle to these choices.
 
-- **Assumption A3 lacks empirical justification**: The coordinate-wise bound `|δ_i| ≤ (3/2)|p*_i|` is described as "mild and practical" (§3.2) but no evidence is provided that real adversarial perturbations satisfy this bound. Since the bound is defined relative to the clean embedding (which varies per input), its practical restrictiveness is unclear.
+7. **Only ℓ_∞ attacks with small perturbation budgets (2/255, 4/255) are evaluated.** No ℓ_2 attacks, no larger ϵ values, no attack parameter sweeps. The 4/255 ℓ_∞ bound is relatively weak.
 
-- **No hyperparameter sensitivity analysis**: The L0 threshold τ, surrogate smoothness φ, and loss weights ω_L0=0.9, ω_KL=0.1 are set without any ablation or sensitivity study. The claim that "L0 is harder to optimize" as justification for the loss weights is not supported by evidence.
+8. **CLIP results show counterintuitive behavior that undermines the method's rationale.** The paper notes that on CLIP/Tiny-ImageNet, KL+L0+Cosine achieves high detection because "all three metrics are essentially 'randomly guessing' a class," making disagreement likely by chance. This suggests the detection mechanism on CLIP is not operating through the claimed geometric principle but through a degenerate artifact, calling into question the method's generality.
 
 ### Trivial
 
-- The L0 metric's threshold in Eq. 2 depends on μ(c,p), the average absolute difference between the prototype and embedding. This means the effective threshold varies per prototype-embedding pair, creating a coupling between the metric and the specific comparison. This is not discussed but has no apparent impact on the empirical results.
+- None that survive the filtering rules.
 
 ## Nice-to-Haves
 
-- Embedding-space visualizations (t-SNE/UMAP) showing where KL and L0 metrics agree/disagree for clean vs. adversarial examples would substantiate the geometric intuition in Figure 1.
-- A characterization of what architectural or training choices could increase the fraction of Theorem 1-compliant samples, particularly for the CLIP/Tiny-ImageNet setting where compliance is only 10%.
-- Analysis of the gap between the differentiable L0 surrogate used in training and the discrete L0 metric used at inference, and whether this gap affects detection quality.
+- Including ℓ_2 attacks and larger ℓ_∞ budgets would strengthen the evaluation.
+- A sensitivity analysis of τ and loss weights would help validate the design choices.
+- A t-SNE or PCA visualization of the embedding space before/after fine-tuning would help build intuition for the prototype separation claim.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- **Harsh Critic claim about the theorem being "vacuous/tautological"**: The theorem's condition involves the adversarial class ĉ, but this does not make it tautological. The theorem states that *if* the prototype of the target adversarial class is sufficiently separated from the true class prototype, *then* detection is guaranteed. This is a meaningful conditional guarantee: it tells us what structure in the embedding space enables detection. The limitation is not that the theorem is vacuous but that the condition is satisfied on only a subset of inputs.
-
-- **Harsh Critic claim that the KL+L0+Cosine artifact is "damning"**: The paper acknowledges this finding in §4.3 and correctly interprets it as an instance where high detection rate comes at the cost of broken classification rather than genuine robustness. The paper uses this to argue *against* the three-metric combination, which is a reasonable analysis, not a self-contradiction.
-
-- **Strength Finder claim about "Rigorous evaluation across models and attacks"**: This overstates the evaluation, which lacks baseline comparisons, adaptive attacks, and uses non-standard metrics. Weakened and moved to Strengths with caveats.
-
-- **Harsh Critic claims about missing related works, typos, formatting, unreleased models, undisclosed hyperparameters, missing appendix**: These are all excluded per the hard rules. The paper cites what it cites, formatting artifacts are parser issues, and hyperparameter/implementation details are not required beyond what is provided.
+- The critic's claim that only a "small fraction" (3345/5000 = 66.9%) of ResNet/CIFAR-10 samples satisfy theorem conditions is misleading—a majority are compliant. Kept the point for CLIP (10.2%).
+- The critic's claim about "no information about how many training images" and ambiguous "development sets"—the paper states "randomly split the development sets into two equal halves," which is clear enough.
+- Formatting/style nitpicks (table formatting, typos, missing appendix references) are parser artifacts per instructions.
+- The Strength Finder's strength about "provable detection guarantee" is removed because the verified proof weaknesses contradict it (weakness wins per rules).
+- Missing related work mentions—cannot confirm these without external sources per instructions.
+- Critic's demand for ImageNet-scale evaluation is scope creep for an ICLR paper proposing a new method.
 
 ## Novel Insights
 
-The most interesting insight emerging from this paper—independent of whether the specific execution succeeds—is the observation that complementary distance metrics define distinct prediction-stability regions whose *mutual exclusivity* can be formally characterized. The proof strategy of showing that the conditions for fooling two metrics are incompatible (via energy budget trade-off between alignment direction and coordinate-wise magnitude) is a conceptual contribution that could be applied to other metric pairs beyond KL and L0. Even with the proof's technical gaps, this geometric framing of detection as "no single perturbation can lie in two stability bands simultaneously" is a useful way to think about designing certifiably detectable classifiers.
+None beyond the paper's own contributions. The core insight (complementary KL and L0 metrics for detecting different perturbation types) is clearly stated by the authors. The review process surfaces that the proof's mathematical gaps and the lack of standard experimental practices (baseline comparisons, adaptive attacks) prevent this insight from being convincingly validated.
 
 ## Suggestions
 
-1. **Fix the detection metrics**: Use standard detection definitions: TP = adversarial AND flagged; FP = clean AND flagged; TN = clean AND not flagged; FN = adversarial AND not flagged. Report the standard metrics and also report clean/adversarial accuracy separately for the accepted (non-flagged) predictions. This would make results comparable to prior work.
+1. **Fix the proof.** The sign handling in Equation 14 needs to be corrected or additional assumptions on the sign of (ĉ − c^*) must be added and justified. The claim that δ ∈ [0,1] must be properly derived or the Taylor remainder bounding reworked. Alternatively, soften the "formal guarantee" framing to describe the result as a partial characterization under strong assumptions.
 
-2. **Add baseline comparisons**: At minimum, evaluate Feature Squeezing and LID on the same ResNet/CIFAR-10 and CLIP/Tiny-ImageNet setups. This is essential for the paper to claim improvement over the state of the art.
+2. **Add baseline comparisons.** Compare KOALA against at least 3-4 established detectors (e.g., LID, Mahalanobis, NIC, CADet) under identical attack settings on CIFAR-10. Without this, there is no way to judge whether KOALA is useful relative to existing work.
 
-3. **Evaluate adaptive attacks**: Design an attack that explicitly minimizes disagreement between the KL and L0 heads (e.g., a loss that penalizes both KL(c_target, p+δ) and L0(c_target, p+δ) being small simultaneously). Evaluate KOALA against this adaptive adversary and report how detection performance degrades.
+3. **Add adaptive attack evaluation.** The most important experiment missing is: an attacker who knows the decision rule optimizes a perturbation to make ŷ_KL = ŷ_L0 = wrong_class. Report detection rates under this attack. If the method collapses, this must be honestly discussed.
 
-4. **Address the proof gap**: Either prove that the greedy selection in Claim B.1 is optimal (e.g., by showing the objective is submodular or by using a different optimization framework) or reformulate the proof to provide an upper bound without requiring optimality of the constructed δ'.
+4. **Use standard confusion matrix definitions.** Treat "input is attacked" as the positive condition and "detector flags attack" as the positive prediction. Report both standard and proposed metrics and explain any discrepancy.
 
-This paper has a genuinely interesting idea and an ambitious theoretical framework. However, the evaluation is currently not up to the standard needed to support its claims: the detection metrics are non-standard, no baselines are compared, and no adaptive attacks are evaluated. The theorem, while conceptually valuable, applies to a small fraction of inputs in one of the two settings tested. With substantial revision addressing these issues, this could become a strong contribution.
+5. **Provide τ and loss weight sensitivity analysis.** Vary τ ∈ {0.5, 0.6, 0.7, 0.8, 0.9} and ω_L0 ∈ {0.5, 0.7, 0.9} to show the method is not brittle to these choices.
 
 ---
 
-On originality: the KL+L0 disagreement idea is novel in the adversarial detection space. On importance: adversarial detection is a significant problem. On claim support: the claims are partially supported — the theorem provides useful intuition but applies to a limited subset, and the empirical results are difficult to interpret due to non-standard metrics. On soundness: the experiments have significant gaps (no baselines, no adaptive attacks, non-standard metrics). On clarity: the writing is generally clear, though the confusion matrix definitions are confusing. On community value: the geometric framing is valuable, but the paper in its current form does not provide actionable evidence that KOALA works as a practical detector.
+## Calibration Anchors
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+I compared the paper under review against the following human-reviewed anchors (all from the ICLR 2026 corpus):
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/.../7s3SQMiN3L.md` (Gradient Manifold Geometry) | 3.00 | Similar detection paper with no adaptive attacks. KOALA has an additional fatal issue: its core "provable" claim rests on a flawed proof. |
+| `/home/.../64PMEKVZP1.md` (Prediction Inconsistency Detection) | 2.67 | Detection paper that at least included baseline comparisons and adaptive attack attempts. KOALA is weaker for omitting both. |
+| `/home/.../Mr9a9XuLTI.md` (A Few Large Shifts) | 4.50 | Stronger detection paper with comprehensive baselines, adaptive attacks, and overhead analysis. KOALA lacks all of these. |
+| `/home/.../CSfcpGj48W.md` (Conformal Novelty Detection) | 4.00 | Paper with theoretical analysis that had incomplete proof elements. KOALA's proof issues are more fundamental. |
+| `/home/.../hZVSKjtaS5.md` (Adversaries Fight Back) | 4.00 | Well-executed empirical study with thorough adaptive attacks. KOALA lacks adaptive evaluation entirely. |
+
+Relative to these anchors, KOALA has a weaker evaluation than every comparable paper. The lowest-scoring anchors (2.67, 3.00) at least included baseline comparisons or adaptive attacks, which KOALA completely omits. Combined with the genuine mathematical gaps in the proof that is the paper's headline claim, the paper falls below these anchors.
+
+## Score and Decision
+
+**Score:** 2.5
+
+**Decision:** Reject
+
+**Rationale:** The paper has a genuinely interesting intuition (complementary KL+L0 detection), but the central distinguishing contribution—a formal proof of correctness—has significant mathematical gaps that are not fixable through minor revision. The experimental evaluation is critically incomplete: no baseline comparisons to existing detectors, no adaptive attack evaluation, and non-standard metrics that inflate reported performance. The method's hyperparameters lack sensitivity analysis, and the CLIP results suggest the mechanism may not generalize via the claimed geometric principle. While the lightweight training recipe is a practical advantage, it does not compensate for the paper's inability to establish that KOALA is a valid, competitive, or theoretically sound detection method.
+
+MY FINAL SCORE: <pineapple>2.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,26 +1,18 @@
-Now I have all the information I need. Let me write the final consolidated meta-review.
-
----
+Now I have everything I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes CANON (Conditional Advantage Estimation), a method for incorporating training-metric signals (entropy, response length) into RLVR-based LLM reasoning training without presupposing whether higher or lower metric values are better. The key idea is to split sampled responses into two groups based on a target metric, then compute inter-group advantages (which metric trend yields higher accuracy) and intra-group advantages (which responses are better within the same trend). Experiments on three LLMs across math reasoning and logic tasks show that entropy-based CANON-Inter improves math accuracy (+1.9 pts over DR.GRPO) while CANON-Intra excels on complex logic (+5.2 pts on hardest subset), and CANON based on response length achieves a better Pareto frontier in the performance–efficiency trade-off.
+This paper introduces CANON (Conditional Advantage Estimation), a modification to GRPO for RLVR training of large reasoning models. The key idea is to regroup sampled responses by a training metric (e.g., entropy, response length) into two equal-sized groups, then compute inter-group advantage (which metric trend leads to higher accuracy) and intra-group advantage (which responses within the same trend are better). A coefficient μ interpolates between these two signals. CANON-Inter (μ=1) yields a 1.9-point average gain on math reasoning, CANON-Intra (μ=0) yields a 5.2-point gain on the hardest logic problems, and CANON-Eff (weighting length-based groups) produces a dominant Pareto frontier in the performance–efficiency trade-off.
 
 ## Strengths
 
-- **Novel conditional regrouping mechanism**: The core idea of splitting responses by metric value and computing dual (inter/intra) advantages elegantly avoids encoding directional priors (e.g., "lower entropy is better"). This is a principled departure from prior reward/advantage shaping methods that rely on hand-crafted directional preferences. Theorem 1 provides formal backing for when the inter-group advantage yields a stronger signal than DR.GRPO.
+1. **Clean, principled idea with practical simplicity**: Regrouping by a metric and computing inter/intra advantages is elegantly simple — the paper shows that DR.GRPO is a special case (μ=0.5) of CANON. The change to training code is minimal, and the method operates without hand-crafted directional preferences (higher-is-better or lower-is-better), which prior reward-shaping methods require.
 
-- **Convincing evidence of complementary advantage roles**: Table 1 and Figure 2 clearly demonstrate that CANON-Inter (entropy-based) drives math reasoning gains through exploitation (higher accuracy, lower entropy), while CANON-Intra drives complex logic gains through exploration (encouraging reflection/rethinking behaviors). Figure 2f showing the reflection-gain curve crossing zero in sync with logic performance improvements is particularly compelling.
+2. **Consistent empirical gains across models and tasks**: CANON-Inter (entropy-based) improves over DR.GRPO by 1.9 points on average across six math benchmarks, with a 5.0-point gain on AIME24. CANON-Intra shows a 5.2-point improvement on the hardest ZebraLogic subset (XLarge). These trends hold across Qwen2.5-Math-7B, 1.5B, and Llama3.1-8B, suggesting the method's benefits are not architecture-specific.
 
-- **Genuine efficiency–performance Pareto improvement**: Section 5.3 and Figure 4c show CANON-Eff establishes a better Pareto frontier than length-clipping and length-reward baselines. At α=0.88, it achieves 2.63× higher performance at low token budgets and 45.5% token reduction at equal performance. The method also avoids the catastrophic collapse observed in the Length Reward (+) baseline (54.8→22.5 when coefficient changes from 0.004 to 0.005).
+3. **Dominant Pareto frontier for efficient reasoning**: CANON-Eff achieves a 26.3% token reduction with only 0.4-point performance loss, and at low token budgets delivers 2.63× the performance of DR.GRPO. Crucially, CANON-Eff avoids the collapse behavior of Length Reward (+) (which drops from 54.8 to 22.5 when its coefficient moves from 0.004 to 0.005), demonstrating substantially more stable exploration of the performance-efficiency frontier.
 
-- **Multi-model, multi-task evaluation**: The method is tested on Qwen2.5-Math-7B, Qwen2.5-Math-1.5B, and Llama3.1-8B across six math benchmarks and three logic reasoning complexity levels (Section 5.2, Table 2). CANON-Dynamic consistently outperforms DR.GRPO across all models and tasks.
-
-- **Insightful analysis of μ–metric relationship**: Figure 5 demonstrates a smooth, monotonic relationship between μ (the inter/intra weighting) and resulting entropy/length trends, showing CANON can steer behavior across a spectrum without rigid rewards. This is a genuinely novel empirical finding.
-
-- **Validating ablation on random regrouping**: Table 12 shows that random regrouping (splitting responses arbitrarily rather than by a meaningful metric) yields no improvement over DR.GRPO, confirming that the gains come specifically from regrouping by informative metrics, not from the two-group comparison structure alone.
-
-- **Theoretical selectivity proof (Theorem 2)**: The proof that CANON amplifies only the influence of the grouping metric and not independent conditions distinguishes it from naive numerical advantage scaling (validated by the failure of direct scaling in Table 4).
+4. **Mechanistic analysis of training dynamics**: Figure 2f shows that CANON-Intra's reflection gain curve crosses zero after ~90 training steps, coinciding with rapid improvement on complex logic tasks. This provides an interpretable account of why intra-group advantage helps — it incentivizes models to engage in more rethinking when the metric signal is informative — rather than just reporting aggregate score improvements.
 
 ## Weaknesses
 
@@ -28,74 +20,76 @@ This paper proposes CANON (Conditional Advantage Estimation), a method for incor
 None.
 
 ### Major
-None.
+
+1. **No variance or statistical significance reporting across all experiments**. The paper reports only point estimates in every table and single curves without error bands in every figure. This is problematic for several reasons: AIME 2024 and AIME 2025 each contain only 30 problems, so a 5-point improvement (~1.5 more correct answers) could be within noise without multiple seeded runs. The 1.9-point gap between CANON-Inter (57.6) and DR.GRPO (55.7) in Table 1 may be meaningful, but the 1.0-point gap between CANON-Intra (54.7) and DR.GRPO in the same table could easily be noise. While the paper does use Avg@10 evaluation for small benchmarks (which reduces evaluation variance), the absence of any multi-seed training runs or confidence intervals means the reader cannot assess whether the reported improvements are statistically reliable. This is the single most critical missing piece for a paper whose central claim rests on empirical superiority.
+
+2. **CANON-Dynamic results are based on post-hoc selection of scheduling strategies**. The paper tries four scheduling strategies and selects the best per-model. The reported CANON-Dynamic results come from this selection (Cosin-First-Inter-Later-Intra for 7B/8B, First-Inter-Later-Intra for 1.5B). The paper acknowledges that alternative schedules (Lambda, Cyclic-triangular2 in Appendix D.2) perform worse. This means the claimed advantage of CANON-Dynamic over DR.GRPO is not guaranteed by the method itself but depends on choosing the right schedule, and no principled a priori rule is provided for this choice. However, this weakness is limited to the CANON-Dynamic variant — the static CANON-Inter, CANON-Intra, and CANON-Eff results are unaffected and provide cleaner evidence.
 
 ### Minor
 
-- **No statistical significance reporting across experiments**: All main results (Tables 1–4, Figures 2–6) present single-number accuracies without confidence intervals, standard deviations, or multiple-seed replication. While multi-seed training of 7B models with RL is expensive and single-run reporting is common in this subfield, the small size of benchmarks like AIME 24 (30 problems) combined with Avg@10 evaluation makes the modest gains (e.g., +1.9 points on math) somewhat fragile. However, the training-dynamics evidence (Figure 2) and the consistent pattern across models/tasks partially mitigates this concern.
+1. **Theoretical framework has limited connection to empirical findings**. Theorem 1 establishes that inter-group advantage is amplified when groups are equally sized, and Theorem 2 shows that CANON does not amplify independent conditions. However, neither theorem is used to generate testable predictions. For example, Theorem 1 predicts that unequal group sizes should reduce effectiveness — this could be ablated but is not. Theorem 2's independence assumption (entropy and length are treated as independent) is questionable in practice since longer responses tend toward different entropy distributions, and this violation is not studied. The theory motivates the equal-split design but doesn't provide falsifiable predictions validated empirically.
 
-- **Missing direct GRPO/RLOO/ReMax baseline numbers in the main results**: The paper lists ReMax, REINFORCE++, RLOO, and GRPO as baselines (Section 5.1) but Table 1 only reports DR.GRPO. While DR.GRPO is the most relevant comparison (CANON builds directly on DR.GRPO's token-level loss and the paper follows its training setup), showing at least vanilla GRPO numbers would strengthen the claim of improvement over prior methods. The entropy-specific baselines (Entropy Adv, Clip-Cov) appear only in the ablation (Table 4) rather than the primary tables.
+2. **Missing ablation on group size**. Since Theorem 1's central claim is that equal-sized groups are optimal for signal amplification, varying the split ratio (e.g., 50/50, 60/40, 70/30) would directly test this prediction and ground the theory. The paper does not include this experiment.
 
-- **Scheduling strategy selection could benefit from clearer protocol**: Four scheduling strategies are tried and the best is selected per model (Appendix C.6 states selection is "based on training performance"). While this is more defensible than test-set selection, the protocol for how "strong performance in both scenarios" is determined could be more transparent. This concerns only the CANON-Dynamic results (Section 5.2), not the core CANON-Inter/CANON-Intra results in Table 1 which use fixed μ.
-
-- **Theorems address advantage magnitude ratios, not policy improvement**: Theorems 1–2 compare the magnitude of CANON advantages to DR.GRPO advantages, but do not directly characterize how this translates to improved policy optimization. This is clearly scoped in the paper and is a reasonable level of theoretical analysis for an empirical methods paper, but limits the formal guarantees.
+3. **Sensitivity of CANON-Eff's α hyperparameter is under-analyzed**. While Table 11 shows performance and token cost across α = {0.5, 0.7, 0.8, 0.88, 0.96}, the analysis does not examine where the trade-off becomes unstable or how the optimal α depends on task difficulty. The claim that CANON "stably explores the entire frontier" is supported visually (no collapse) but lacks a formal stability metric across seeds or coefficient values.
 
 ### Trivial
 
-- The paper's title contains a formatting artifact ("REA## SONING") from PDF extraction; this is not an author error.
-- Some table rendering in the extracted text is garbled (parser artifact, not an author issue).
+- The paper states Theorem 1's condition as "only when |C_q^+| = |C_q^-| if |C_q^+| is a constant" which is unnecessarily convoluted — the simpler point is that equal splits ensure amplification when the condition is informative. This could be clarified.
 
 ## Nice-to-Haves
 
-- Running at least 3 seeds for the main CANON-Inter/CANON-Intra vs. DR.GRPO comparison on the primary model (Qwen2.5-Math-7B) and reporting mean ± std would substantially strengthen the empirical claims, particularly for the AIME benchmarks.
-- Including vanilla GRPO numbers in Table 1 (even if expected to underperform DR.GRPO) would provide a more complete picture of where CANON stands relative to the full family of group-based estimators.
-- A formal description of how training-performance-based strategy selection was conducted for CANON-Dynamic would improve transparency.
-- Extending the method to multiple metrics simultaneously (acknowledged as future work in the limitations section).
+- Applying CANON to other metrics (confidence, number of reflection steps) — Appendix D.1 already shows this works for reflection count, confirming the framework's generality.
+- Example responses showing behavioral differences (e.g., a math problem solved by CANON-Inter but not DR.GRPO) would illustrate the mechanism concretely.
+- Combining multiple metrics simultaneously via multi-condition regrouping (4+ groups) — acknowledged as future work; preliminary results would strengthen the extensibility claim.
 
 ## Removed Points
 
-*The following points were flagged by the harsh critic but are removed or substantially weakened after verification against the paper:*
-
-1. **"Dynamic scheduling strategies selected directly on test benchmarks"** — **REMOVED**. Appendix C.6 explicitly states selection was "based on training performance," not test-set metrics. The main text's phrasing ("achieve strong performance in both scenarios") is ambiguous but the appendix clarifies. This criticism is based on a misreading.
-
-2. **"No comparison with DAPO"** — **REMOVED**. DAPO is an RL training system (with importance sampling, novel training paradigms); CANON is an advantage estimation method. They address different aspects of the RLVR pipeline. The paper appropriately uses techniques from DAPO (clip-higher, length bias correction) and cites it. Demanding comparison with every RL system is scope creep.
-
-3. **"Theorem 2's independence assumption is unrealistic"** — **REMOVED as a weakness**. The paper presents Theorem 2 as an idealized analysis showing that *under independence*, CANON selectively amplifies only the target metric. This is a standard theoretical-analysis-for-insight pattern. The paper does not claim real metrics are independent, and the empirical validation (Table 4, random regrouping) provides practical confirmation of selectivity. Moved to Nice-to-Haves as a suggestion to discuss the independence assumption's practical implications.
-
-4. **"Stability claim relies on a single observation"** — **REMOVED**. The stability claim is supported by Figure 4c, which shows a smooth Pareto frontier across multiple α values (0.5, 0.7, 0.8, 0.88, 0.96), contrasted with the Length Reward (+) baseline's sharp collapse. The single cliff example is illustrative, not the sole evidence.
-
-5. **"Entropy Adv and Clip-Cov appear only in ablation"** — **KEPT as a minor concern** (see Minor weakness about baseline placement) but downgraded from the harsh critic's framing as a critical methodological gap.
+- **Criticism that CANON still uses human prior on which metric to group by**: This is acknowledged transparently in the paper — the point is that CANON does not presuppose the *direction* (higher/lower) of the metric's impact, which is the novel claim vs. prior reward shaping. The framing is precise enough.
+- **"Theorem 1's derivation depends on p being constant" — the paper explicitly handles this dependence and notes the ratio varies with p.** The harsh critic's complaint is partially based on a misreading; the theorem states the amplification condition correctly.
+- **Missing appendix/proofs content**: The parser strips these; the original submission contains them (Appendix E has full derivations).
+- **"Alternative schedules perform worse, weakening CANON-Dynamic claims" — the paper already acknowledges this and reports it transparently.** This is kept as a major weakness (post-hoc selection) but the tone is adjusted: the paper does disclose the selection process, making it a methodological concern rather than a deception.
+- **Criticism that the paper doesn't report results with standard deviation (the missing experiments section)** — this is already captured in the Major weakness #1.
+- **Generic strengths from the Strength Finder** (e.g., "addressed an important problem") — dropped as they lack specific content.
+- **Request for larger dataset / more compute** — the current dataset sizes (45k prompts) are already substantial and standard in the field.
+- **"The paper does not adequately explain why First-Inter-Later-Intra is expected to work"** — the paper provides the intuition (exploit fast math gains early, then explore for complex logic later), which is a reasonable explanation for the scheduling's motivation.
 
 ## Novel Insights
 
-The most interesting finding that emerges from the reviews but goes beyond the paper's own stated contributions is the hierarchical, monotonic relationship between μ and metric trends (Figure 5). As μ increases from 0.0 to 1.0, entropy smoothly decreases — showing that the inter/intra weighting acts as a continuous "dial" for steering training dynamics. This is not merely a hyperparameter to tune; it is a principled mechanism for navigating the exploration–exploitation trade-off without needing to encode directional preferences in the reward function. This finding complements but goes beyond the paper's stated contributions about avoiding directional bias.
+The reviews collectively highlight an interesting tension: CANON's clean, simple idea (regroup by metric → inter/intra advantages) is the paper's greatest strength, but the evaluation methodology (single-seed point estimates, post-hoc schedule selection) is the paper's greatest weakness. This is a recurring pattern in RLVR papers — a genuinely clever algorithmic insight paired with evaluation practices that lag behind what would be considered rigorous in other ML subfields. The most valuable signal from the paper is the *pattern* of results: CANON-Inter consistently helps math, CANON-Intra consistently helps complex logic, and the relationship between μ and entropy is monotonic (Figure 5). This coherence across models and tasks is more compelling than any single number and suggests the method captures a genuine inductive bias, even if individual point estimates lack error bars.
 
 ## Suggestions
 
-- Add standard deviation / confidence intervals for the main Table 1 results, at minimum for the AIME benchmarks where small evaluation sets make point estimates unreliable. Even 2–3 seeds on the primary model would substantially improve credibility.
-- Clarify the scheduling strategy selection protocol: state explicitly in the main text that selection is based on training-set performance (as the appendix does), and describe what metric was used for the "strong performance in both scenarios" criterion.
-- Consider adding a brief discussion in Section 4.2 about the practical implications of Theorem 2's independence assumption — when might metrics be correlated enough in practice to partially violate the selectivity property?
-- Report at least DR.GRPO and GRPO numbers side-by-side in Table 1, since GRPO is the foundational method that DR.GRPO and CANON both modify.
+1. **Add multi-seed results (≥3 seeds) with standard deviations for all main tables** — this is the most impactful improvement the authors could make, converting the current point estimates into statistically meaningful comparisons. This likely requires the most work but is essential.
+
+2. **Clearly separate static and dynamic claims**: Present CANON-Inter (μ=1) and CANON-Intra (μ=0) as the core empirical contribution, and relegate CANON-Dynamic to a secondary "practical extension" with the caveat that scheduling requires validation-set-based selection. Alternatively, provide a principled rule for schedule selection.
+
+3. **Ablate group size** to directly test Theorem 1's prediction, connecting theory to experiment.
+
+4. **For Figures 2 and 4, add standard error bands** across seeds to strengthen the visual claims about training dynamics and Pareto frontiers.
+
+5. **Add a statistical test** (e.g., paired bootstrap or matched-pairs test) comparing CANON-Inter vs. DR.GRPO on the six math benchmarks to quantify confidence in the 1.9-point gap.
 
 ## Score and Decision
 
-**Calibration anchors considered:**
+**Calibration anchors (all from ICLR 2026 / COLM 2025 review corpus):**
 
-| Path | Avg Score | Comparison to CANON |
-|------|-----------|---------------------|
-| ExGRPO (`701tjQXWVk`) | 6.00 | More thorough experiments (5 models, broader benchmarks), but methodologically less novel (experience replay). CANON is weaker experimentally but stronger methodologically. |
-| QAE (`WDP5b3mtFV`) | 5.50 | Comparable: novel advantage estimation method, strong theory, good experiments. QAE has stronger theoretical safety guarantees; CANON has a more flexible dual-advantage framework. |
-| RiskPO (`KjHB7rebQO`) | 5.50 | Comparable: principled alternative to mean-based GRPO, good benchmarks. RiskPO has more benchmarks; CANON has more task diversity (math + logic). |
-| Scaf-GRPO (`bOwVr0yr7r`) | 5.50 | Comparable novelty, but Scaf-GRPO has a more severe weakness (teacher model dependency). CANON is more self-contained. |
-| TP-GRPO (`LZZENDlZt9`) | 5.00 | CANON has stronger evidential support and fewer methodological gaps than TP-GRPO. |
-| REPO (`E8MR8jgEeZ`) | 4.00 | CANON is clearly stronger: more novel, better experiments, more complete evaluation. |
-| GRPO-λ (`iRWqcnBlLQ`) | 4.00 | CANON is methodologically richer and has more comprehensive experiments. |
-| Demystifying GRPO (`8gk7qmKSRv`) | 3.00 | Not comparable (analysis-only paper). CANON has both analysis and a novel method. |
-| LSPO (`2Tg9RhHsSU`) | 2.50 | CANON is substantially stronger across all dimensions. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/.../iRWqcnBlLQ.md` (GRPO-λ) | 4.00 | Similar contribution type (GRPO modification), similar evaluation breadth, similar weakness on statistical significance. CANON has clearer results across two task families vs. one. |
+| `/home/.../701tjQXWVk.md` (ExGRPO) | 6.00 | Stronger empirical methodology, broader baselines, more thorough analysis. CANON's core idea is cleaner but the evaluation is weaker. |
+| `/home/.../9fwvcl0Jur.md` (Can GRPO Help) | 2.50 | Synthetic experiments, limited scope. CANON is substantially stronger empirically. |
+| `/home/.../OHaFgEa0yZ.md` (Uncalibrated Reasoning) | 3.00 | Narrow scope and limited model evaluation. CANON is stronger in breadth and contribution. |
+| `/home/.../jGbRWwIidy.md` (RLVR Incentivizes) | 5.33 | Strong theoretical framing combined with empirical validation. CANON is comparable in quality but has more actionable algorithmic contribution. |
+| `/home/.../Qr9FAtcpeR.md` (GRPO-MA) | 3.50 | Weaker results on fewer benchmarks. CANON is clearly stronger. |
 
-CANON's contribution — conditional regrouping to incorporate metric signals without directional bias — is genuinely novel and well-executed. The dual-advantage framework is principled, theoretically grounded, and empirically validated across multiple models and tasks. The experimental evaluation, while having minor gaps (no statistical reporting, some missing baselines), is thorough by the standards of this subfield and supports the core claims. The paper clearly demonstrates when and why inter-group vs. intra-group advantages matter, and the efficiency analysis shows practical value.
+Relative to these anchors, CANON sits between the 4.00 (GRPO-λ) and 6.00 (ExGRPO) papers. Its core algorithmic insight is cleaner than GRPO-λ's, but its empirical methodology (no variance reporting) is notably weaker than ExGRPO's. The paper is clearly above the rejection-level papers (2.5–3.5) due to the breadth and consistency of its results across models and tasks.
 
-Compared to anchors: CANON is stronger than the 4.0-level papers (REPO, GRPO-λ) and substantially above the 2.5–3.5 rejected papers. It is comparable in quality to the 5.0–5.5 accepted posters (RiskPO, QAE, Scaf-GRPO), with real strengths in novelty and analysis balanced by minor experimental gaps that prevent it from reaching the 6.0 level of ExGRPO's experimental thoroughness.
+The static CANON-Inter/Intra and CANON-Eff results provide solid evidence for a genuine contribution. The major weaknesses (variance reporting, post-hoc scheduling) are addressable in revision and do not invalidate the core claims.
+
+**Score: 5.0** — Solid contribution with room for methodological improvement.
+
+**Decision: Accept (Poster)**
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>
