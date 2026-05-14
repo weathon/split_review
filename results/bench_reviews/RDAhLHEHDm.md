@@ -1,106 +1,74 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have a thorough understanding of both the paper and the anchor papers. Let me construct the final review.
 
 ---
 
 ## Summary
 
-This paper challenges the prevailing sequence-centric paradigm in Scientific LLMs for biology. The authors argue that current approaches to processing protein sequences — either as a specialized language or as a separate modality — suffer from a "tokenization dilemma" of weak representation and semantic misalignment. They propose a context-driven alternative: use established bioinformatics tools (BLAST, Pfam, ProTrek) to generate high-level textual context from protein sequences, then feed only that context to LLMs. Through systematic experiments across 7 models and three input modes, they show that context-only consistently outperforms sequence-only and, critically, that adding raw sequences to context *degrades* performance — raw sequences act as informational noise. Additional analyses of representation quality, temporal robustness, computational efficiency, and wet-lab validation on novel sequences support the argument.
-
----
+This paper argues that current Scientific LLMs face a "tokenization dilemma" when processing raw biomolecular sequences — either destroying functional motifs through atomic tokenization (sequence-as-language) or suffering semantic misalignment between biological and linguistic spaces (sequence-as-modality). The authors propose a "context-driven" alternative: feed LLMs high-level structured annotations from bioinformatics tools (Pfam domains, BLASTp homolog GO terms) instead of raw sequences. Through systematic comparison across 6 LLMs (3 Sci-LLMs, 3 general) and three input modes (sequence-only, context-only, sequence+context) on protein function/pathway/localization QA, they show context-only dramatically outperforms sequence-only, and that adding raw sequences to context *degrades* performance for Sci-LLMs. The paper includes representation analyses, temporal degradation studies, efficiency comparisons, and wet-lab validation on novel sequences.
 
 ## Strengths
 
-- **Comprehensive, systematic empirical design.** The paper evaluates 7 models (3 specialized Sci-LLMs: Intern-S1, Evolla, NatureLM; 4 general LLMs: Deepseek-v3, Gemini2.5 Pro, GPT-5, Qwen3) under three input configurations (sequence-only, context-only, sequence+context) across three biological task categories. The scale and consistency of this evaluation is a genuine strength, and the result pattern is stable across all models (Table 1).
+- **Systematic, well-controlled empirical comparison across models and input modes.** Table 1 provides a consistent benchmark of 6 LLMs × 3 input configurations on the same QA tasks. This is a genuinely useful empirical snapshot that isolates the effect of input modality. The finding that context-only achieves dramatically higher scores than sequence-only is robust and important for practitioners.
 
-- **The "informational noise" finding is well-substantiated.** For every model tested, Sequence+Context yields a *lower* score than Context-Only (e.g., Intern-S1 drops from 86.15 to 84.03; Evolla from 74.02 to 70.53). This is a non-obvious and important result — it provides concrete evidence that raw sequences are not merely redundant but actively detrimental when informative context is available.
+- **Temporal degradation analysis (Section 5.4) is insightful and well-executed.** Tracking model performance against protein publication year (1995–2024) reveals that Evolla collapses on recently discovered proteins (slope −0.923) while the context-driven approach degrades gracefully (slope −0.618). The paper acknowledges Evolla's training data freeze as a partial explanation but argues convincingly that the steepness points to a deeper reliance on evolutionary information density. Intern-S1's flat-but-low profile is a genuinely informative negative result.
 
-- **Layer-wise ARI analysis provides mechanistic insight into semantic misalignment.** The progressive degradation of ARI within Evolla (SaProt encoder: 0.945 → Q-Former alignment: 0.916 → final LLM embedding: 0.809, Section 5.3, Figure 3) cleanly isolates the alignment step as the source of representation decay. This is a well-designed analysis that directly supports the second horn of the tokenization dilemma.
+- **Layer-wise representational analysis within Evolla (Section 5.3) is valid and revealing.** Tracing ARI from SaProt encoder (0.945) → Q-Former alignment (0.916) → LLM decoder output (0.809) cleanly demonstrates that representational quality degrades at the alignment step, not at the encoder. This is the paper's strongest mechanistic evidence.
 
-- **Temporal analysis demonstrates robustness.** The context-driven approach degrades gracefully on recently discovered proteins (slope -0.618) while Evolla collapses (slope -0.923) and Intern-S1 remains flat and low (slope -0.065) (Section 5.4, Figure 4). This comparison across 30 years of protein discovery provides compelling evidence for the generalization advantage of reasoning over high-level knowledge.
+- **The finding that Sci-LLMs are *harmed* by adding raw sequences to informative context is counterintuitive and noteworthy.** For Intern-S1 (86.15 → 84.03), Evolla (74.02 → 70.53), and NatureLM (39.50 → 38.86), adding the sequence reduces performance. This cannot be explained by information asymmetry alone — the sequence adds noise rather than signal for these models.
 
-- **Wet-lab validation on truly novel sequences.** Testing on unpublished Rhodopsin and PETase sequences absent from all major databases (Section 5.6, Figures 5-6) provides a genuine out-of-distribution evaluation. The context-driven approach achieves 100% and 97.3% accuracy, while Evolla fails on one family.
-
-- **Practical efficiency is quantified.** The context-driven method achieves ~23× lower cost and 1.3× faster inference in single mode, and 154× faster in batch mode, compared to the specialized Evolla model, while delivering higher accuracy (Table 2).
-
----
+- **Efficiency analysis (Section 5.5) provides practical deployment guidance.** The context-driven approach is ~23× cheaper and ~1.3× faster than Evolla in single-query mode, and ~30× cheaper and ~154× faster in batch mode, while achieving higher accuracy.
 
 ## Weaknesses
 
-### Fatal
-
-None. The core empirical findings remain valid despite the issues below.
-
 ### Major
 
-- **Text–figure contradiction in Section 5.6.** The main text states that Evolla "attains a reasonable 80.0% accuracy on Rhodopsin" and "fails catastrophically on PETase." But Figure 6 (whose caption is explicit) shows the opposite: 5.0% accuracy on Rhodopsin and 83.78% on PETase. This is not a typo — it is a substantive misreporting that mischaracterizes Evolla's failure mode. The overall conclusion (context-driven outperforms Evolla on both families) still holds, but this error indicates insufficient care in finalizing the manuscript and erodes confidence in other reported figures. The authors must correct this and should double-check all other numbers.
+- **The "tokenization dilemma" framing is asserted rather than causally demonstrated; information asymmetry is a significant confound.** The context provided to the LLM contains functionally predictive labels (Pfam domain descriptions like "kinase domain," GO terms from BLASTp homologs). The performance gap between context-only and sequence-only therefore reflects, at least partially, the fact that the context already encodes the output of decades of bioinformatics work in readily extractable form. The paper's label-leakage prevention (Section 4, lines 146–152) addresses a narrower concern (not using the query protein's own annotations) but does not address the deeper issue: the comparison does not isolate tokenization quality as the causal factor. The experiment demonstrates that providing structured functional information helps — which is close to tautological — not that tokenization per se is the bottleneck. The paper's strongest evidence for the tokenization mechanism is Section 5.3, not the main benchmark.
+
+- **The headline claim that raw sequences "consistently act as informational noise" (line 188) is contradicted by the paper's own data for general-purpose LLMs.** In Table 1, the Sequence+Context condition *improves* over Context-only for DeepSeek-v3 (86.03 vs. 84.99), GPT-5 (76.45 vs. 75.76), and Qwen3-235B (85.90 vs. 84.99). Only Gemini2.5 Pro shows a negligible drop (86.98 vs. 87.19). The "noise" effect is therefore specific to Sci-LLMs, not a universal property of raw sequences. The paper's takeaway message (line 188) and discussion (lines 195–196: "the inclusion of the raw sequence alongside its high-level summary resulted in a lower score") selectively highlight the Sci-LLM results and generalize inappropriately. This weakens the claimed universality of the tokenization dilemma and suggests the effect may arise from architectural particularities of Sci-LLMs rather than from an inherent limitation of sequence tokenization.
+
+- **The representation analysis in Section 5.2 embeds incomparable objects, undermining the "weak representation" evidence.** The paper compares (i) *output* embeddings from Sci-LLMs (i.e., embeddings of generated answer text) with (ii) embeddings of the context text produced by an external model (Qwen-embedding). The context text explicitly contains functional labels, so its high ARI (0.958) is expected regardless of any property of the Sci-LLM. This comparison does not measure the quality of the LLM's internal protein representation — it measures whether a text containing functional labels clusters by function when embedded by a text embedding model. The conclusion that "simple context provides a vastly superior functional representation of proteins compared to both sequence-to-language/modality strategies" (line 206) is not supported by this analysis.
 
 ### Minor
 
-- **The ARI comparison in Section 5.2 is partially circular as evidence for "weak representation."** The "Ours" ARI of 0.958 is obtained by embedding the tool-generated textual context (which contains explicit GO terms and Pfam domain descriptions) using a general text embedding model (Qwen-embedding), then comparing against Sci-LLM embeddings of raw sequences. That functional-annotation text clusters well by function is unsurprising and doesn't cleanly isolate whether Sci-LLMs fail due to tokenization specifically or because de novo function inference from sequence is intrinsically hard. The layer-wise analysis in Section 5.3 provides better, independent evidence for the semantic misalignment claim, but Section 5.2's framing as evidence for weak representation overstates what this comparison can demonstrate.
+- **The LLM-Score evaluation metric lacks reported validation against human judgment in the main text.** The entire quantitative comparison in Table 1 relies on an LLM-as-judge metric. While the paper states that details are in Appendices B and C (which are stripped by the parser and may exist in the original), the main text provides no evidence of correlation with human expert evaluation. LLM judges are known to exhibit stylistic biases, and answers produced from context-rich inputs may receive higher scores for coherence rather than factual accuracy. This concern is mitigable (the dramatic score differences, e.g., 6.82 vs. 39.50 for NatureLM, are unlikely to be purely stylistic artifacts), but it introduces uncertainty into the precise quantitative comparisons, especially for small differences between Seq+Context and Context-only.
 
-- **No statistical significance reported for Table 1 comparisons.** Apparent differences of 1-4 percentage points (e.g., Intern-S1 Context-Only 86.15 vs. Sequence+Context 84.03) are used to argue for an "active degradation effect" without any confidence intervals, bootstrapped standard errors, or significance tests. Given the LLM-Score metric's own variance, these narrow margins may not be reliable without uncertainty quantification.
-
-- **The temporal analysis does not control for differential training data cut-offs.** Section 5.4 acknowledges that Evolla's training data has a temporal bias (Swiss-Prot Release 202303) but asserts this "alone does not fully account for the steepness of the collapse" without quantitative decomposition. The claim that a "deeper issue" exists is plausible but asserted rather than demonstrated.
-
-- **The term "tokenization dilemma" conflates several distinct issues.** The paper groups under one label: (a) too-granular tokenization destroying motifs in sequence-as-language models, (b) modality gap in sequence-as-modality models, and (c) raw sequences acting as noise when combined with context. These are distinct phenomena with potentially different causes and solutions. The experiments provide evidence for (c) most directly and (b) through the layer-wise analysis, but evidence for (a) specifically (that tokenization granularity is the bottleneck, as opposed to insufficient training data or model capacity) is more indirect.
+- **The wet-lab validation (Section 5.6) reduces to homology-based classification.** The binary Rhodopsin/PETase task is well-suited to a BLAST + LLM pipeline because these families have clear domain signatures. The near-perfect accuracy is unsurprising for the context method and does not demonstrate "reasoning." The experiment's main contribution is documenting Evolla's catastrophic failure on PETase (5% on Rhodopsin), which is already evident from the main benchmark.
 
 ### Trivial
 
-- The text in Section 5.3 describes a drop in ARI from SaProt encoder to final LLM embedding but does not distinguish between the Q-Former's role and the LLM decoder layers' role as separate sources of degradation — both are grouped under "alignment."
-
----
+- The paper claims to "lay the foundation for a new class of hybrid scientific AI agents" (Abstract) but does not demonstrate any agent-building or multi-step reasoning. The contribution is an empirical comparison of input modalities for static QA, which is valuable but more modest than the framing suggests.
 
 ## Nice-to-Haves
 
-- An ablation decomposing which bioinformatics tool (Pfam domains alone, BLAST GO terms alone, ProTrek alone) drives the context-driven performance would clarify whether the approach is essentially "retrieval of the answer from homolog databases" or genuinely synthesizing multiple signals. This would help address the concern that the context may contain the ground-truth answer verbatim.
-
-- Controlled experiments adding shuffled or random context to test whether the Sequence+Context degradation is due to informational noise specifically or simply to increased prompt length/complexity.
-
-- A small-scale human evaluation correlating LLM-Score with expert judgment would substantially strengthen confidence in the automated metric, especially since the judge LLM may share biases with the models being evaluated.
-
----
+- **Controlled information-content experiment:** A condition where the raw sequence is provided alongside a textual description containing the same functional labels but where the sequence is still tokenized would help disentangle information content from tokenization quality as the causal factor.
+- **Analysis of why general LLMs benefit from Seq+Context:** Investigating why DeepSeek-v3, GPT-5, and Qwen3 gain from having the raw sequence alongside context would strengthen the paper's analysis and potentially reveal when sequence information is genuinely useful.
+- **Human validation of LLM-Score:** Reporting agreement between the LLM judge and human experts on a subset of questions would substantially increase confidence in the quantitative results.
 
 ## Removed Points
 
-These points from the input critiques were considered and removed. Treat them with caution.
+These points are flagged to be removed; treat them with caution.
 
-1. **"The central comparison between input modes is inherently unfair / context-only is a curated cheat sheet"** — Removed as a fatal criticism. The comparison *is* the paper's point: the authors explicitly argue that Sci-LLMs should be used as reasoning engines over high-level context rather than as de novo sequence decoders. The experiment tests exactly this hypothesis. The paper acknowledges limitations for orphan proteins (Section 6). However, a weakened version of this concern remains in the Minor weaknesses regarding the ARI comparison.
+- **Harsh Critic Point 1 (information asymmetry as fatal):** While the information asymmetry point has merit, the critic's claim that this *completely* invalidates the paper is too strong. The paper does show that Sci-LLMs are harmed by adding sequences to context — which cannot be explained by information asymmetry — and Section 5.3 provides valid mechanistic evidence. Kept as a major weakness with softened framing.
 
-2. **"LLM-Score evaluation protocol is not disclosed / only in appendices"** — Removed per review instructions: the parser strips appendix sections; these details exist in the original submission (Appendices B and C are referenced in the main text at Section 5.1).
+- **Harsh Critic claim that "the context already contains the answers":** The paper explicitly designs its pipeline to avoid label leakage (lines 146–152). BLASTp reads GO terms from homologs, not from the query; InterProScan is ab initio. While the context is functionally informative, it does not literally contain the answer for the specific query protein. The criticism that it "essentially substitutes for the label" is partially addressed by the paper's design.
 
-3. **"The representation analysis in Section 5.2 is circular and invalidates the entire figure"** — Partially removed as overstated. The circularity concern is real (kept as a Minor weakness), but the critic's framing that it "invalidates the figure as evidence" is too strong; the figure remains informative as a comparison of representational quality, just not as evidence that tokenization per se causes the gap.
+- **Harsh Critic claim about Appendix-dependent proofs (LLM-Score validation in Appendices B/C):** The parser strips appendices. Per the hard rules, we cannot flag missing appendix content. The concern about metric validation is kept but repositioned as a minor weakness about what's present in the main text.
 
-4. **"Missing experiments: human evaluation, ablation of context sources, controlled experiments with shuffled context"** — Moved to Nice-to-Haves. These would strengthen the paper but are not required to support its core claims.
+- **Strength Finder claim: "context-only achieves the highest or close-to-highest score" in every model:** This is overstated — for 3/4 general LLMs, Seq+Context actually achieves the highest score. Removed the "every model" framing and kept only the Sci-LLM finding.
 
-5. **"The efficiency analysis tests an engineering trade-off, not a scientific hypothesis"** — Removed. Efficiency is a legitimate practical consideration and the comparison is informative, even if not a test of the tokenization dilemma itself.
+- **Strength Finder generic strengths:** "The paper tackles a genuinely important question," "rigorous context-design" — these are too generic and are either moved to supporting context or removed.
 
-6. **"Demand for theoretical proofs / confidence intervals / methodological practices not standard in the field"** — Confidence intervals are retained as a Minor weakness (they are standard in benchmark evaluations). Other demands (theoretical proofs for an empirical study) are removed.
-
-7. **All formatting/style/typo/grammar criticisms** — Removed per parser-related instructions.
-
-8. **Strength Finder claim about "context provides near-perfect functional separation (ARI 0.958)" as unqualified evidence for the tokenization dilemma** — This strength is retained but qualified; the ARI number is correct, but its interpretation is tempered by the circularity concern noted in Minor weaknesses.
-
-9. **"Missing related works" / demands for additional baselines** — Removed per instructions.
-
----
+- **Efficiency analysis as a strength:** Kept as a supporting strength — it is concrete, specific, and practically useful.
 
 ## Novel Insights
 
-The most genuinely novel observation from this work is the consistent and cross-model finding that raw sequences, when added to informative context, act as *informational noise* that degrades performance. This is counterintuitive — one might expect that models would simply ignore redundant information or that multimodal inputs would be strictly additive. The fact that every model tested performs worse with Sequence+Context than with Context-Only suggests a systematic failure mode in how current Sci-LLMs integrate heterogeneous inputs, which has implications beyond biology for any domain where structured knowledge can accompany raw data.
-
----
+The temporal degradation analysis (Section 5.4) reveals a non-obvious pattern: Sci-LLMs do not just perform worse overall — their performance *collapses* specifically on recently discovered proteins, while the context-driven approach degrades gracefully. This suggests that sequence-trained models overfit to the dense evolutionary information of well-studied protein families rather than learning generalizable biological principles. The layer-wise ARI analysis within Evolla (Section 5.3) provides clean evidence that alignment modules, not encoders, are the primary bottleneck in sequence-as-modality architectures — a finding with direct implications for architecture design in future Sci-LLMs.
 
 ## Suggestions
 
-1. **Fix the Section 5.6 text–figure contradiction immediately.** The Rhodopsin/PETase accuracy numbers in the text must match Figure 6. This is a mandatory correction.
-
-2. **Add bootstrap confidence intervals to Table 1.** Even 1000-resample bootstraps would allow readers to assess whether the Sequence+Context vs. Context-Only differences are statistically reliable.
-
-3. **Reframe Section 5.2 more carefully.** Acknowledge that the "Ours" ARI comes from embeddings of the tool-generated context text (not from a Sci-LLM's representation of the protein) and clarify what the comparison can and cannot demonstrate. Consider adding an alternative analysis: clustering the Sci-LLM embeddings when they are given the context as input (i.e., how well do the models *themselves* represent the context?), which would be a more apples-to-apples comparison.
-
-4. **Soften the "tokenization dilemma" language** to more precisely map each piece of evidence to each horn of the dilemma, or acknowledge that the experiments primarily demonstrate the *symptoms* (weak performance from raw sequences, noise when combined with context) rather than isolating tokenization granularity as the root cause.
-
----
+- **Narrow and qualify the "informational noise" claim.** Acknowledge explicitly that the degradation effect is specific to Sci-LLMs and that general-purpose LLMs show the opposite pattern. This would transform a misleading overgeneralization into a more interesting and nuanced finding: Sci-LLMs may be *more* vulnerable to sequence-induced confusion than general LLMs.
+- **Replace or substantially revise the Section 5.2 representation analysis.** Either extract output embeddings from the Sci-LLMs in a way that isolates their *internal* protein representations (e.g., embeddings of the protein tokens before answer generation) or compare all models' output answer embeddings using the same embedding model. The current comparison of Sci-LLM output embeddings against Qwen-embedding of context text is not a valid measurement of representational quality.
+- **Reframe the paper's contribution more modestly.** The core empirical findings — context dramatically outperforms raw sequence for protein QA, Sci-LLMs are harmed by adding sequences, alignment modules degrade representational quality — are genuinely interesting without needing the "tokenization dilemma" theoretical overlay. A more honest framing as "An Empirical Study of Input Modalities for Protein Understanding in LLMs" would better match what was actually demonstrated.
 
 ## Score and Decision
 
@@ -108,15 +76,15 @@ The most genuinely novel observation from this work is the consistent and cross-
 
 | Path | Paper | Avg Score | Comparison |
 |------|-------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/KjyQhJUobQ.md` | ProtFunAgent | 3.00 | Weaker: agentic pipeline with limited novelty; our paper has more systematic experiments and stronger evidence |
-| `/home/wg25r/review_agent/human_reviews_2026/1kpkaJKDXW.md` | DNAChunker | 3.50 | Weaker: incremental method on outdated benchmarks; our paper makes a broader scientific argument with cross-model evidence |
-| `/home/wg25r/review_agent/human_reviews_2026/0FN0u6qTAi.md` | Protein as Second Language | 4.00 | Comparable ambition but our paper has wet-lab validation, efficiency analysis, and a more systematic multi-model evaluation |
-| `/home/wg25r/review_agent/human_reviews_2026/ACroNFU7Do.md` | LiveProteinBench | 4.00 | Both are systematic evaluations; our paper makes a stronger scientific claim with richer analyses (ARI, temporal, wet-lab) |
-| `/home/wg25r/review_agent/human_reviews_2026/4blGqgStVr.md` | PDFBench | 4.00 | Benchmark paper with narrower scope; our paper has broader contributions and stronger insights |
-| `/home/wg25r/review_agent/human_reviews_2026/d0gvsym66h.md` | NABench | 5.00 | Large-scale benchmark; our paper has comparable experimental rigor but makes a more original scientific argument |
-| `/home/wg25r/review_agent/human_reviews_2026/moeOrHkDg2.md` | Adjuvant Benchmark | 5.50 | Clean benchmark with expert annotation; our paper is more ambitious but has the text-figure contradiction dragging it down |
+| `0FN0u6qTAi` | Protein as a Second Language | 4.00 | Similar topic (LLMs for protein understanding via language-based approaches). Current paper has broader model comparison and more systematic experiments but also more overclaiming. Current paper is stronger empirically. |
+| `ACroNFU7Do` | LiveProteinBench | 4.00 | Benchmark paper with cleaner methodology but narrower scope. Current paper has more empirical depth and more interesting findings. |
+| `TdZzxKMwAB` | Bio-reflection Pretraining | 3.50 | Also overclaims (reasoning/reflection) relative to what was demonstrated. Current paper has broader evaluation and stronger empirical evidence, clearly better. |
+| `cliPM6kk9J` | QAProt | 5.00 | Dataset paper with data leakage concerns but recognized as valuable resource. Current paper has more systematic empirical work but also has methodological issues in the representation analysis. Comparable overall contribution quality. |
+| `zcmL592XRG` | VenusX | 4.67 | Well-constructed benchmark, accepted as poster. Cleaner methodology than current paper. Current paper has more ambitious claims and broader empirical scope but the methodological flaws (Section 5.2, overclaimed "noise" generalization) prevent a higher score. |
+| `7wjqoJj62s` | Soft Non-Diagonality | 2.67 | Much weaker: narrow scope, overclaiming, limited evidence. Current paper is clearly stronger. |
+| `fiW30OP7iY` | ESMfluc | 2.50 | Narrow, limited contribution. Current paper is clearly stronger. |
 
-This paper makes a substantive, well-evidenced empirical argument for reframing how Sci-LLMs should process biological sequences. The cross-model consistency of the "informational noise" finding, the layer-wise ARI analysis, the temporal robustness demonstration, and the wet-lab validation collectively support the paper's thesis. However, the text-figure contradiction in Section 5.6 and the partially circular framing of the ARI comparison in Section 5.2 are real issues that prevent a higher score. The paper is stronger than the typical reject-level anchor (4.00) and comparable to the accept-level anchor (5.50) in contribution quality, but the reporting error pulls it down.
+The current paper sits between QAProt (5.00, rejected) and VenusX (4.67, accepted poster). It has broader empirical scope and more interesting findings than either, but also has more significant methodological issues: the Section 5.2 analysis is invalid, and the "consistently degrades" claim is directly contradicted by the data. These are not fixable in a rebuttal — they require restructuring the paper's evidence and claims. At the same time, the paper's empirical contributions (the systematic benchmark, temporal analysis, Section 5.3 layer-wise analysis, the finding that Sci-LLMs are harmed by added sequences) are genuine and valuable. I place it slightly below VenusX due to the methodological issues but above the solid 4.0 papers due to empirical depth and novelty of findings.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

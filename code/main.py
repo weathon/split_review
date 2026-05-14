@@ -38,7 +38,7 @@ weave.init("openai-agents")
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
 from agents.model_settings import ModelSettings
 
-_EXTRA_BODY = {"provider": {"only": ["deepseek"]}}
+_EXTRA_BODY = {"provider": {"only": ["deepseek"]}, "reasoning": {"effort": "high"}}
 _MODEL_SETTINGS = ModelSettings(extra_body=_EXTRA_BODY)
 import dotenv
 dotenv.load_dotenv()

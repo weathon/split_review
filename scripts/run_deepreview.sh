@@ -12,7 +12,7 @@ export MERGER_MODEL="deepseek-v4-pro"
 export NEUTRAL_MODEL="deepseek-v4-pro"
 export OUTPUT_CSV="bench_scores_deepreview_cal_dsor.csv"
 export MERGE_LOG="pipeline_whole_deepreview_cal_dsor.log"
-export CONCURRENCY=20
+export CONCURRENCY=20 
 export MAX_PAPERS=300
 export CALIBRATION_SET="2026"
 

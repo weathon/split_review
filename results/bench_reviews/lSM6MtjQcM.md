@@ -1,92 +1,89 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me compose the final review.
+Now I have all the information needed. Let me compose the final review.
 
 ---
 
 ## Summary
-
-AetherCode introduces a code reasoning benchmark comprising 456 problems sourced from premier programming competitions (IOI, ICPC, NOI, USACO) from 2024–2025. The benchmark features a hybrid test-case construction pipeline combining a Generator-Validator agent system with 67 competitive programming experts, and validates test suites against over 30,000 collected human solutions. The paper evaluates 17 models (11 reasoning, 6 non-reasoning) and reports that even the best models achieve only ~35% Pass@1, concluding a substantial gap remains between LLMs and elite human programmers.
+AetherCode introduces a new competitive-programming benchmark sourcing 456 problems from premier competitions (IOI, ICPC series) with a 17-month window (2024–2025). The benchmark features a hybrid test-case construction pipeline combining a Generator-Validator agent system, expert annotation by 67 competitive programmers, and auditing by elite problem-setters. Problems are categorized across difficulty levels and a 144-tag algorithmic taxonomy. The authors evaluate 17 models and find even the best (o4-mini-high) achieves only 35.5% Pass@1.
 
 ## Strengths
+- **Problem sourcing from premier competitions fills a gap.** AetherCode is among the first benchmarks to systematically collect recent problems from OI and ICPC series worldwide rather than from online judge platforms like CodeForces or LeetCode. This provides a meaningfully different problem distribution — full-program implementations, longer time limits, and problems designed for elite competitors rather than mass-audience rating systems (Section 2.1).
 
-- **Premier competition sourcing.** Unlike benchmarks centered on CodeForces or LeetCode, AetherCode draws from IOI, ICPC regional/world finals, NOI, and USACO — competitions that feature problems requiring more complex, large-scale implementations and deeper algorithmic reasoning. This provides a meaningfully different difficulty profile (Section 2.1, Table 1).
+- **Self-contained, open-source test suites avoid external dependency.** By providing its own expert-validated test cases, AetherCode circumvents the rate limits and compliance risks of calling external judging APIs — a genuine practical advantage for large-scale evaluation (Section 2.3, paragraph 1; Section 1, paragraph 3).
 
-- **Rich, multi-dimensional problem categorization.** The hierarchical taxonomy of 10 major and 144 sub-category algorithmic tags, combined with human-calibrated difficulty levels (Easy/Medium/Hard/Extreme, grounded in contest results), enables fine-grained diagnostic evaluation (Section 2.2, Figure 2, Table 4). The per-category breakdown in Table 4 reveals specific model weaknesses (e.g., GPT-4.1's relative weakness on mathematical problems) that a flat leaderboard would obscure.
+- **Multi-dimensional categorization enables fine-grained analysis.** The 144-tag hierarchical taxonomy across 10 major algorithmic categories (Section 2.2, Figure 2, Table 4) supports targeted analysis of model strengths and weaknesses, and the per-category breakdown in Table 4 is genuinely informative.
 
-- **Hybrid test-case pipeline with human quality control.** The combination of automated G-V Agent generation, human validator review, and expert annotation by 67 competitive programmers (many with Codeforces ratings above 2000) represents genuine methodological effort. The G-V agent alone achieves 89.9% TNR, and the addition of an elite audit team of ICPC gold medalists with problem-setting experience further strengthens the test suites (Sections 2.3.2–2.3.3).
-
-- **Broad model evaluation with diagnostic depth.** The paper evaluates 17 models spanning reasoning and non-reasoning types, and goes beyond raw scores by categorizing failures into Wrong Answer, Time Limit Exceeded, Runtime Error, and Compile Error, with qualitative attribution (Section 3.3). The finding that Claude models disproportionately produce correct-but-inefficient algorithms, while GLM-4.5 struggles with language-following, provides actionable signals.
+- **Temporal metadata supports decontamination checks.** Recording contest dates (Table 2: 400 problems from 2024) allows researchers to perform chronological contamination analysis, a feature lacking in many static benchmarks (Section 2.1, Section 2.2).
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+- **Circular evaluation of test-case quality undermines the central quality claim.** The paper's headline result is that its test suites achieve 100% TPR and 100% TNR (Section 2.3.1, Eq. 1–2). However, Section 2.3.3 explicitly states that expert annotators constructed test cases "specifically designed to fail the various incorrect solutions we had collected." The same collected solution set is then used to compute the TPR/TNR metrics. This is training accuracy, not an unbiased estimate of real-world false-positive/false-negative rates. While the paper also describes an elite review team that independently writes additional incorrect solutions (Section 2.3.3, final paragraph), no quantitative TPR/TNR is reported for that independent check. The paper's claim that AetherCode "guarantee[s] exceptional accuracy and reliability in evaluation" (Conclusion) rests on a circularly-derived metric and is therefore overstated. A held-out solution set is necessary to substantiate the quality claim.
 
-- **Circular validation of test cases.** The test suites are constructed by having human experts target the specific incorrect solutions already collected for each problem (Section 2.3.3: "tasked with constructing targeted test cases specifically designed to fail the various incorrect solutions we had collected"), and then validated on that same solution set to produce the headline 100% TPR/TNR figures (Section 2.3.1). This is a self-consistency check, not an independent validation. The elite audit team does generate *new* incorrect solutions (Section 2.3.3: "additionally writes various incorrect and inefficient solutions to verify the comprehensiveness of the test cases"), which provides some out-of-sample signal, but the paper reports no separate TNR on those new solutions. The 100% TPR/TNR claim — which the paper presents as its central quality guarantee — is therefore overstated. A held-out set of solutions or cross-validation against an external judge would be needed to properly substantiate the claim.
-
-- **Missing human performance baseline.** The paper's title references "winning in premier programming competitions" and the abstract claims "a substantial gap between LLMs and elite human programmers." Yet no quantitative human performance data is reported on AetherCode. The only human-related data is that 20 problems are classified as "Extreme" (solved by no contestant). The paper collects contest result data for difficulty calibration (Section 2.2) and could have reported, e.g., what fraction of problems the median or top contestant solved. Without this, the central claim about the size of the human-LLM gap is unsupported.
-
-- **No contamination analysis despite collecting the necessary metadata.** The paper explicitly states that contest dates were collected "for decontamination purposes" (Section 2.2), but no decontamination is actually performed. Given that problems are from 2024–2025 and many competitive programming problems and solutions circulate widely online, the possibility that models were exposed to these problems during training cannot be dismissed. This weakens confidence in the reported Pass@k scores as measures of reasoning rather than potential memorization.
+- **Missing human performance baseline leaves the "substantial gap" claim unsupported.** The abstract, introduction, and conclusion all assert that AetherCode reveals a "substantial gap between LLMs and elite human programmers." Yet the paper never reports any quantitative human performance on the same problems — e.g., the fraction of IOI/ICPC contestants who solved each problem, or percentile scores of top competitors. The paper does collect "human contestant performance data (to facilitate difficulty assessment)" (Section 2.1, Metadata) and uses contest leaderboards for difficulty binning (Section 2.2), but never presents this data as a baseline. The observation that the best model achieves only 35.5% Pass@1 does not, by itself, establish a gap relative to humans; the problems could simply be so difficult that even elite humans achieve similarly low scores. Without this baseline, the paper's core motivational claim is unvalidated.
 
 ### Minor
+- **Pass@k computation unspecified; no uncertainty estimates.** The paper evaluates each model 4 times per problem (Section 3, paragraph 1) but does not specify how Pass@2 and Pass@4 are estimated from these 4 samples (e.g., which unbiased estimator is used). No confidence intervals or standard errors are reported despite some difficulty bins being very small (Extreme has only 20 problems; Tree has 24). This makes it difficult to assess whether the reported differences among top models (e.g., 35.5% vs. 32.7% overall for o4-mini-high vs. Gemini-2.5-Pro) are statistically meaningful.
 
-- **Unsubstantiated framing about correcting evaluation bias.** The introduction argues that previous benchmarks overstate model proficiency due to low-quality test cases, and positions AetherCode as a corrective. However, the paper never empirically demonstrates this — e.g., by comparing model outputs on the same problems under AetherCode's test suite vs. an existing benchmark's test suite. Lower scores on AetherCode could simply reflect harder problems rather than superior evaluation. The benchmark's value as a harder, more rigorous dataset stands on its own without needing to claim that prior work is biased, and the paper would be stronger if it simply positioned AetherCode as raising the difficulty ceiling.
+- **Per-category comparisons not normalized for difficulty.** Table 4 presents per-category Pass@1 scores, but the paper itself acknowledges that "due to the inconsistent distribution of problems across categories, individual categories (such as Tree) may happen to be particularly difficult" (Section 3.2). Without normalizing for within-category difficulty, the per-category rankings are confounded and should be interpreted with more caution than the paper acknowledges.
+
+- **Conclusion does not acknowledge limitations.** The concluding section (Section 5) presents the benchmark's achievements without mentioning the circular test-case evaluation, the absence of a human baseline, the small size of some problem bins, or any other limitation. This overstates confidence in the benchmark.
+
+- **No contamination analysis.** Given that problems come from publicly announced, widely discussed competitions, there is a non-trivial risk that problem statements or solutions appear in LLM training corpora. The paper mentions temporal metadata for decontamination purposes (Section 2.1) but provides no actual contamination analysis or discussion of mitigation strategies.
 
 ### Trivial
-
-- Experimental setup details (sampling temperature, execution environment, exact prompt format) are referenced as being in Appendix A, which is stripped from the submission. Enough is present in the main text to understand the evaluation design (four runs per problem, max 32,768 output tokens), but full reproducibility requires the appendix.
-
-- The qualitative analysis of o4-mini-high's failure reasons is mentioned but relegated to Appendix E, making it hard to assess from the main text alone.
+- The star-rating difficulty system in Table 1 is unexplained, making the comparison across benchmarks hard to interpret.
+- The claim of "surpassing previous work in both breadth and depth" (Section 4.2) is somewhat strong relative to the evidence presented.
 
 ## Nice-to-Haves
-
-- A direct comparison on a subset of problems where both AetherCode's test suite and an external judge (e.g., USACO official test data, or CodeForces problems from related contests) can be applied, to validate AetherCode's verdicts against a ground truth.
-- Concrete side-by-side examples of model outputs that pass existing benchmark tests but are correctly flagged as wrong by AetherCode's test suite, to ground the evaluation-bias argument empirically.
-- Analysis of what kinds of errors the test cases are designed to catch (e.g., via an error-type taxonomy) and how representative the collected incorrect solutions are of the error space LLMs might explore.
+- A cross-benchmark evaluation evaluating a shared set of models on both AetherCode and a contemporaneous benchmark (e.g., LiveCodeBench) using identical sampling protocols would directly test whether AetherCode is more discriminative, rather than relying on asserted difficulty differences.
+- Per-problem statistics on the number and types of incorrect solutions collected would help readers assess the test-case construction pipeline's coverage.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-These points are flagged to be removed, treat them with caution.
+- **"Star rating contradiction" (Harsh Critic):** The critic argued that Table 1 rates AetherCode ★★★ while USACO is ★★★★, contradicting the difficulty claim. Removed because (a) the star system in Table 1 is a summary metric whose derivation isn't explained, making this a presentation issue, not a substantive contradiction; (b) the paper's difficulty argument rests on competition source and model scores, not the star ratings.
 
-- **Harsh Critic: "The experimental setup is skimpy (references an appendix that was stripped)."** — REMOVED. The appendix is stripped by the parser, not by the authors. The main text contains sufficient detail: four runs per problem, max 32,768 output tokens, 17 models evaluated.
+- **"Extreme difficulty makes human gap impossible to measure" (Harsh Critic):** The critic claimed that since Extreme problems are defined as having 0% human solve rate, models scoring 3.8% on them actually outperform humans, contradicting the "gap" claim. Removed because the paper defines Extreme as problems no contestant solved *during competition*, not problems no human could possibly solve, and the overall gap claim spans all difficulty tiers, not just Extreme.
 
-- **Harsh Critic: "No confidence intervals or variance measures."** — REMOVED. This is a generic critique; reporting confidence intervals for large-scale multi-model benchmarks is not standard practice in this subfield, and the Pass@k metric with k up to 4 is standard.
+- **"Reasoning models outperform is already expected" (Harsh Critic):** Removed as a strawman — documenting expected results with evidence is a standard and valuable part of benchmark papers.
 
-- **Harsh Critic: "The average number of test cases (47.15) is reported but never justified."** — MOVED from weakness to Removed. The paper explicitly argues that quantity is not a proxy for quality (Section 2.3.1) and proposes TPR/TNR instead. The number is reported as a data characteristic, and the paper's framework explicitly deprioritizes it. Criticizing the number of test cases contradicts the paper's stated evaluation philosophy.
+- **"Narrow temporal slice" (Harsh Critic):** The critic argued 17 months is too narrow. Removed because the recent-problem focus is by design to minimize contamination risk, which is a stated goal of the benchmark.
 
-- **Harsh Critic: Section-by-section note about TPR/TNR being "tautology."** — Already incorporated into the Major weakness about circular validation, but softened. The elite audit team's generation of new incorrect solutions provides partial mitigation.
+- **Error-type analysis superficial because appendix is stripped (Harsh Critic):** Removed per hard rule — the parser strips appendix sections; the full analysis exists in the original submission.
 
-- **Strength Finder: "100% TPR and 100% TNR... a direct, concrete measure of evaluation reliability."** — WEAKENED and partially removed. While the TPR/TNR framework is valuable, the 100% figures are measured on the construction set and thus overstate reliability. The framework itself remains a strength; the specific claim of 100% as a guarantee of quality is what is weakened.
+- **Typos/formatting issues (e.g., "nothingking" in Table 3, "Ssed-1.6"):** Removed per hard rule — these are parser artifacts, not author errors.
 
-- **Strength Finder: "This quantitative guarantee... moves beyond ad-hoc test case generation."** — REMOVED as a standalone strength. The TPR/TNR framework *is* an improvement over ad-hoc approaches, but the "guarantee" language overstates what the closed-set evaluation supports.
+- **Strength Finder: "Rigorous test-case construction eliminates evaluation bias" and "100% TPR/TNR as evidence of perfect discrimination":** Removed because these are directly undermined by the verified circular-evaluation weakness.
 
-- **Strength Finder: Generic statements about "important problem" / "interesting question."** — REMOVED. These are not substantive.
+- **Strength Finder: generic claims** about importance, well-written paper, discriminative insights — removed as too generic/superficial.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviewers did not surface insights that the paper itself does not already claim.
+None beyond the paper's own contributions. The observation that top-tier reasoning models exhibit greater "exploration potential" (larger Pass@1→Pass@4 gains) is interesting but not deeply analyzed.
 
 ## Suggestions
+- The most important revision would be to conduct a held-out evaluation of test-case quality: split the 30,000+ solutions into a development set (used for construction) and a held-out set (used only for evaluation), then report TPR/TNR on the held-out set. This would transform the quality claim from circular to credible.
+- Report human solve rates from contest leaderboards for each problem or difficulty tier. Even a simple metric like "median contestant score" or "percent of contestants achieving full marks" would substantiate the human-gap claim.
+- Specify the Pass@k estimator used and report confidence intervals (even bootstrap intervals) for the main results, particularly given the small bin sizes.
+- Include a contamination analysis or at minimum a substantive discussion of contamination risks given the public nature of these competitions.
 
-- **Add a held-out validation of test cases.** The simplest fix: split the collected solutions into a construction set (used by experts to design tests) and a held-out validation set (used only for final TPR/TNR reporting). This would preserve the methodology while making the quality claim credible. Even reporting the TNR on the new incorrect solutions generated by the elite audit team (which were not in the original collection) would help.
+## Score and Decision
 
-- **Report a human baseline.** Using the contest result data already collected for difficulty calibration, report what fraction of problems the median contestant, top-quartile contestant, and winner could solve. This would ground the human-LLM gap claim quantitatively.
+Anchor comparison:
 
-- **Perform and report a contamination check.** Use the date metadata already collected to flag problems that predate each model's training cutoff and report scores on that subset. Even a simple analysis by contest date would substantially strengthen confidence in the results.
+| Anchor | Path | Avg Score | Decision | Comparison to AetherCode |
+|--------|------|-----------|----------|--------------------------|
+| LiveOIBench | URtz3JhoWh.md | 5.20 | Reject | Very similar paper (403 OI problems, expert test cases) but stronger: includes human percentile baselines, continuous updates, subtask rubrics. AetherCode is clearly weaker. |
+| OJBench | Ym3Abn2qHh.md | 3.00 | Withdrawn | 232 NOI/ICPC problems, uses official test cases with no construction pipeline, no contamination analysis. AetherCode is substantially stronger in curation rigor. |
+| CodeInsightBench | ThNHBP1qk9.md | 4.00 | Reject | Different style (code understanding from CodeForces). Roughly comparable in contribution level. |
+| TC-Bench (RomWar2kVN) | RomWar2kVN.md | 6.00 | Accept (Poster) | Novel theoretical framework for test-case evaluation. Much stronger contribution than AetherCode. |
+| BigO(Bench) | ngAdlt5n0q.md | 4.00 | Reject | Different focus (complexity-aware code generation). Comparable contribution level. |
 
-- **Tone down the evaluation-bias framing.** The paper's contribution — a harder, more rigorously evaluated benchmark from premier competitions — stands without needing to claim that prior benchmarks are systematically biased. Present AetherCode as raising the standard rather than correcting errors.
+Positioning: AetherCode is clearly stronger than OJBench (3.00) — it has more problems, an elaborate test-case construction pipeline, and better categorization. It is clearly weaker than LiveOIBench (5.20, rejected) — LiveOIBench has human baselines, continuous updates, and subtask rubrics that AetherCode lacks, and LiveOIBench does not have the circular-evaluation problem. AetherCode also falls below TC-Bench (6.00, accepted) which offers a novel theoretical contribution.
 
-## Score Calibration
-
-Anchor papers compared:
-
-| Anchor | Path | Avg Score | Comparison to AetherCode |
-|---|---|---|---|
-| LiveOIBench | `/home/wg25r/review_agent/human_reviews_2026/URtz3JhoWh.md` | 5.20 | Very similar scope (OI/ICPC benchmark). LiveOIBench is stronger: it includes human percentiles, subtask rubrics, continuous contamination-free updates, and direct human-LLM comparison. AetherCode has richer algorithmic categorization and a more elaborate test-case construction pipeline, but lacks the human baseline and contamination mitigation that earned LiveOIBench its higher scores. AetherCode is clearly weaker. |
-| OJBench | `/home/wg25r/review_agent/human_reviews_2026/Ym3Abn2qHh.md` | 3.00 | Similar scope (NOI/ICPC). OJBench uses official test cases with no construction methodology, has fewer problems (232 vs 456), and weaker categorization. AetherCode is clearly stronger on methodology and scale. Both share contamination and human-baseline weaknesses. AetherCode is better. |
-| CodeInsightBench | `/home/wg25r/review_agent/human_reviews_2026/ThNHBP1qk9.md` | 4.00 | Different focus (code understanding vs. generation). Comparable in overall contribution level — both have novel task design but suffer from limited scope and under-explored insights. AetherCode has a similar "solid benchmark, but limited beyond dataset creation" profile. |
-| BigO(Bench) | `/home/wg25r/review_agent/human_reviews_2026/ngAdlt5n0q.md` | 4.00 | Different focus. Similar score range — both introduce a benchmark that fills a gap but have methodological limitations that prevent strong acceptance. |
-| Code2Bench | `/home/wg25r/review_agent/human_reviews_2026/QZmKyAy1VK.md` | 4.00 | Different approach (dynamic benchmark construction). Comparable in contribution level and acceptance outcome. |
-
-AetherCode is substantially stronger than OJBench (3.0) in methodology — the hybrid test-case pipeline with expert annotation is genuine work, while OJBench simply used official tests. However, AetherCode is clearly weaker than LiveOIBench (5.20), which has human baselines, contamination mitigation, and subtask rubrics that AetherCode lacks entirely. AetherCode shares the "benchmark paper with limited novelty beyond dataset creation" criticism that pulled down both OJBench and LiveOIBench, but its test-case methodology and categorization are more sophisticated than average. The circular validation issue and missing human baseline are real but not fatal — the benchmark has genuine value, but the paper overclaims what it has demonstrated. This places it in the 4.0–4.5 range, comparable to the other 4.0 anchors.
+The circular evaluation of test-case quality (Major) and the missing human baseline (Major) are significant issues that undermine two of the paper's central claims. These are not fatal — the benchmark itself still has value — but they prevent acceptance in current form. Score: 4.0.
 
 MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>
