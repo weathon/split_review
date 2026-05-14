@@ -7,9 +7,9 @@ cd "$(dirname "$0")/.."
 
 export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="deepseek-v4-flash"
-export MERGER_MODEL="deepseek-v4-flash"
-export NEUTRAL_MODEL="deepseek-v4-flash"
+export HARSH_MODEL="deepseek-v4-pro"
+export MERGER_MODEL="deepseek-v4-pro"
+export NEUTRAL_MODEL="deepseek-v4-pro"
 export OUTPUT_CSV="bench_scores_deepreview_cal_dsor.csv"
 export MERGE_LOG="pipeline_whole_deepreview_cal_dsor.log"
 export CONCURRENCY=50

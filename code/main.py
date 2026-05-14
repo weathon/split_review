@@ -36,6 +36,9 @@ import weave
 weave.init("openai-agents")
 
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
+from agents.model_settings import ModelSettings
+
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "effort": "medium"})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
@@ -200,10 +203,10 @@ if HARSH_MODEL.startswith("claude_sdk:"):
     _HARSH_SDK_MODEL = HARSH_MODEL[len("claude_sdk:"):]
     _harsh_sdk_system_prompt = load_prompts(_harsh_prompt, paper_access=PAPER_ACCESS_FILE)
 else:
-    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt), model=resolve_model(HARSH_MODEL))
+    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt), model=resolve_model(HARSH_MODEL), model_settings=_MODEL_SETTINGS)
     _HARSH_SDK_MODEL = None
     _harsh_sdk_system_prompt = None
-neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt), model=resolve_model(NEUTRAL_MODEL))
+neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt), model=resolve_model(NEUTRAL_MODEL), model_settings=_MODEL_SETTINGS)
 
 _NO_CAL = "--no_cal" in sys.argv
 
@@ -253,6 +256,7 @@ else:
         instructions=_merger_instructions,
         model=resolve_model(MERGER_MODEL),
         tools=_merger_tools,
+        model_settings=_MODEL_SETTINGS,
     )
     _MERGER_SDK_MODEL = None
 
