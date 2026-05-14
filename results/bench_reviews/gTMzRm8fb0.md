@@ -1,20 +1,10 @@
-Now I have all the information I need. Let me write the consolidated review.
-
 ## Summary
-
-This paper proposes GoalRank, a generator-only ranking framework that challenges the prevailing (Multi-)Generator–Evaluator (G-E) paradigm. It provides a theoretical proof (Theorem 1) that a sufficiently large single-generator model can achieve strictly smaller approximation error to the optimal ranking policy than any finite mixture of small generators paired with an evaluator. To train such a model, the paper introduces a group-relative optimization objective that leverages a (potentially biased) reward model to construct a reference policy as a surrogate for the optimal policy, then trains the generator to match this reference via KL divergence. Experiments on public benchmarks (ML-1M, Amazon-Book) and an industrial dataset show large offline gains (up to +17–47% on key metrics), scaling behavior from 1M to 0.1B parameters, and small but statistically significant online A/B test improvements on a platform serving over 500M daily active users.
+GoalRank proposes a generator-only listwise ranker for recommendation, trained by distilling a reward model + a heterogeneous set of auxiliary ranking policies into a single large generator via a group-relative cross-entropy objective (Eqs. 4–5). It is accompanied by a theorem claiming the generator-only paradigm strictly dominates (Multi-)Generator–Evaluator (MG-E) systems, offline benchmarks showing large gains, scaling curves up to 0.1B parameters, and a 14-day online A/B test at a half-billion-DAU platform.
 
 ## Strengths
-
-- **Theoretical proof of generator-only superiority (Theorem 1):** The paper provides a formal mathematical argument that for any finite (Multi-)G-E policy space, there exists a larger single-generator policy space with strictly smaller KL divergence to the optimal ranking policy, and the error can be driven to zero as model size grows. While the theorem is an existence result based on universal approximation, it provides a principled theoretical motivation that goes beyond mere empirical intuition.
-
-- **Comprehensive empirical validation:** Experiments span three datasets (ML-1M, Amazon-Book, Industry) with five metrics, a scaling study from 1M to 0.1B parameters, ablation of group size and reward model bias, and large-scale online A/B tests on a real platform. GoalRank consistently outperforms all baselines, including G-only methods (DNN, DLCM, PRM, RankMixer, etc.), G-E methods (PIER, NAR4Rec), and MG-E methods (G-3, G-20, G-100). The online experiment is particularly rare and valuable — all five business metrics show statistically significant improvement.
-
-- **Scaling law demonstration:** Figure 3 shows GoalRank's performance improving steadily from 1M to 0.1B parameters, while baselines (DNN, RankMixer, PIER, MG-E) plateau. This directly validates the theoretical scaling prediction and is a practically important result for industrial deployment.
-
-- **Group-relative optimization with bias robustness analysis:** The training principle is cleanly motivated from an evidence upper bound, and the ablation studies (Tables 2–3) systematically validate the design choices (optimal group size 8–20, robustness to reward model bias). Even at λ=0.5 (substantial noise), GoalRank still outperforms all baselines.
-
-- **Ablation studies revealing design insights:** Table 2's systematic study of group size and Table 3's bias robustness test provide clear, actionable insights about the method's behavior.
+- **Practical group-relative training recipe.** Eq. 4 cleanly converts a reward model plus a heterogeneous candidate-list ensemble into a soft listwise target. As a distillation recipe for listwise ranking, this is a useful and concrete engineering contribution.
+- **Real online validation.** A 14-day A/B test with three traffic settings (production MG-E, hybrid, full GoalRank) on a half-billion-DAU short-video platform, with consistent positive deltas on App Stay Time, Watch Time, Effective Views, etc. (Table 4). The hybrid+full deployment design strengthens credibility.
+- **Scaling evidence (Figure 3).** Sweeps from 1M to 0.1B parameters on Industry-0.1B show GoalRank's metrics continue to improve while baselines (DNN, RankMixer, PIER, MG-E) saturate. This is more than a single-size comparison.
 
 ## Weaknesses
 
@@ -22,69 +12,75 @@ This paper proposes GoalRank, a generator-only ranking framework that challenges
 None.
 
 ### Major
-
-- **Training signal confound between GoalRank and baselines:** GoalRank trains its generator to match a reference policy derived from the reward model (Equation 4) via KL divergence — effectively a distillation objective. The G-E and MG-E baselines use the same reward model *only at inference* to select among candidate lists; they are not trained with it as a teacher signal. The paper states "all baselines share exactly the same evaluator (reward model) as GoalRank" (line 251), but this refers to the evaluator used at inference for G-E methods, not the training objective. Consequently, the large offline gains (e.g., +17–47%) could stem significantly from the distillation effect (access to richer supervisory signals during training) rather than from the generator-only paradigm *per se*. Without a controlled baseline that trains a generator-only model using the same reward-model-derived supervision (e.g., via a simpler regression or REINFORCE objective), the core claim that a G-only model outperforms G-E systems is not fully isolated. This does not invalidate the empirical comparison between the proposed method and existing baselines, but it limits attribution of the gains to the G-only paradigm rather than the training signal.
-
-- **Discrepancy between offline and online gains is not discussed:** Offline improvements are enormous (e.g., +25.39% H@6, +29.63% M@6 on the Industry dataset). Online A/B tests show improvements of only 0.1–1.2% on business metrics. While it is expected that offline proxy metrics inflate gains relative to online business KPIs, the paper provides no analysis or discussion of this gap. The headline offline numbers could give an inflated impression of the method's practical impact. An analysis of why this gap occurs (e.g., offline metric design, reward model overfitting, distribution shift) would strengthen the paper.
+- **Theorem 1 is a capacity comparison dressed as a paradigm result.** The theorem compares a k-mixture of generators with width ≤ α to a single generator with width ≥ kα + n (Sec. 3.1). The generator-only class is *given strictly more capacity than the sum of mixture capacities*, plus an arbitrary slack n. Its strict-improvement-and-limit-to-zero conclusion is then essentially a universal-approximation / inclusion statement, not evidence that the *paradigm* is better. The paper's introduction ("for any (finite Multi-)Generator–Evaluator model, there always exists a generator-only model that achieves strictly smaller approximation error") leans on this theorem to motivate the entire contribution; without a parameter-matched statement, the headline theoretical claim is overstated.
+- **The "generator-only" framing is inconsistent with the training procedure.** Section 3.3 explicitly says effective group construction is "difficult to achieve when sampling multiple lists from a single generator," and resolves this by introducing an auxiliary set 𝓜 of heuristic + lightweight neural ranking policies whose outputs form B_u. At training time, GoalRank therefore depends on a multi-policy ensemble *and* the reward model — i.e., it is in effect distilling an MG-E-like ensemble into a single ranker. This is a reasonable engineering story but is in tension with the paper's positioning against MG-E. The contribution should be reframed as "distillation from ensemble + reward into one large ranker," and benchmarked accordingly.
+- **MG-E baseline numbers raise calibration concerns and the comparison is asymmetric.** In Table 1, G-3 on ML-1M scores H@6 = 55.51, below the simplest DNN at 56.86 and well below DLCM at 62.31. An MG-E system underperforming a single small DNN is not a credible "best-effort" multi-generator baseline. Worse, the shared reward model is used in different roles: at inference-time selection for MG-E vs. as a training-time soft target for GoalRank. The natural fair comparison — using the same reward model as a training signal for an MG-E setup at matched parameter count — is not run. Together these inflate the +25–47% headline gains and make it hard to attribute the improvement to "paradigm" rather than "better use of the reward model as a training signal."
+- **Offline vs. online gap is large and unaddressed.** Offline H@6/F1@6/M@6 gains of +15–47% (Table 1) reduce to ~0.1–1% on online metrics like App Stay Time and Watch Time (Table 4). Online recommendation gains of ~0.2% are realistic; the offline numbers are not consistent with them. The paper does not discuss this discrepancy, which directly affects how much weight readers should put on the offline ablations.
 
 ### Minor
-
-- **Theory–practice gap in Theorem 1:** Theorem 1 assumes the generator outputs a full probability distribution over all possible lists of size P(N,L) via a softmax layer. In practice, the generator architecture cannot tractably enumerate this space; it operates autoregressively or via item-wise scoring. The theorem is an existence result (relying on universal approximation) that proves a larger single-softmax policy space can approximate the optimal policy better than a finite mixture, but it does not provide guarantees about the specific architectures used in experiments nor about the training dynamics of group-relative optimization (which minimizes KL to a reference policy derived from a biased reward model, not to π* directly). This gap between the theoretical idealization and the practical method is common in ML theory papers but should be acknowledged more explicitly.
-
-- **Training uses auxiliary generators despite "generator-only" framing:** GoalRank constructs groups using an auxiliary set of ranking policies M (including heuristic methods and lightweight neural models). While inference uses only one generator, training is inherently multi-model. The paper acknowledges this (line 195) but the framing as a "generator-only" paradigm is somewhat misleading — the method requires maintaining additional generators during training. The computational cost of these auxiliary policies is not reported.
-
-- **Theoretical novelty of Theorem 1 is limited:** The result is essentially a universal approximation claim: a sufficiently expressive single policy class can approximate any distribution better than a finite mixture of smaller classes. While this provides useful motivation, it follows from well-known universal approximation properties of neural networks and is not itself a novel theoretical insight about ranking. The practical contribution — the group-relative training method — is more significant.
+- **Eq. 5 surrogate is not rigorously connected to KL(π_θ ‖ π*).** Section 3.2 replaces τ in the Boltzmann target with the empirical σ_B over a sampled group B and uses an "order-invariance" argument (Eq. 3) that controls *ordering* but not the *magnitudes* of π_ref, even though the cross-entropy loss is magnitude-sensitive. The abstract promises an "evidence upper bound" but the body provides a hand-wave, not a bound from Eq. 5 to KL(π_θ ‖ π*) under bounded bias and finite-group sampling.
+- **Robustness-to-bias test does not stress the order-preservation condition.** Table 3 adds i.i.d. Gaussian noise scaled by λ, which is largely absorbed by group-relative normalization. The motivating concern in Sec. 3.2 is systematic, order-distorting bias b(l); structured/correlated bias (e.g., popularity skew, subgroup miscalibration) would be the appropriate stress test.
+- **|𝓜| and its training cost are not specified in the main text.** Since 𝓜 is essential to making group construction work, its size, composition, and compute footprint matter for the "single-model" story. (Appendix C is referenced, which is fine, but the main text should at least sketch the scale.)
+- **Pointwise and listwise generator-only methods are bucketed together.** Sec. 2 contrasts G-only vs. G-E starkly, but DLCM/PRM/RankMixer are listwise; the taxonomy slightly overstates the "early/greedy" framing of single-stage rankers.
+- **Cross-entropy over B vs. full L_u.** With N=50, L=6 → |L_u| ≈ 1.5×10^10, but Eq. 5 sums only over l ∈ B. No formal argument is given for how this approximates the global softmax target.
 
 ### Trivial
-- The paper uses a single fixed N=50, L=6 for all offline experiments. The sensitivity to different N/L ratios (e.g., N=120 like the online setup) is not explored.
-- Error bars are not shown on the scaling plot (Figure 3), making it impossible to assess the significance of the scaling trend differences.
+- The introduction's phrasing "there always exists a generator-only model that achieves strictly smaller approximation error" should be explicitly qualified as a *larger* model class; this single phrase shapes the whole framing.
 
 ## Nice-to-Haves
-- **Train a simpler G-only baseline with the same distillation signal:** Training DNN (or another G-only baseline) to match the reward model's scores via supervised learning or REINFORCE would isolate whether the gains are specific to the group-relative objective or just come from having access to the reward model as a teacher.
-- **Analyze the offline/online gap:** A breakdown of why offline gains translate to small online improvements would be valuable — e.g., analyzing the reward model's accuracy on the held-out distribution, or comparing the metric definitions more carefully.
-- **Characterize real reward model bias:** The synthetic noise experiment (Table 3) is helpful, but measuring the actual bias of the learned reward model and showing the distribution of reward gaps within constructed groups would provide stronger validation of the core assumption in Equation 3.
+- A parameter- and signal-matched MG-E baseline trained with the same reward model as a training (not just selection) signal.
+- Ablation that removes 𝓜 entirely or replaces it with self-samples from g_θ; this would directly quantify how much of GoalRank's edge comes from the auxiliary ensemble vs. the loss.
+- A formal chain of inequalities from Eq. 5 back to KL(π_θ ‖ π*) under bounded bias |b(l)| ≤ ε and group sampling.
+- Restate Theorem 1 as a parameter-budget-matched statement, or be explicit that it is a capacity-allocation result.
+- A diagnostic for the offline/online gap (which metric or sampling protocol inflates offline gains).
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-
-- **"Missing baseline: large G-only model trained with standard ranking loss at the same scale":** Factually incorrect. The paper already includes DNN (a G-only baseline trained with pointwise loss) scaled to 0.1B parameters in Figure 3.
-- **"Missing appendices" and "missing proofs":** Hard rule — the parser strips appendices from all papers; these exist in the original submission.
-- **Formatting and presentation nitpicks:** Hard rule — parser artifacts, not author errors.
-- **Claim that Theorem 1's proof relies on Cybenko / universal approximation:** While noted, this is a standard and appropriate approach for existence theorems in ML — not a weakness.
-- **"Strictly smaller claim is not obvious"**: The reviewer acknowledges the proof is in the appendix; the theorem's statement is standard for universal approximation results.
+*These points are flagged to be removed; treat them with caution.*
+- (From the harsh critic) Section 4.1 footnote/sample-size concerns and questions about Appendix details on M's composition: partly an appendix issue, partly already addressed via Appendix C/D pointers — kept as a minor "specify in main text" suggestion above, not as a major weakness.
+- (From the Strength Finder) "Rigorous theoretical justification for generator-only over MG-E" — conflicts with verified Major weakness #1; the theorem is a capacity statement, not a paradigm statement.
+- (From the Strength Finder) "+25% Hit@6 is compelling evidence" — conflicts with verified Major weakness #3 (weak MG-E baselines + asymmetric reward-model use).
+- (From the Strength Finder) "Comprehensive sensitivity and ablation analysis" — partially true, but the bias ablation (Gaussian noise) does not stress what the theory motivates; kept the practical observation only as moderate evidence (Table 2 inverted-U is informative).
 
 ## Novel Insights
-
-The most interesting finding is not explicitly discussed in the paper but emerges from comparing Tables 1 and 4: the MG-E approach (G-100) achieves strong offline results relative to other baselines (55.77 H@6 on Industry) yet requires 100 generators and presumably huge computational overhead, while GoalRank at a single generator achieves 69.93 H@6 — substantially higher. This suggests that the G-E paradigm suffers from fundamental policy representation limitations (the evaluator selecting among a finite set of candidates), not just insufficient candidates. Theorem 1 formalizes this by showing that a larger policy space strictly dominates a finite mixture, but the magnitude of the empirical gap (14+ points of H@6) suggests the limitation is severe in practice. The group-relative training method implicitly solves this by using the reward model to define a continuous reference distribution over lists rather than forcing a hard selection. This reframing of ranking as distribution matching rather than candidate selection is the paper's most conceptually interesting contribution.
+None beyond the paper's own contributions. The strongest synthesizable insight — that GoalRank is functionally an ensemble-and-reward-into-single-ranker distillation framework rather than a paradigmatic refutation of MG-E — is a reframing of the contribution rather than a new finding.
 
 ## Suggestions
+- Rewrite Section 1 and Theorem 1 to either (a) match parameter budgets explicitly, or (b) drop "strictly smaller" framing in favor of "comparable approximation with a single model when sufficiently scaled."
+- Reframe GoalRank as a training-time distillation framework from a heterogeneous policy ensemble + reward model into one large ranker, then benchmark against MG-E trained with the same reward signal at matched parameters.
+- Add a structured-bias ablation (popularity skew or subgroup miscalibration) for Sec. 3.2.
+- Diagnose the offline-vs-online metric gap explicitly in Sec. 4.2.
 
-1. **Add a controlled baseline:** Train a G-only model (e.g., a similarly large DNN) using a simpler distillation objective from the same reward model — either directly regressing on the reward model's scores for sampled lists or using REINFORCE to maximize expected reward. This would isolate whether the group-relative objective specifically drives the gains, or whether any distillation signal from the reward model would suffice.
-
-2. **Analyze the offline/online gap:** Add a section discussing the relationship between offline metrics (H@6, N@6, M@6) and online business metrics. Include an analysis of whether the offline setup (N=50, ground-truth = last six interactions) creates an artificially easy evaluation that inflates gains.
-
-3. **Measure and report the computational cost** of the auxiliary policy set M used during training, and discuss the training/inference asymmetry more prominently.
-
-4. **Show the actual reward gaps** within constructed groups (distribution of max reward differences) to empirically validate that condition (3) holds for the chosen group sizes.
-
-5. **Add error bars or confidence intervals** to Figure 3's scaling curves.
+## Evaluation by Axis
+- **Originality.** Moderate. Group-relative distillation borrowing from the GRPO-style normalization is a reasonable transfer to listwise ranking, but conceptually adjacent to known distillation-from-ensemble + reward modeling ideas.
+- **Importance.** High in setting; ranking is industrially impactful and scaling listwise rankers is timely.
+- **Claim support.** Mixed. Empirical claims have real online evidence but offline gains are inflated by weak/asymmetric baselines. The headline theoretical claim is not supported by Theorem 1 as stated.
+- **Soundness of experiments.** Mixed. Scaling curves and online A/B are credible; offline H@6/AUC gains and the bias ablation are not as informative as claimed.
+- **Clarity.** Generally clear, but the framing-vs-method mismatch (generator-only vs. ensemble-at-train-time) is confusing.
+- **Value to community.** Real — the engineering recipe and the online deployment results are useful; the theoretical framing is less so.
 
 ## Score and Decision
 
-**Calibration anchors (all from the same corpus):**
+Anchors retrieved (full list):
+- `4pW8NL1UwH.md` — LIRE: Listwise Reward Enhancement (avg **5.20**, Reject). Same listwise/reward-distillation flavor; GoalRank has stronger empirical scope but more overclaimed theory. Comparable.
+- `3ZDMQGQgkE.md` — Preference Discerning in Generative Sequential Recommendation (avg **4.00**, Reject). Recommender domain with framing concerns; GoalRank is more empirically substantial.
+- `nhRXLbVXFP.md` — Ordinal Preference Optimization / NDCG (avg **4.50**, Accept). Similar listwise framing; comparable soundness concerns.
+- `swdMzQUhBx.md` — iAgent (avg **4.00**, Reject). Less relevant.
+- `SJZL5w4Iez.md` — Thermodynamic learning capacity (avg **3.75**, Reject). Capacity/theory paper; only loosely related.
+- `ewZSzO6bts.md` — Unified Neural Network Scaling Laws (avg **3.75**, Reject). Scaling-laws theory paper with overclaim concerns — directly analogous to GoalRank's theorem framing.
+- `Tzh6xAJSll.md` — Scaling Laws for Associative Memories (avg **7.60**, Accept). Genuinely rigorous scaling-laws paper; GoalRank's theorem is well below this bar.
+- `473sH8qki8.md` — Reward as Observation (avg **2.00**, Reject). Not closely related; floor anchor.
+- `hJCinlknXn.md` — UOEP user-oriented exploration (avg **5.33**, Reject). Recommender + policy optimization; similar mid-band positioning.
+- `MwU2SGLKpS.md` — Generative Reward Models (avg **4.50**, Reject). Reward-model paper, comparable empirical scope but weaker than GoalRank's online evaluation.
+- `OZ3NXrF3gQ.md` — Reward-free Policy Optimization (avg **2.50**, Reject). Floor anchor.
+- `VCZ1o8gFny.md` — M3C industrial multi-objective (avg **4.00**, Reject). Industrial-scale rec system without theory; less rigorous than GoalRank empirically.
+- `waeGeAdZUx.md` — AdaRec adaptive sequential recommendation (avg **5.00**, Reject). Comparable mid-band recommender paper.
+- `0IaTFNJner.md` — Embedding Collapse When Scaling Recommendation Models (avg **5.25**, Reject). Strong analog: scaling rec models with theory+empirics, mid band.
+- `BXMoS69LLR.md` — Blind Baselines Beat MIA (avg **4.50**, Reject). Theme of weak baselines undermining headline claims — directly relevant to GoalRank's Table 1 issue.
+- `JYTQ6ELUVO.md` — Specialized Foundation Models struggle to beat Supervised Baselines (avg **6.50**, Accept). Higher bar; GoalRank does not reach it given baseline-fairness concerns.
+- `0VZP2Dr9KX.md` — Baseline Defenses Adversarial LLMs (avg **5.25**, Reject). Mid-band.
+- `vVHc8bGRns.md` — RecFlow industrial dataset (avg **6.25**, Accept). Stronger contribution than GoalRank in terms of unambiguous community value; GoalRank does not clearly clear this bar.
 
-| Path | Avg Score | Comparison |
-|---|---|---|
-| JlwYkFm91F (DNR, Recommender Reranker) | 5.50 | Similar structure (theory + offline + online). GoalRank has stronger theory and uniformly positive online results (DNR had mixed online metrics). GoalRank is slightly stronger. |
-| PR6oISgk90 (ReRe, RL for Recommendation) | 6.00 | Solid empirical validation but rejected on novelty grounds. GoalRank has stronger theoretical contribution but a confound issue. Comparable quality, GoalRank slightly weaker due to confound. |
-| Xgw2D9cALS (Rank-GRPO, Conversational Rec) | 4.00 | Tested on only one dataset. GoalRank has much broader empirical validation. |
-| P6y3gZDsFa (SynerGen, Generative Rec) | 3.50 | Had novelty and comparison concerns. GoalRank is significantly stronger. |
-| EjfzChLkHO (SID Scaling, Generative Rec) | 4.00 | Empirical study with confound and missing baselines. GoalRank is stronger. |
-| 05uq3XUJaT (ListRank, LLM Ranking) | 2.67 | Limited novelty and presentation issues. GoalRank is much stronger. |
-| qLnX2CiF1O (ILRec, LLM Recommendation) | 5.50 | Solid paper rejected despite decent scores. GoalRank has broader experiments and online validation. Comparable. |
-| JU2nv7VkuC (Ranking Distillation) | 6.00 | Strong analytical paper (score 8 from one reviewer). GoalRank has different contribution type (method + experiments). |
+Positioning: GoalRank's online A/B + scaling curves are genuinely above average for the recommender-systems pool, but its overclaimed theorem and weak/asymmetric offline baselines (analogous to `BXMoS69LLR` and `ewZSzO6bts` overclaim patterns) push it down from the accept-band represented by `vVHc8bGRns` (6.25) and `JYTQ6ELUVO` (6.50). It is most comparable to `0IaTFNJner` (5.25), `hJCinlknXn` (5.33), `4pW8NL1UwH` (5.20), and `waeGeAdZUx` (5.00) — solid recommender contributions held back by framing and baseline issues. Slightly stronger than `3ZDMQGQgkE` (4.00) and `VCZ1o8gFny` (4.00).
 
-Relative to the corpus: This paper is well above the median. It has a clear theoretical motivation, a well-engineered training method, extensive experiments (including rare online A/B tests), and useful ablations. The main concern is the training signal confound, which limits attribution but does not invalidate the core empirical comparison. The paper is qualitatively strongest comparable to DNR (5.50, accepted as poster) and ReRe (6.00, rejected). Given that DNR was accepted as a poster at a similar quality level and GoalRank has broader experiments and a theoretical component, acceptance is warranted. However, the confound and offline/online gap prevent a higher score.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

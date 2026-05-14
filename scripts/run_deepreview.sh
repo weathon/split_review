@@ -9,11 +9,11 @@ export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
 export HARSH_MODEL="claude_sdk:claude-opus-4-7"
 export MERGER_MODEL="claude_sdk:claude-opus-4-7"
-export NEUTRAL_MODEL="claude_sdk:claude-opus-4-7"
-export OUTPUT_CSV="bench_scores_deepreview_cal_dsor.csv"
-export MERGE_LOG="pipeline_whole_deepreview_cal_dsor.log"
-export CONCURRENCY=50
-export MAX_PAPERS=100
+export NEUTRAL_MODEL="deepseek-v4-pro"
+export OUTPUT_CSV="bench_scores_deepreview_cal_opus.csv"
+export MERGE_LOG="pipeline_whole_deepreview_cal_opus.log"
+export CONCURRENCY=5
+export MAX_PAPERS=200
 export CALIBRATION_SET="2026"
 
 ollama serve & 

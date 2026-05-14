@@ -9,7 +9,7 @@ How retrieval works:
 3. Score the paper relative to those anchors.
 
 What to put in your batch of queries:
-- 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
+&& - 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.  this will lead to anchor sim lower
 - 2-3 queries that anchor each score band on a topic similar to the paper:
    - "<topic>" with avg human score >= 8
    - "<topic>" with avg human score around 5-8

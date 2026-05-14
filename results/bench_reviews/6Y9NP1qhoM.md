@@ -1,95 +1,86 @@
-Now I have all the calibration I need. Let me deliver my final consolidated review.
-
 ## Summary
-
-This paper addresses covert misinformation injection in LLM-based Multi-Agent Systems (MAS). It contributes **MISINFOTASK**, a curated dataset of 108 multi-agent tasks with 4–8 plausible-yet-false arguments each (spanning Conceptual Reasoning, Factual Verification, Procedural Application, Formal Language Interpretation, and Logic Analysis). It further proposes **ARGUS**, a two-stage training-free defense: (1) adaptive localization that combines topological edge betweenness, semantic relevance to inferred misinformation goals, and communication frequency to dynamically identify critical channels; (2) goal-aware persuasive rectification that uses chain-of-thought reasoning to fact-check messages against the LLM's parametric knowledge and generate corrected versions. Experiments across 4 LLM families, 3 injection methods, and 5 topologies show ARGUS reduces misinformation toxicity by ~28% and improves task success rates by ~10% over attack-only baselines.
+The paper introduces MISINFOTASK, a 108-task dataset for evaluating LLM-based multi-agent systems (MAS) under covert "misinformation" injection (Prompt Injection, RAG Poisoning, Tool Injection), and proposes ARGUS, a training-free two-stage defense that (i) selects monitored communication edges via edge-betweenness plus adaptive semantic relevance and (ii) deploys a CoT-based corrective agent that resonates incoming messages against the LLM's parametric knowledge. Empirically, ARGUS reduces a GPT-judged Misinformation Toxicity metric and raises Task Success Rate across four LLMs, three injection vectors, and five topologies.
 
 ## Strengths
-
-- **The MISINFOTASK dataset fills a genuine gap.** It is the first dataset specifically designed for studying covert misinformation injection in MAS. The 108 tasks require genuine multi-agent collaboration, the fallacious arguments are manually verified for plausibility, and each task includes ground-truth solutions, misinformation goals, and tool specifications. The public release promotes reproducibility and follow-up work.
-
-- **ARGUS's adaptive localization is a novel technical contribution.** Combining topological importance (edge betweenness centrality) with dynamic semantic relevance (embedding similarity to inferred misinformation goals) and communication frequency to reposition the corrective agent each round is principled and well-motivated. The ablation study (Table 3) confirms all three components contribute, with semantic relevance being the most critical.
-
-- **Comprehensive and systematic evaluation.** The experiments cover 4 LLMs (GPT-4o-mini, GPT-4o, DeepSeek-V3, Gemini-2.0-flash), 3 injection methods, 5 topologies, longitudinal round-by-round analysis (Figure 5), ablation studies (Tables 2–3), hybrid attack scenarios (Table 6, Appendix D.2), and per-category MT breakdowns (Table 7, Appendix D.3). The cross-topology results (Figure 6) demonstrate meaningful transferability.
-
-- **The paper is well-structured and transparent about limitations.** The writing is clear, and Section 7 candidly discusses the computational overhead and the scope limitation to knowledge resident in the LLM's parameters.
+- **Useful framing of "misinformation" vs. overt malicious content** (Section 2.3, Figure 1) and a clear, decomposed threat model that distinguishes prompt-/RAG-/tool-level injection vectors and which component is compromised.
+- **Two-axis evaluation** (MT for misinformation assimilation; TSR for task success, Eq. 1) is more informative than a single conflated score.
+- **Breadth of system sweeps**: four LLM families (GPT-4o-mini, GPT-4o, DeepSeek-V3, Gemini-2.0-flash), three injection vectors, five topologies (Chain/Full/Self-Determined/Circle/Star), and a temporal/round-by-round analysis (Figures 5–6) — a sensible experimental skeleton for a defense paper.
+- **Ablation isolates components**: Table 2 separately removes dynamic localization and multi-turn correction, and includes a "with ground-truth misinformation" oracle row that bounds the defense's headroom.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None — the contributions are intelligible and the engineering is real; the issues below are serious but not invalidating.
 
 ### Major
-
-- **The core defense mechanism is limited to misinformation the LLM already "knows" is false, and this bound on generality is not tested.** The paper defines misinformation as content contradicting the LLM's parametric knowledge, and the correction stage (Section 4.2) relies on "internal knowledge resonance" — querying the same LLM's own stored facts. If the LLM does not store the correct information (recent events, niche domains, fabricated entities), the mechanism has no basis for correction. The paper acknowledges this in Section 7, which is commendable, but **the experiments never include a subset designed to probe this failure regime**. A test set where the misinformation is about facts deliberately outside the LLM's training distribution would reveal whether the method degrades gracefully or collapses entirely. Without it, claims about ARGUS being a "unified shield" against diverse misinformation are overstated relative to what is actually demonstrated.
-
-- **The defense baselines are weak and do not serve as serious competitors for the task.** Self-Check is a self-reflection prompt applied to individual agents; G-Safeguard prunes communication edges but never corrects message content. Neither performs content-level misinformation rectification. While these are published MAS defense methods, neither was designed for the task of detecting and correcting covert misinformation in messages. The paper would significantly benefit from at least one baseline that directly addresses content correction — for example, a variant of ARGUS that simply prompts the corrective agent with "ignore false information" (without the goal-aware reasoning), or one that provides the corrective agent with a retrieval tool.
-
-- **The MT metric (the paper's primary quantitative claim) lacks human validation.** Misinformation Toxicity is scored by GPT-4o-2024-08-06 as an LLM judge. No human correlation study, inter-annotator agreement, or calibration against human judgments is reported. While LLM-as-judge is common practice, the paper's central quantitative claims (28.17% reduction, 10.33% TSR improvement) rest entirely on this unvalidated metric. The evaluation prompt (Appendix G, Figure 14) is detailed, but an LLM judging misinformation impact is a non-trivial task, and systematic bias cannot be ruled out without some human grounding.
+- **Circular problem definition.** Section 2.3 defines misinformation as "content that contradicts the factual knowledge implicitly stored in the parameters of an LLM, particularly one that has undergone alignment," and ARGUS's central rectification mechanism (Section 4.2, "Internal Knowledge Resonance") asks the same LLM whether the message conflicts with its parametric knowledge. Section 7 effectively concedes this ("the current study primarily addresses misinformation about knowledge resident in the agents' core LLMs"). The defense therefore operates on the very subset of misinformation it has been defined to detect, and the broader claim of "robustness against misinformation in MAS" in the abstract is not what is evaluated. This is structural, not fixable by adding ablations.
+- **Judge / system / data-generator collusion.** The dataset is generated by an LLM with hand-authored seeds (Section 3.1), several of the systems under test are GPT-4o / GPT-4o-mini, and the MT/TSR judge is GPT-4o-2024-08-06 (Section 5.1, Eq. 1). There is no non-GPT judge, no human evaluation, no inter-rater agreement, and no judge-swap robustness check. A defense that produces GPT-style refusals is likely scored generously by a GPT judge regardless of actual belief-state correction.
+- **Variance exceeds the headline gaps.** Table 1 subscripts (apparently std over three trials) are frequently larger than the reported improvements: e.g., GPT-4o-mini Tool Injection ARGUS MT 2.67±3.11 vs. G-Safeguard 3.01±2.77; ARGUS Avg. TSR 78.43±11.00 (GPT-4o-mini) and 76.96±9.99 (GPT-4o). With three trials and ±11pp dispersion on a 108-task benchmark partitioned three ways (per-cell N in the tens), no significance test is reported and many cell-level wins are not statistically distinguishable from baselines.
+- **Weak baseline set.** Only Self-Check (basic self-reflection) and G-Safeguard (structural pruning for a different threat model) are compared. Several MAS-defense methods the paper itself cites in Section 6 (AgentPrune, multi-agent debate, Netsafe, AgentSafe) are not benchmarked. The ablation also reveals that "w/o Dynamic Local." is only marginally worse than "w/o Multi-Turn Corr.," suggesting most of the gain comes from the CoT-revision corrective agent rather than from the more novel-looking topology-aware localization machinery.
 
 ### Minor
-
-- **The TSR threshold θ_m is never specified.** Equation (1) defines TSR using "Score(O_k, g_task^k) ≥ θ_m" and calls θ_m a "predefined threshold," but its value is absent from the paper. This makes TSR numbers non-reproducible, though the primary MT metric does not rely on this threshold.
-
-- **The dataset is small (108 tasks) and results lack variance reporting.** While each task has 4–8 fallacious arguments, the total of 108 tasks limits statistical power. Table 1 reports no confidence intervals, standard deviations, or significance tests. Figure 4 (goal inference accuracy) shows a single bar chart with no error bars and does not define how "accuracy" is measured. The paper would benefit from per-task breakdowns or error estimates.
-
-- **Cost and overhead are not quantified in the main paper.** The cost analysis (Appendix D.4, Table 8) reports costs for Vanilla, Attack, G-Safeguard, and Self-Check but does not include an ARGUS row in the parsed table — making the actual overhead of the proposed framework unclear. The paper acknowledges computational overhead in Section 7 but should include a quantitative comparison in the main body.
-
-- **No sensitivity analysis for θ_sim** (the relevance threshold, set to 0.4) or for the selection of k edges (set to N−1). These hyperparameters directly control the localization mechanism, and the paper would benefit from showing how MT and TSR vary across a range of values.
+- **Inconsistent headline numbers.** The abstract reports ~28.17% MT reduction; Section 1 reports 38.24%; Section 5.2 reports 28.18 / 20.38 / 35.95% per attack vector. The canonical claim is unclear.
+- **Goal-inference accuracy is not "high."** Figure 4 shows ≈0.5–0.8 across categories/injection types. The text characterizes this as "high accuracy," but for an Adaptive Re-Localization mechanism that explicitly conditions round-r monitoring on round-(r−1) inferred goals (Section 4.1.2, Eq. 5–9), a 20–50% mis-inference rate can bias subsequent rounds toward the wrong channels — an error-propagation risk that is never analyzed and could make the adaptive stage worse than topology-only localization in failure cases.
+- **Tool Injection contradicts the "contagious propagation" narrative.** Figure 5 shows that under TI with no defense, MT *drops* from ~4.5 (round 1) to ~2.2 (round 5), the opposite of the claim that "MT progressively escalates" without defense. The qualitative story holds only for PI and RP.
+- **Topology effect is small for ARGUS.** Figure 6 bar values for ARGUS are essentially flat across the five topologies (~3.5 for PI, ~3.8 for RP), which either contradicts the motivation for the edge-betweenness construction in §4.1.1 or the plot resolution is too coarse to support the claim of structural sensitivity.
+- **Ground-truth oracle is barely above ARGUS.** Table 2's "w/ Ground Truth" row is only marginally better than ARGUS (e.g., TI MT 2.54 vs. 2.77; TSR 91.67 vs. 87.04). Either the defense paradigm is near-saturated, or — more likely — the LLM judge cannot finely discriminate "fully corrected" from "partially corrected," compounding the judge-collusion concern.
+- **Figure 4 category mismatch.** Figure 4 shows "four categories" while Section 3.1 enumerates five MISINFOTASK categories (Conceptual Reasoning, Factual Verification, Procedural Application, Formal Language Interpretation, Logic Analysis). The discrepancy is unexplained.
+- **§4.2 lacks mechanistic distinctness.** The three "stages" (Multi-faceted Identification, Internal Knowledge Resonance, Heuristic Persuasive Reconstruction) read as a single CoT prompt described in prose; no formalization separates them.
 
 ### Trivial
-
-- **Numerical discrepancy between Abstract (~28.17%) and Introduction (~38.24%).** The abstract reports "approximately 28.17%" as the average MT reduction (which is the average of the three per-attack-type reductions: (28.18+20.38+35.95)/3 = 28.17%). The Introduction (line 93) reports "approximately 38.24% across various core LLMs." Both can be correct under different aggregation schemes (the former averaging per-attack percentages, the latter likely computed against the Vanilla baseline), but the discrepancy should be reconciled or explained.
+- The Tool Injection paragraph in §3.2 contains a sentence ("we designate one agent within the MAS to synthesize a final result and provide an explanation for the user") that duplicates the conclusion-agent description and obscures which agent receives the injection. Worth a clarifying rewrite.
 
 ## Nice-to-Haves
-
-- A small human evaluation subset (30 instances) for MT scoring, with agreement rates against the LLM judge.
-- A test subset where the misinformation involves facts outside the LLM's training data (recent events, fabricated entities).
-- A baseline with retrieval-augmented correction to isolate the contribution of goal-aware reasoning from simple access to external knowledge.
-- Variance estimates (standard deviations or confidence intervals) for the main results in Table 1.
+- A non-GPT judge (e.g., Claude or a fine-tuned classifier) plus a small human-rater study (~50 tasks, 2 raters) to break the GPT-generates / GPT-defends / GPT-judges loop.
+- A misinformation slice that is *not* in the LLM's parametric knowledge (novel-but-false claims about recent events) — exactly the case Section 7 admits is unaddressed and the one that matters for trustworthy MAS.
+- A "ask every monitored message 'is this correct?'" baseline that drops the topology machinery, to isolate the localization contribution from CoT revision.
+- Paired significance tests with effective per-cell N reported explicitly.
+- Worked failure cases where misinformation aligns with the LLM's own bias.
 
 ## Removed Points
-
-These points were assessed against the paper and found to be inaccurate, superseded by scope acknowledgments, or based on formatting artifacts. They are recorded here for traceability.
-
-- **"Headline numbers do not match Table 1" (Critical Issue 1 from Harsh Critic).** My verification shows the paper's numbers are internally consistent: the aggregate MT reductions computed from Table 1 are 28.10% (PI), 20.36% (RP), 35.94% (TI), while the paper reports 28.18%, 20.38%, 35.95% — differences of ≤0.08 percentage points, attributable to rounding. The abstract's 28.17% equals the average of the three per-attack-type claims. The reviewer's own computed values (27.5%, 20.2%, 33.8%) are themselves inaccurate. **This criticism is factually wrong and is removed.**
-
-- **"Circular defense" treated as a fatal/structural flaw.** The paper explicitly acknowledges this scope limitation in Section 7. It is appropriate as a major weakness reflecting the scope boundary, not a fatal design error.
-
-- **Demand for comparison with retrieval-based correction / fact-checking API.** This asks the paper to address a problem (external-knowledge correction) that is outside its stated scope (internal-knowledge activation). Retained as a nice-to-have.
-
-- **Formatting/style nitpicks and concerns about missing appendix content.** These are parser artifacts, not author errors.
-
-- **Strength Finder's generic strengths** (e.g., "the paper identifies a real and under-studied threat"). Dropped for lacking specific, citable content.
+*These points are flagged to be removed, treat them with caution.*
+- **(Strength) "MISINFOTASK fills an important gap" / "ARGUS addresses an important problem" framings** — these are generic problem-importance claims rather than evidence-backed strengths.
+- **(Strength) "Accurate inference of adversarial goals" (0.6–0.8)** — conflicts with the verified Minor weakness that 0.5–0.8 is not "high accuracy" and may bias adaptive re-localization. Per the weakness-wins rule, removed.
+- **(Strength) "Goal-aware rectification leverages internal LLM knowledge"** — this is precisely the mechanism that makes the evaluation circular per the Major weakness; cannot stand as an independent strength.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviewers did not surface any unclaimed observation about the method or results that the paper itself misses.
+None beyond the paper's own contributions. The most genuinely interesting observation surfaced in review is *negative*: the "w/ Ground-Truth" oracle in Table 2 is only marginally better than ARGUS, which is most parsimoniously explained by ceiling effects in the LLM judge rather than near-optimal defense — an important diagnostic that the authors should investigate.
 
 ## Suggestions
-
-1. **Specify θ_m** and optionally report TSR under a few threshold values to demonstrate stability.
-2. **Add a small human evaluation** (30–50 instances) for MT scoring, reporting Cohen's κ or agreement rate between the LLM judge and human annotators.
-3. **Include a "direct prompt" baseline** where the corrective agent is instructed to identify and correct false information without the full goal-aware CoT pipeline, to isolate the benefit of ARGUS's specific design.
-4. **Reconcile the 28.17% vs 38.24% numbers** between Abstract and Introduction with a note on the aggregation method used in each.
-5. **Add variance estimates** (standard deviation or bootstrapped confidence intervals) to Table 1, Figures 4 and 6.
-6. **Construct a small out-of-knowledge test subset** and report ARGUS's performance on it candidly, even if it degrades.
+- Either rescope the abstract/intro claims to "rectifying misinformation that contradicts the defender LLM's parametric knowledge" (which is what the experiments actually show), or add an out-of-distribution misinformation slice (e.g., post-training-cutoff factual claims) to genuinely test the broader claim.
+- Re-run MT/TSR with a non-GPT judge and report rank-correlation with the GPT judge; report human agreement on a 50-task subsample.
+- Add paired significance tests; report effective per-cell N; reconcile the three different headline numbers (28.17 / 38.24 / per-attack values).
+- Add at least one of multi-agent debate, AgentPrune, or AgentSafe as a baseline.
+- Analyze error propagation in Adaptive Re-Localization conditional on first-round goal-inference correctness.
+- Fix the "four categories" / five-category mismatch in Figure 4 and the duplicated sentence in §3.2.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Axis assessment.** *Originality:* moderate — edge-betweenness initial deployment plus adaptive semantic re-localization is a sensible recombination, but the corrective agent is essentially a CoT prompt. *Importance:* the question (covert misinformation in MAS) is timely. *Claim support:* weak — circular definition, judge collusion, variance > gains. *Soundness of experiments:* breadth is good, but rigor (judge robustness, significance) is lacking. *Clarity:* readable, but three inconsistent headline numbers and an unanalyzed error-propagation risk hurt. *Value to community:* the dataset and benchmarking scaffolding may be useful even if the defense story needs tightening.
 
-| Path | Avg Score | Decision | Comparison |
-|------|-----------|----------|------------|
-| `ezFhE6hufB` | 6.00 | Reject | Similar MAS defense paper. Current paper has broader evaluation (more models, attacks, topologies). Comparable depth. |
-| `yIoMqDes7O` (Mandela Effect) | 5.50 | Accept (Poster) | Similar benchmark+defense structure for MAS misinformation. Current paper has smaller dataset but more diverse attack surface. Comparable overall quality. |
-| `nHW64r5KFG` | 5.50 | Accept (Poster) | Multi-agent misinformation detection. Current paper contributes both dataset and defense. |
-| `N4O70NauD9` (Doge/MoA) | 5.00 | Reject | Less comprehensive experiments and narrower scope than current paper. |
-| `9gw03JpKK4` (Gaia2) | 8.00 | Accept (Oral) | Far larger-scale, more polished benchmark. Current paper is not in this tier. |
-| `xJm3HxHJpC` | 3.50 | Reject | Fact-checking under contamination; weaker evaluation and less clear narrative. |
-| `kI7kCgcY8Y` | 3.00 | Reject | Narrower scope and less thorough evaluation. |
+**Anchors retrieved (every anchor from the batch):**
 
-Positioned relative to these anchors, the paper is a solid mid-range submission. It has genuine contributions (new dataset, novel defense framework, broad evaluation) but has clear limitations (knowledge-bound correction scope, unvalidated metric, weak baselines, small dataset) that keep it from being a top-tier paper. It is most comparable to accepted poster papers in the 5.5 range and to a rejected paper at 6.0, reflecting the reality that decisions at this borderline are reviewer-dependent.
+- `/home/wg25r/.../Bp2axGAs18.md` — *On the Resilience of MAS with Malicious Agents* (avg 5.20, Reject). Very similar threat model and MAS-resilience framing; that paper got a borderline-reject and is broader/cleaner than the present one.
+- `/home/wg25r/.../D6zn6ozJs7.md` — *MMFakeBench* (avg 6.60, Accept). Misinformation benchmark but in multimodal detection; not directly comparable but represents what an accept-grade benchmark looks like.
+- `/home/wg25r/.../EP6n8LCEK6.md` — *Prejudice & Fidelity of D2C MAS* (avg 5.50, Reject). Comparable analytical depth on MAS; mid-tier reject.
+- `/home/wg25r/.../ueqTjOcuLc.md` — *Collaboration Mechanisms for LLM Agents* (avg 5.00, Reject). Comparable scope; mid-tier reject.
+- `/home/wg25r/.../kgZFaAtzYi.md` — *Cracking the Collective Mind* (avg 3.50, Reject). Very close threat-model neighbor; clear reject due to weak evaluation, similar in spirit to issues here.
+- `/home/wg25r/.../YauQYh2k1g.md` — *Dissecting Adversarial Robustness of MM LM Agents* (avg 6.25, Accept). Stronger anchor: clearer threat model, manually constructed adversarial tasks, real environment — methodologically tighter than the present paper.
+- `/home/wg25r/.../S1Bv3068Xt.md` — *Trust Embodied Agents: Backdoor Attacks* (avg 6.25, Accept). Stronger empirical rigor than the present paper.
+- `/home/wg25r/.../V4y0CpX4hK.md` — *Agent Security Bench (ASB)* (avg 6.25, Accept). The accept-bar benchmark in this space — broader, more attacks/defenses, more rigorous — what this paper would need to approach.
+- `/home/wg25r/.../pBugl1EIkm.md` — *Your Agent Can Defend Itself against Backdoor Attacks* (avg 3.50, Reject). Defense paper with similar weak-baseline / circular-evaluation flavor; reject.
+- `/home/wg25r/.../hkjcdmz8Ro.md` — *Jailbreaking Black-Box LLMs in 20 Queries (PAIR)* (avg 4.75, Reject). Methodologically tighter than the present paper but rejected for limited contribution.
+- `/home/wg25r/.../STpxO1Siaq.md` — *Defend Jailbreak via Debate with Partial Agents* (avg 3.50, Reject). Multi-agent defense with weak baselines and small-scale eval; similar weakness pattern.
+- `/home/wg25r/.../BltaWJZMeR.md` — *DataSciBench* (avg 3.20, Reject). Off-topic; small-benchmark reject.
+- `/home/wg25r/.../koza5fePTs.md` — *Benchmarking Planning* (avg 2.00, Reject). Off-topic.
+- `/home/wg25r/.../aRqyX0DsmW.md` — *Lab Safety LLM Benchmark* (avg 4.00, Reject). Mid-low; comparable in being a single self-constructed evaluation artifact.
+- `/home/wg25r/.../k243qi7S50.md` — *Constraint-Satisfaction Evaluation* (avg 4.00, Reject). Off-topic but useful low-band calibration.
+- `/home/wg25r/.../LkzuPorQ5L.md` — *Cut the Crap* (avg 6.00, Accept). MAS communication pruning; tighter methodologically than the present paper.
+- `/home/wg25r/.../Qox9rO0kN0.md` — *MARL Communication via Graph Modeling* (avg 7.00, Accept). Off-domain (MARL) high-end anchor.
+- `/home/wg25r/.../cnAeyjtMFM.md` — *Witness Graph Topological Layer* (avg 5.33, Reject). Off-topic.
+- `/home/wg25r/.../CL3U0GxFRD.md` — *Exponential Topology Scalable Comm* (avg 6.25, Accept). Off-domain accept anchor.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Positioning.** The closest topical anchors are *Cracking the Collective Mind* (3.5, reject), *On the Resilience of MAS* (5.2, reject), and *ASB* / *Backdoor on Embodied Agents* / *Dissecting MM Agent Robustness* (all 6.25, accept). The present paper is better-scoped and more carefully written than *Cracking the Collective Mind* but suffers from a structurally circular evaluation and weaker baseline coverage than *ASB* or *Dissecting MM Agent Robustness*. It sits below *On the Resilience of MAS* (which has a cleaner threat model and more rigorous analysis) and above the 3.5 cluster. That places it at roughly 4.
+
+MY FINAL SCORE: <pineapple>4</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

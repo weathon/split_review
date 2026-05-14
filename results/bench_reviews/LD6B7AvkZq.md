@@ -1,96 +1,86 @@
-Now I'll write the final consolidated review.
-
 ## Summary
-
-This paper introduces a framework for studying how language models learn context-free grammars (CFGs) by decomposing them into "subgrammars" (inner subgrammars as subtrees of derivations, and outer subgrammars as restricted rule sets). The authors claim a theoretical result — that the KL divergence of a language model from a PCFG decomposes recursively over subgrammars (Theorems 4.3, 4.6). Empirically, they show that small transformers' losses decompose accordingly (Figure 1), observe that all subgrammar losses decrease simultaneously during training ("parallel learning"), study whether subgrammar pretraining improves representations via CKA analysis (Table 1), and demonstrate that models fail on deep recursive structures (Figure 3).
+The paper introduces "inner" and "outer" subgrammar definitions for (P)CFGs and proves a recurrence showing that the KL divergence between an autoregressive model and a PCFG decomposes additively over subgrammars (Theorem 4.3, Corollary 4.5, Theorem 4.6). Empirically, the authors train small transformers on synthetic PCFGs to (i) visualize the loss decomposition, (ii) argue subgrammars are learned in parallel, (iii) study subgrammar pretraining as curriculum (with CKA analysis), and (iv) show that recursion depth — not sequence length — is the dominant difficulty, including an anecdote with GPT-5.1 Instant.
 
 ## Strengths
-
-1. **Novel formalization of subgrammar structure.** The definitions of inner and outer subgrammars (Definitions 3.3–3.5) are clean, and the idea of decomposing CFG learning dynamics over substructure is a well-motivated research direction that prior work on CFG learning has not pursued. Theorem 4.1 (unique DAG decomposition) provides a useful organizing principle.
-
-2. **Empirical validation of loss decomposition.** Figure 1 convincingly shows that the KL divergence decomposes into subgrammar-specific components throughout training, consistent with the claimed recurrence. This is a concrete empirical demonstration that the subgrammar decomposition is measurable and meaningful in practice.
-
-3. **Depth-failure experiment is clean and insightful.** Figure 3 isolates depth of recursion (not length) as the key difficulty: the model maintains low error on long flat contexts (error 0.017) but degrades on deep recursive contexts (error 0.173). This is a well-controlled experiment that cleanly separates two confounded factors and extends prior length-generalization work.
-
-4. **The paper opens a productive research direction.** The subgrammar decomposition lens for studying grammar learning dynamics is genuinely novel and could stimulate follow-up work on curriculum learning, mechanistic interpretability, and understanding what makes certain grammatical structures hard for neural networks.
+- The inner vs. outer subgrammar distinction (Defs. 3.3, 3.5) is a clean conceptual contribution that maps the algebra of CFGs onto two distinct learning settings (compositional substructure vs. simplified language).
+- Figure 1 empirically validates the decomposition: the measured KL closely matches the sum of subgrammar-level KLs, including with non-unit rule probabilities — concrete evidence supporting the theoretical recurrence.
+- The depth-vs-length experiment on nested parentheses (Figure 3) is a clean, interpretable result: error stays low for long non-recursive sequences (a)^i but grows sharply with recursion depth (^i, isolating recursion depth as the bottleneck.
+- The framing — studying learning *dynamics* with respect to CFG substructure rather than static probing of trained models — is a useful research direction and the recursive view of loss is a useful conceptual lens.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-1. **The illustrative derivation (Equations 1–4) is mathematically invalid as presented.** Equation (4) writes `\frac{\log P_G(\alpha|\epsilon)}{\log Q_\theta(\alpha|\epsilon)}` — a ratio of logs — which does not follow from the sum of `P(αaβ)[log P - log Q]` in equations (2)–(3). The quantity `log P / log Q` is not equal to `log(P/Q)` and does not arise from any standard manipulation of the KL divergence. The paper says "In an abuse of notation" but does not explain what notational abuse is being committed or provide a correct intermediate step. While the *conceptual* claim that the KL decomposes into conditioned divergences is clear and the formal theorems (4.3, 4.6) are stated separately, this error undermines reader confidence in the theoretical development at a critical juncture. The proofs in the appendix (stripped by the parser) cannot be evaluated here, but the main text's derivation is not salvageable as written.
-
-2. **Definition 4.2 is incoherent as stated.** The definition `D_KL(P_G || Q)_A = sum_s P(s|ε) P_G(A|s) sum_a D_KL(P_G || Q | ¬s)` uses the notation `D_KL(P_G || Q | ¬s)` which is never defined, and `P_G(A|s)` where `A` is a subgrammar (not a string-generating event) — its probabilistic interpretation is not specified. This definition is the core of how the paper connects subgrammars to KL divergence, and its imprecision makes the theoretical results that depend on it (Theorems 4.3, 4.6) difficult to assess from the main text alone.
-
-3. **The empirical evidence for "parallel learning" is purely observational and not tested against alternative accounts.** The paper claims transformers "learn all subgrammars in parallel" based on the observation that all subgrammar KL divergences decrease simultaneously (Figures 1–2). This is consistent with the training data containing all subgrammar strings, so all losses naturally decrease. The paper acknowledges "one could cook up a pathological scenario where a model independently optimizes each subgrammar in sequence" and offers Corollary 4.7 as a condition for parallel learning, but this condition is stated informally and is nearly tautological ("if gradients on one subgrammar don't hurt others, then all improve simultaneously"). Without a controlled experiment that distinguishes genuinely parallel optimization from coincident decreases driven by shared training signal, this claim is not established beyond being a visual observation.
+- **Core "fundamental theorems" rely heavily on the context-insensitivity assumption, which is neither proved nor empirically bounded.** Theorem 4.3 / Eq. 1–5 is the straightforward consequence of autoregressive factorization + linearity of expectation; the *interesting* simplifications (Corollary 4.5's $\sum p_i D_{KL}(P_{A_i}\|Q_\theta(A_i))$ and Theorem 4.6's $1/(1-\mathbb{E}[R])$ blow-up) require that $Q_\theta(A_i|s)$ be identical across all contexts where $A_i$ can appear. This is an extremely strong condition for transformers. The paper acknowledges this ("This is a strong assumption…") but defends it only with the hand-wave that "varying the prefix did not result in qualitatively different results." No quantitative error bound is provided. Without one, downstream attributions (parallel learning, recursion blow-up) are not rigorously established by the theory — only consistent with it.
+- **The headline "parallel learning" claim is loosely defined and Figure 2(a) shows visibly staggered, not parallel, acquisition.** At epoch 0 the deeper subgrammars start at far higher KL (L0 ~100, L4 ~15) and they converge to the floor at different times. The paper never operationalizes "parallel" (proportional decrease? same epoch-to-threshold? identical curves?), so the central comparison to child-vs-model acquisition is unfalsifiable as stated. Corollary 4.7 (the proposed sufficient condition) is informal, untested, and only conjectured to apply.
+- **The curriculum / representational-alignment results in §5 lack the statistical treatment needed to support "definitively."** With 30 seeds, the paper reports no error bars or significance tests; Table 1's CKA changes are 0.02–0.05 in absolute terms, and the MLP-column changes are near-zero or negative, undercutting the "more aligned representations" narrative. The cosine-similarity probe analysis is reported on a "top quantile of seeds," a selection that biases the comparison. The abstract's "definitively" is not warranted by these effect sizes.
 
 ### Minor
-
-4. **CKA analysis reports percentage changes on tiny absolute differences without confidence intervals.** In Table 1, the reported differences are small (e.g., 0.258 vs. 0.281, an absolute difference of 0.023 on a 0–1 scale), yet the paper highlights "+8.9% change" which inflates the apparent effect. No confidence intervals, bootstraps, or significance tests are provided despite 30 random seeds. The text says the pretraining effect "diminishes as the model size increases," which further limits the generality of this finding. The claim about "definitive" alignment differences (abstract, Section 5) is not supported by the reported numbers.
-
-5. **Theorem 4.6 (expected recurrence formula) and Corollary 4.5 (context-insensitive decomposition) crucially depend on a "context-insensitivity" assumption that is not empirically verified.** The paper mentions that "our experiments suggest that this condition is perhaps not so strong" and cites a qualitative observation about varying prefixes, but provides no quantitative test. This weakens the connection between theory and experiments.
-
-6. **Corollary 4.7 is essentially a tautology.** It states: if gradients on subgrammar Aᵢ do not increase the loss on other subgrammars, then all subgrammar losses decrease. This is close to restating the definition of "not hurting" and provides no testable or falsifiable condition, nor any architectural or algorithmic insight into *why* this property might hold.
+- **§6's "depth, not length" generalization is built on one PCFG.** Nested parentheses is the simplest non-trivial recursive grammar; the broader claim would be far stronger with Dyck-$k$, arithmetic, or natural-language-like CFGs sweeping depth/length. The GPT-5.1 Instant anecdote (5 vs 5) is explicitly disclaimed in footnote 3, which is appropriate, but it then carries less weight than the framing suggests.
+- **GPT-5.1 Thinking counter-evidence dismissed rather than engaged.** Footnote 2 notes the Thinking model handles deep expressions; the paper attributes this to external tools/CoT, but does not seriously consider that this *favors* the "limitation is inference-procedural, not architectural" reading.
+- **Theorem 4.1 framing.** The paper itself notes the DAG decomposition corresponds to Gruska's "grammatical levels" (1971); presenting this as a new theorem while acknowledging its equivalence to classical work is misleading framing. The novelty is in the connection to learning, not in the decomposition itself.
+- **§7 conjecture in tension with cited literature.** The conjecture that "there exists a setting of weights of a 2-layer, 2-head transformer correctly modeling the PCFG to high depth" is asserted without engaging the depth-of-recursion limitation results cited in §2 (Hahn 2020; Bhattamishra 2020), which suggest the opposite.
+- **§5.1 "robustness to subgrammar location"** is asserted from a figure (Fig. 5) in the appendix with no main-text data; readers cannot evaluate the claim from the manuscript proper.
+- **Definition 4.2** has a typographical inconsistency that suggests the formal statement does not match the prose ($\sum_a$ inside the definition but no $a$ on the LHS); this is the kind of imprecision that should be tightened, separate from any parser issue.
 
 ### Trivial
-
-7. Equation (2) and (3) appear to be split across two separate equation blocks with the closing bracket on (3), making the parsing of the algebra harder to follow.
+- None substantively verifiable (the equation rendering in §4.2 Eq. (4) appears to be a parser artifact and is not held against the paper).
 
 ## Nice-to-Haves
-
-- The anecdotal GPT-5.1 results (5/5 shallow vs. 2/5 deep) are explicitly disclaimed as "purely anecdotal" and "should not be interpreted as direct evidence." Including them is a stylistic choice that some readers may find useful for context. Properly controlled experiments would be needed to draw any conclusions.
-- Testing the parallel learning claim with controlled interventions (e.g., introducing subgrammars at different phases of training) would substantially strengthen the empirical contribution.
-- A mechanistic analysis of *why* models fail on deep recursion (e.g., attention pattern analysis, probing hidden states at varying depths) would add value beyond the behavioral observation.
+- A figure plotting the empirical context-insensitivity error vs. the loss-decomposition residual on the same axes, to make the §4.2 hand-wave concrete.
+- Per-seed loss-distribution histograms with significance tests (and unselected, not top-quantile) for the curriculum result.
+- Repeating §6 on at least Dyck-$k$ and an arithmetic CFG.
+- Testing whether Corollary 4.7's independence condition empirically holds — e.g., measure cross-subgrammar gradient interference during training.
 
 ## Removed Points
-
-These points from the reviewers are flagged to be removed; treat them with caution:
-
-- **"The equations in Section 4.2 are 'fundamentally incomplete and incoherent' / invalidate the paper's central claim."** — While the illustrative derivation (Eq. 1–4) is indeed broken as presented, the formal theorems (4.3, 4.6) are stated independently as separate mathematical claims with proofs deferred to the appendix. The harsh critic conflates a sloppy illustrative example with the formal contribution. The core conceptual claim — that KL divergence decomposes over subgrammars — is meaningful even if the in-line derivation is garbled. However, I have kept the substance of this criticism as a Major weakness above (points 1 and 2), tempered to reflect that the theorems may still be correct.
-- **"Frontier model experiments should not be in the paper."** — The paper explicitly disclaims these as "purely anecdotal" and "should not be interpreted as direct evidence." Including exploratory/disclaimed results is a common practice in ML papers to suggest future directions, not a scientific error.
-- **"The paper never delivers on explaining 'how language models learn.'"** — This is a framing critique about the ambitious title, not a substantive technical weakness. The paper defines subgrammar decomposition and shows empirical correlations, which is a meaningful start even if causal mechanisms are not fully established.
-- **"The paper overclaims novelty relative to prior work."** — The paper properly cites Gruska (1971) regarding the DAG decomposition and discusses related work (Cagnetta & Wyart, 2024; Allen-Zhu & Li, 2023). The claim to novelty is about the *learning dynamics* lens applied to subgrammar structure, which is a reasonable distinction.
-- **Strength Finder's generic strengths** (e.g., "the paper addressed an important problem" — these are dropped when they lack specific content or conflict with verified weaknesses).
-- **Missing appendix / missing references / formatting nitpicks** — The appendix is stripped by the parser; these are not missing from the original submission.
+*These points are flagged to be removed, treat them with caution.*
+- **"Theorems are essentially restatements of the chain rule" (full strength).** I have weakened (not removed) this critique above: Theorem 4.3 itself is essentially a re-grouping under autoregressive factorization, but Corollary 4.5/Theorem 4.6 are non-trivial given context-insensitivity, and the framing/connection to subgrammars is itself a contribution.
+- **Eq. (4) "dimensionally wrong fractions."** Removed per Hard Rules — this is a parser/OCR artifact, not a paper error.
+- **"Missing engagement with Allen-Zhu & Li (2023) and Cagnetta & Wyart (2024)."** Removed per Hard Rules (related-work demands). The paper *does* discuss both in §2; whether the comparison is deep enough is a judgment call but not actionable as a hard weakness.
+- **"Reproducibility / undisclosed hyperparameters" framing in the harsh review.** Removed per Hard Rules — most details are appendix-deferred, and main-text statistical-rigor concerns (which are valid) are kept above under the curriculum-result weakness.
+- **Strength: "framing as a worthwhile direction" (generic).** Dropped — too generic. The concrete strengths above (decomposition + Figure 1 validation, depth-vs-length result, subgrammar taxonomy) are kept.
+- **Strength: "supports the central claim that loss dynamics are tightly coupled to substructure of CFGs"** as phrased — folded into the more specific Figure 1 strength.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews do not surface an observation about the work that the paper itself does not already make. The depth-failure result (Figure 3) and the subgrammar decomposition framing are the paper's own contributions; no reviewer offers a genuinely new synthesis beyond what is already in the text.
+None beyond the paper's own contributions. The decomposition lens and the depth-vs-length distinction are the paper's own observations, and the reviews surface concerns but not new external insights.
 
 ## Suggestions
+- Reword the abstract / intro: drop "definitively" and "the most important contribution," reframe Theorem 4.3 as a useful conceptual lens rather than a fundamental result, and treat Corollaries 4.5 / 4.6 as conditional results whose context-insensitivity premise is empirically partially supported.
+- Operationalize "parallel learning" with a concrete metric (e.g., ratio of epoch-to-threshold across subgrammars) and either show Figure 2(a) meets it or reframe the comparison to children.
+- Add error bars and significance tests for the curriculum and CKA results, and report all-seed (not top-quantile) cosine-similarity statistics.
+- Extend §6 to ≥2 additional grammars and a model-size sweep before generalizing "depth, not length."
+- Either prove or empirically bound the context-insensitivity error term, turning Corollary 4.5 into a quantitative approximation rather than a conditional equality.
 
-1. **Fix the illustrative derivation in Section 4.2.** Rewrite equations (1)–(5) to show a correct algebraic path: the sum `sum_a P(αaβ)[log P(...) - log Q(...)]` should be grouped into separate terms for prefix, subgrammar A, and suffix, each of which is a weighted KL-like term. The current equation (4) with `log P / log Q` must be replaced.
-
-2. **Clarify Definition 4.2.** The notation `D_KL(P_G || Q | ¬s)` and `P_G(A|s)` need precise definitions. What does it mean to condition the KL divergence on "not s"? How is the probability of a subgrammar (a set of rules, not a string) conditioned on a prefix defined? The appendix may contain these details, but the main text should be self-contained at the definition level.
-
-3. **Add a controlled experiment for the parallel learning claim.** Train on a grammar where subgrammar A appears only in the first half of training and subgrammar B only in the second half. If the KL for A continues to decrease during the B-only phase, that would genuinely demonstrate parallel/non-interfering learning.
-
-4. **Report confidence intervals or bootstrap distributions** for the CKA values in Table 1, and avoid reporting percentage changes on absolute differences of <0.05 on a 0–1 scale unless effect sizes are clearly stated.
-
-5. **Quantitatively test the "context-insensitivity" assumption** (Corollary 4.5) by measuring the variance of `Q_θ(A|s)` across different contexts `s` for each subgrammar `A`.
-
-6. **Provide the mechanistic analysis of the depth-failure** that is currently missing. The paper shows *that* models fail on deep recursion but not *why* — an analysis of attention patterns, hidden state dynamics, or probing results would substantially strengthen this finding.
+## Axes
+- **Originality:** Moderate. The subgrammar definitions and the framing of loss dynamics over CFG substructure are novel angles, but Theorem 4.1 overlaps with Gruska (1971) and Theorem 4.3 is close to a chain-rule restatement.
+- **Importance of question:** High — learning dynamics on CFGs is a well-motivated, active subarea.
+- **Support for claims:** Mixed. The decomposition claim is well supported empirically; "parallel learning," "definitively reorganizes representations," and "depth, not length, is the general bottleneck" are overclaimed relative to the evidence.
+- **Soundness of experiments:** Adequate for illustration; weak for the curriculum/representation claims (no significance, selection on top-quantile seeds, single grammar in §6).
+- **Clarity:** Mostly clear; some definitions (4.2) are imprecise, and "parallel" is undefined.
+- **Value to community:** Modest but real — the subgrammar lens is a useful conceptual tool other researchers can build on.
 
 ## Score and Decision
 
-**Calibration anchors (all from the human review corpus):**
+**Anchor comparison:**
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0pLCDJVVRD.md` (avg 7.00, **accept**) — formal-language-based study of emergence in transformers; better empirical rigor and a sharper phenomenological claim than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/aWLQTbfFgV.md` (avg 6.25, **accept**) — careful formal-language recognition study; tighter experimental scope and execution than this paper.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1lFZusYFHq.md` (avg 6.20, reject) — theoretical analysis of induction heads; comparable theoretical ambition but more rigorous proofs.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Oz9FTPINRe.md` (avg 5.75, reject) — closely comparable formal-language learnability paper; similar level of empirical ambition. Most similar anchor.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/VVO3ApdMUE.md` (avg 5.50, accept) — transformer SAT complexity; more decisive theoretical contribution.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MO5PiKHELW.md` (avg 5.50, accept) — syntax acquisition phase transitions in MLMs; comparable scope but more careful empirics.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/qyU5s4fzLg.md` (avg 7.50, accept) — unsupervised constituency parsing; tangentially related, stronger methodological contribution.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fp77Ln5Hcc.md` (avg 4.50, reject) — depth extrapolation of decoders on nested structures; very close in topic and in the "single-grammar generalization claim" weakness. Strong calibration anchor.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/9PYCz4cDuZ.md` (avg 4.00, reject) — theoretical decomposition paper with limited empirical validation; comparable pattern of theory-light-on-novelty.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/eRkNNQRppH.md` (avg 3.50, reject) — pretraining dynamics on FOL; similar genre, weaker than this paper in conceptual framing.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/z3DMFpaP6m.md` (avg 3.00, reject) — entropy-of-LMs paper, substantially weaker than this one.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Pev2ufTzMv.md` (avg 3.75, reject) — saliency-metrics paper, unrelated genre, weaker.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/iRYExPKnxm.md` (avg 4.00, reject) — long-context benchmark; unrelated, weaker.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tKFZ53nerQ.md` (avg 2.00, reject) — very weak topic-reasoning paper; far below this one.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/u859gX7ADC.md` (avg 6.25, accept) — recursive composition transformer; tangential, stronger methodological contribution.
 
-| Anchor Path | Avg Human Score | Comparison to this paper |
-|---|---|---|
-| `/home/.../L8SMNWsxfK` (Automata Learning & LM Support) | 7.00 | Significantly stronger: clean theoretical results, rigorous proofs, well-structured experiments. This paper is far less polished and rigorous. |
-| `/home/.../ACn1hhGcV4` (Context-free Recognition with Transformers) | 5.50 | Stronger theory but weaker experiments; this paper has more empirical content but weaker theory. Comparable overall quality. |
-| `/home/.../JkitQScjuL` (Alignment Between Supervised & Self-Supervised CL) | 5.50 | Tightly argued with clear theory and experiments. This paper is less focused and less rigorous. |
-| `/home/.../bkSKvJjziW` (Scarcity–Complexity Collision) | 4.50 | Similar level: interesting ideas with presentation issues and limited scope. This paper has more experiments but weaker theory. |
-| `/home/.../ADeeoMY4Dn` (Compositional Generalization) | 4.50 | Better presented and more systematic investigation. This paper is less well-structured. |
-| `/home/.../zkeRriSIEl` (Bearing Syntactic Fruit) | 4.00 | Similar tier: interesting research direction, clear motivation, but limited empirical scope and overstated claims. |
-| `/home/.../Fq1pyj9xQm` (Length Generalization with LDRU) | 3.60 | Narrower scope but cleaner experiments. This paper has more conceptual ambition but messier execution. |
-| `/home/.../Vv8mXtf8Lx` (Randomly Sampled Language Reasoning) | 3.50 | Weaker: less rigorous and less clear contributions. This paper is somewhat stronger in originality. |
+This paper sits between the 4.50 (fp77Ln5Hcc — single-grammar nested-structure generalization, reject) and 5.75 (Oz9FTPINRe — learnability of formal languages, reject) anchors. It is more conceptually ambitious than 4.50/4.00 anchors but its core theory is closer to bookkeeping than to the cleaner theoretical contributions of accepted 5.5–6.0 anchors, and the headline empirical claims (parallel learning, "definitive" alignment) are overclaimed relative to the evidence.
 
-Positioning relative to these anchors: The paper scores below the well-executed 5.5–7.0 papers due to its unclear theoretical presentation and overstated claims. It is comparable to the 4.0–4.5 tier of papers that have interesting ideas but significant execution issues. The theoretical flaws (invalid illustrative derivation, unclear definitions) and the gap between claims and evidence (parallel learning, CKA analysis) prevent a higher score.
-
-**Score:** 4.0
-
-**Decision:** Reject — The paper introduces a genuinely interesting research direction and contains one well-executed experiment (depth-failure), but the theoretical section contains a mathematically invalid derivation (equation 4) and an unclear central definition (Definition 4.2) that undermine confidence in the core contribution. The empirical claims about parallel learning and representational alignment are overstated relative to the evidence. A substantially revised version with corrected mathematics, controlled experiments, and toned-down claims could be suitable for resubmission.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

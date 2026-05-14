@@ -1,137 +1,85 @@
-Now I have all the information I need. Let me write the consolidated review.
-
 ## Summary
-2-3 sentence summary of the paper's contribution.
+The paper presents a language-based audio retrieval system on CLOTHO that combines three components: (i) soft-label distillation from an ensemble of teachers (adopted from Primus et al., 2024), (ii) LLM-driven caption augmentation via back-translation and LLM-mix (the latter from Wu et al., 2024), and (iii) a cluster-guided auxiliary classification head using BERTopic/HDBSCAN. Best single model reaches mAP@16 = 46.6 (PaSST), ensemble 48.83 on CLOTHO dev-test, and 0.421 on the hidden evaluation set.
 
 ## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
+- The progressive configuration table (Table 2, SID 1 → SID 2) shows that adding ensemble soft-label distillation lifts mAP@16 substantially across all three backbones (PaSST 42.08 → 46.62; EAT 40.41 → 45.35; BEATs 38.12 → 43.89), giving concrete evidence that distillation is the primary driver of the reported gains.
+- Adding the LLM-augmentation stage (SID 2 → SID 3) yields clear single-annotation gains, e.g., PaSST R@5 52.5 → 57.84 and R@1 23.35 → 27.20, supporting the augmentation pipeline's utility.
+- Training recipe is described with enough specificity (three-stage protocol, per-backbone learning rates, batch sizes, epochs, ensemble grid weights in Table 3) to be broadly reproducible at the description level.
 
 ## Weaknesses
+
 ### Fatal
+None.
+
 ### Major
+- **Limited methodological novelty.** Section 2.2 explicitly states the distillation loss is "adopted… from the top-ranked DCASE 2024 Task 8 system (Primus et al., 2024)"; Section 2.4 states LLM-mix is from Wu et al., 2024; back-translation is standard (Sennrich et al., 2015). The only ostensibly novel component is the cluster-guided auxiliary head (Sec. 2.3), and the paper itself concedes "cluster guidance yields mixed gains across backbones" (abstract). For an ICLR submission the methodological contribution beyond engineering composition is thin.
+- **The one novel component is not supported by the evidence.** Table 2 shows the cluster head is at best neutral and sometimes harmful: PaSST mAP@16 46.41 (SID 3) → 46.39 (SID 4) → 46.50 (SID 5); EAT 46.05 → 45.34 → 45.34; BEATs 44.66 → 44.58 → 43.88. With no variance/seed reporting and sub-tenth-point deltas, the cluster-guided story is empirically null. The abstract's claim of "consistent improvements under high correspondence ambiguity" is not backed by any stratified analysis in the body.
+- **Promised ablations are missing.** The contributions list explicitly advertises "thorough ablations on topic granularity and teacher softness," but no sensitivity to number of clusters, λ₂, distillation τ, or teacher count is reported. The five SIDs are cumulative, not factorial — augmentation and clustering cannot be cleanly isolated.
+- **No direct comparison with the prior system being extended.** The Primus et al. (2024) system is the natural and most informative baseline (distillation is taken from it). The paper never reports Primus's numbers on the same CLOTHO dev-test split, so the reader cannot assess whether 46.6/48.8 mAP@16 is an improvement, parity, or regression vs. the system the method is built on.
+- **Hidden-eval generalization gap is large and unexamined.** Dev-test mAP@16 of 48.83 collapses to 0.421 on the hidden evaluation set, reported in a single sentence with no analysis (overfitting to dev-test, weight selection on dev-test, distribution shift, etc.).
+
 ### Minor
+- All experiments are confined to CLOTHO; AudioCaps is used only for pretraining. A cross-dataset retrieval result would strengthen the generality claim.
+- No seeds / variance / significance reporting, while many decisions (E1–E4 ranking, SID 4 vs SID 5) are made on deltas well within plausible run-to-run noise.
+- Hyperparameters τ = 0.05, λ = 1.0, λ₂ = 0.05 are asserted without justification or sweep.
+- The handling of HDBSCAN noise points ("reassigning outliers based on topic probabilities," Sec. 3.4) is under-specified; number of clusters, outlier rate, and label distribution are not reported.
+- Validation/dev-test split distinction and whether ensemble grid search touches dev-test should be stated explicitly.
+
 ### Trivial
+- The abstract's framing ("consistent improvements under high correspondence ambiguity") oversells what Table 2 actually shows.
+- "PaSST consistently outperformed EAT and BEATs" is treated as a finding rather than a well-known property worth analyzing.
 
 ## Nice-to-Haves
+- Add AudioCaps retrieval results and/or a third dataset to demonstrate generalization.
+- Factorial ablation of {distill, augment, cluster} with multiple seeds and confidence intervals.
+- Qualitative examples where the cluster head changes a retrieval ranking, plus cluster topology statistics (sizes, coherence, outlier rate).
+- Reproduce LLM-mix with an open model, as the paper itself flags closed-LLM reliance as a limitation.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
+- *Harsh critic's "DCASE challenge report, not research"* — this is a valid framing concern but is largely captured by the "limited novelty" weakness above; rephrasing it as a venue verdict is editorial overreach.
+- *Concern about test-set leakage via AudioSet/CLOTHO eval overlap during LLM-mix* — the paper explicitly states "we excluded any recordings in WavCaps that overlapped with the evaluation subsets of Clotho" (Sec. 3.1), so the leakage worry is partly addressed.
+- *Strength Finder's "ablation of label sources (BERTopic vs finetuned)"* — dropped because the deltas (PaSST 46.39 vs 46.50; EAT identical 45.34) do not support a meaningful conclusion; the corresponding weakness wins.
+- *Strength Finder's "strong ensemble results with transparent weighting"* — kept implicitly but down-weighted: ensemble gains are real on dev-test but undermined by the 48.8 → 0.421 hidden-eval gap.
 
 ## Novel Insights
+None beyond the paper's own contributions. The work is a composition of existing techniques, and the one new mechanism (cluster-guided auxiliary head) does not produce a robust positive signal in the authors' own experiments.
 
 ## Suggestions
+- Add Primus et al. (2024) numbers on the matched CLOTHO dev-test protocol and report deltas.
+- Run factorial ablations with ≥3 seeds and report mean ± std; this is essential when wins are sub-percent.
+- Deliver the promised topic-granularity and teacher-softness sweeps, or remove that claim from the contributions list.
+- Analyze the 48.83 → 0.421 dev-test-to-eval gap; this is the most consequential empirical signal in the paper.
+- Report cluster statistics and the outlier-reassignment procedure in detail.
+- Replicate at least one experiment on AudioCaps to demonstrate the recipe transfers.
+
+## Evaluation along required axes
+- **Originality**: low — two of three components are explicitly borrowed; the one novel component is incremental.
+- **Importance**: moderate — audio-text retrieval is a useful task, but the paper targets a single benchmark.
+- **Claims well supported**: weak — the cluster-head story is not supported by Table 2; promised ablations are missing.
+- **Soundness**: adequate engineering, but no variance reporting and no factorial ablation.
+- **Clarity**: reasonable; the pipeline is understandable.
+- **Value to the research community**: limited; reads as a DCASE-style system report rather than an ICLR research contribution.
 
 ## Score and Decision
 
-Let me now calibrate against the retrieved anchors and produce my final review.
+Anchors retrieved:
+- `U42TkrEDzb.md` (avg 6.75, Accept) — Audio LLM speech-quality evaluator; substantive new corpus + method; the paper under review is much narrower and less novel.
+- `2y8XnaIiB8.md` (avg 5.50, Reject) — vision-language dataset distillation, first-in-class method; still mid-band reject; paper under review has less methodological novelty.
+- `yuuyPlywuO.md` (avg 4.75, Reject) — distilled voice assistant; borrowed-but-composed pipeline with limited novelty, comparable framing to this paper.
+- `KrK6zXbjfO.md` (avg 7.00, Accept) — SoundCTM, strong technical contribution; far above this paper.
+- `Exnt2DcdKD.md` (avg 5.80, Reject) — NIRANTAR continual learning benchmark; meaningful dataset contribution; above this paper.
+- `s7lzZpAW7T.md` (avg 7.00, Accept) — Dynamic-SUPERB benchmark; community-scale contribution; well above.
+- `ybiwT2yP1c.md` (avg 5.00, Reject) — BIRB bioacoustics retrieval benchmark; benchmark contribution; above this paper.
+- `bfRDhzG3vn.md` (avg 5.75, Reject) — continual contrastive SLU; modest method paper, comparable but with more methodological discussion than this paper.
+- `Gi3SwL98nL.md` (avg 4.00, Reject) — LLM embeddings for music-emotion alignment; applied-composition paper with limited novelty — closest match to the paper under review.
+- `ujNe7sybJu.md` (avg 2.50, Reject) — video summarization MoE; very weak.
+- `FFUmPQM8c5.md` (avg 4.00, Reject) — AVCaps audio-visual dataset; small contribution; comparable band.
+- `nBZBPXdJlC.md` (avg 7.00, Accept) — LTU audio LLM; far above.
+- `SvCOhZRQqa.md` (avg 5.60, Accept) — token pruning for audio ViT; small but well-executed empirical paper; above this paper.
+- `ykuc5q381b.md`, `xw5nxFWMlo.md`, `3PDklqqqfN.md` (avg ~7) — strong accepted retrieval/benchmark papers; far above.
 
-My anchors:
-1. cFhcd4WGjO (DART, avg 5.50, Accept Poster) — strong novel method with theoretical grounding, clearly better than current paper
-2. 2YSqaj725G (Audio-Language Pretraining, avg 3.50, Withdrawn/Reject) — large empirical study, limited novelty, similar to current paper in incremental nature
-3. kylhUNRXyt (Speech-CLAP, avg 2.50, Reject) — unfair baselines, circular evaluation, current paper is better
-4. nspzrcvzcB (EM-KTD, avg 6.00, Accept Poster) — novel distillation method, strong results, clearly above current paper
-5. 0wwcANeTjd (VLAFP, avg 4.00, Reject) — reasonably novel approach but mixed reviews, similar tier to current paper
-6. 3q3LnQ63Az (Audio Captioning, avg 4.50, Withdrawn/Reject) — useful dataset but limited novelty, similar tier
-7. 74jqVzrUQ5 (VocSim, avg 3.00, Withdrawn/Reject) — benchmark paper, below current paper
-8. 1CR1MTIgmq (avg 0.00, Reject) — not relevant
+The paper under review most closely resembles `Gi3SwL98nL.md` (avg 4.0) and `FFUmPQM8c5.md` (avg 4.0): applied composition of existing techniques on a single benchmark, with limited novelty and ablations that don't fully support the central new claim. It is weaker than `yuuyPlywuO.md` (4.75) and `bfRDhzG3vn.md` (5.75) because the one nominally novel mechanism produces null results in the authors' own table.
 
-Comparing this paper to these:
-- The distillation component works well (SID1→SID2: +4.5 to +5.8 mAP@16), providing clear value
-- The LLM augmentation pipeline is sensible and shows some benefit
-- But the novel cluster guidance component has mixed/negative results — it's the paper's main claimed contribution and it's unsupported
-- No comparison to Primus et al. (2024) — this is a serious omission since the distillation method is adopted from there
-- The evaluation set discrepancy (48.83→42.1) is unexplained
-- Overall, the paper reads more like a technical report on a well-engineered system than a novel research contribution
-
-Score: 4.0 — The paper has some merit but the main novel contribution is not supported by evidence, and missing comparison to the baseline system makes the contribution uncalibrated.
-
-Wait, let me re-read the FUNDAMENTAL ISSUES rule: "If any weakness is severe enough to undermine the paper's core claims or it is simply 'not even a paper', it overrides all strengths."
-
-The core claims are three things: (i) distillation, (ii) augmentation, (iii) cluster guidance. Two of three are well-supported. The third is not. But the paper frames cluster guidance as a contribution, and the abstract says "jointly improve robustness" - the evidence doesn't support the cluster part. This is a major weakness but not fatal to the entire paper — the distillation + augmentation system still works. However, the paper overclaims.
-
-Score: 4.0 seems right. It's a borderline weak paper.Now I will write the final consolidated review.
-
-## Summary
-
-This paper proposes a dual-encoder system for language-based audio retrieval on the CLOTHO dataset, combining three components: (1) soft-label distillation from an ensemble of pretrained teachers (adopted from Primus et al., 2024), (2) LLM-driven caption augmentation (back-translation + LLM mix), and (3) a novel cluster-guided auxiliary classification head. The system is evaluated across three audio backbones (PaSST, EAT, BEATs). Distillation delivers consistent, substantial gains (+4.5–5.8 mAP@16 across backbones). A weighted ensemble of multiple variants achieves 48.83 mAP@16 on the CLOTHO dev test split.
-
-## Strengths
-
-1. **Soft-label distillation provides large and consistent gains.** Table 2 shows that adding distillation (SID2) improves mAP@16 over the contrastive-only baseline (SID1) by +4.54 (PaSST), +4.94 (EAT), and +5.77 (BEATs). This is the paper's strongest empirical result and clearly demonstrates the value of this component.
-
-2. **LLM-driven augmentation yields measurable improvements for two of three backbones.** Comparing SID2 (distillation only) to SID3 (distillation + augmentation), EAT improves from 45.35 to 46.05 and BEATs from 43.89 to 44.66. The paper also documents the generation of 50,000 mixed audio–caption pairs, providing a concrete, reproducible pipeline.
-
-3. **Weighted ensembling of multiple system variants boosts performance.** The ensemble (E1–E4) achieves up to 48.83 mAP@16 on the CLOTHO dev test split, with combination coefficients selected via grid search. This demonstrates a practical path to improving retrieval beyond individual models.
-
-4. **Systematic configuration ablation.** The paper defines five System IDs (SID1–SID5) that incrementally add distillation, augmentation, and cluster guidance, making it easy to attribute gains to each component.
-
-## Weaknesses
-
-### Major
-
-1. **The paper's primary novel contribution — cluster-guided auxiliary classification — is not supported by the evidence.** The paper claims in the abstract that cluster guidance "jointly improve[s] robustness" and that "ablations indicate consistent improvements under high correspondence ambiguity." Table 2 tells a different story: cluster guidance provides only a marginal gain on PaSST (SID3: 46.41 → SID5: 46.50, +0.09 mAP@16) while *decreasing* performance on EAT (46.05 → 45.34, −0.71) and BEATs (44.66 → 43.88, −0.78). The paper explicitly acknowledges "mixed gains across backbones" but then claims "consistent improvements under high correspondence ambiguity" — yet no analysis of any "high ambiguity" subset is presented anywhere. This claim is unsubstantiated and directly contradicted by the data shown. Since cluster guidance is the only component that the paper presents as novel (distillation is adopted from Primus et al., 2024), this undermines the paper's central contribution claim.
-
-2. **No comparison to the state-of-the-art system that the method directly builds on.** The distillation loss (Section 2.2) is explicitly adopted from Primus et al. (2024) — the top-ranked DCASE 2024 Task 8 system. The paper presents no comparison to this system or any other published baseline. Without knowing whether the proposed additions (augmentation, cluster guidance) improve over the existing approach, the paper's contribution cannot be assessed. The metric (mAP@16 on CLOTHO) is the same, so a direct comparison is feasible and necessary.
-
-3. **Unexplained evaluation set discrepancy.** The final ensemble achieves 48.83 mAP@16 on the CLOTHO dev test split but only 42.1 (0.421) on the held-out evaluation set — a drop of 6.7 points. The paper reports this result without any discussion of whether this drop is expected, whether the evaluation set is significantly harder, or whether the dev test results may be inflated by tuning. This omission raises concerns about overfitting to the dev split and undermines confidence in the overall results.
-
-### Minor
-
-4. **No statistical significance or variance reporting.** The key improvements attributed to cluster guidance are very small (e.g., +0.09 mAP@16 on PaSST) and negative on two other backbones. No error bars, repeated runs, or significance tests are provided. Given the inconsistency across backbones, it is impossible to determine whether the small positive effect on PaSST is real or within noise.
-
-5. **Underspecified clustering details.** The paper does not report the number of clusters produced by HDBSCAN, the values of key HDBSCAN parameters, or how outliers are assigned (beyond a vague reference to "topic probabilities estimated by BERTopic"). This makes the cluster guidance component difficult to reproduce or analyze.
-
-6. **Insufficient detail for reproducibility of data augmentation.** The back-translation languages are not specified, and the LLM prompt used for caption mixing is not provided. Without these, the augmentation pipeline cannot be replicated.
-
-### Trivial
-
-7. No typos or formatting issues worth noting (parser artifacts are not paper issues).
-
-## Nice-to-Haves
-
-- An analysis of retrieval performance on high-ambiguity subsets (e.g., audio clips with high caption overlap), which the paper claims exists but never presents.
-- Comparison of the ensemble to a simple averaging baseline or to an ensemble of models without cluster guidance.
-- A brief discussion of why cluster guidance helps PaSST but hurts EAT and BEATs — this is a first-order finding that the paper should engage with.
-
-## Removed Points
-
-- *Criticism that the paper "does not show that the CLOTHO dataset actually has non-binary correspondences."* The paper's framing about non-binary correspondences is a motivation, not an empirical claim requiring proof. The distillation loss handles soft correspondences regardless; the criticism is over-scoped.
-
-- *Criticism that "SID1 is irrelevant as a baseline."* SID1 is the contrastive-only baseline, which serves as a valid starting point for the ablation chain. This is a reasonable experimental design choice.
-
-- *Criticism about "cluster guidance mechanism unclear."* The mechanism is adequately explained: the audio encoder learns to predict the cluster label of the corresponding caption, encouraging topic-level alignment. Whether it *works* is the empirical question, and the evidence is weak — this is covered in weakness #1.
-
-- *Strength Finder's generic strengths* (e.g., "detailed training protocols enable reproducibility") — these are standard for a systems paper and carry no weight in evaluation.
-
-## Novel Insights
-
-None beyond the paper's own contributions. The review process surfaces the core tension: the paper's most novel component (cluster guidance) is its weakest link, while its strongest component (distillation) is adopted from prior work. This leaves the paper's overall contribution uncalibrated.
-
-## Suggestions
-
-1. **Compare directly to Primus et al. (2024).** Implement their system or cite their published CLOTHO results to show whether the proposed additions improve over the existing SOTA. This is the single most important missing experiment.
-
-2. **Run cluster-guided variants with multiple random seeds (3–5) and report mean ± std.** This would clarify whether the small PaSST improvement is real or noise, and confirm that the degradation on EAT/BEATs is systematic.
-
-3. **Either present the "high correspondence ambiguity" analysis promised in the abstract, or remove that claim.** If cluster guidance genuinely helps on ambiguous pairs, define that subset and show the numbers. If the claim cannot be substantiated, remove it.
-
-4. **Discuss the dev test → evaluation set drop.** Provide evaluation set results for SID2–SID5 individually to help the reader understand whether the drop is uniform or specific to certain configurations.
-
-## Score and Decision
-
-**Calibration anchors** (all from the same human-review corpus):
-
-| Path | Avg Score | Comparison to this paper |
-|------|-----------|------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/cFhcd4WGjO.md` (DART, Audio-Text Retrieval) | 5.50 (Accept) | Stronger: novel method with theoretical grounding; this paper is less novel |
-| `/home/wg25r/review_agent/human_reviews_2026/nspzrcvzcB.md` (EM-KTD, Audio-Visual Distillation) | 6.00 (Accept) | Stronger: well-motivated novel method with strong results; clearly above |
-| `/home/wg25r/review_agent/human_reviews_2026/3q3LnQ63Az.md` (Audio Captioning Dataset) | 4.50 (Withdrawn/Reject) | Similar: useful system but limited novelty; this paper has similar issues |
-| `/home/wg25r/review_agent/human_reviews_2026/0wwcANeTjd.md` (VLAFP, Audio Fingerprinting) | 4.00 (Reject) | Similar tier: mixed reviews on novelty and evidence; comparable quality |
-| `/home/wg25r/review_agent/human_reviews_2026/2YSqaj725G.md` (Audio-Language Pretraining) | 3.50 (Withdrawn/Reject) | Similar: large study but incremental; this paper has a more focused contribution |
-| `/home/wg25r/review_agent/human_reviews_2026/74jqVzrUQ5.md` (VocSim, Benchmark) | 3.00 (Withdrawn/Reject) | Below: different paper type; current paper has more empirical substance |
-| `/home/wg25r/review_agent/human_reviews_2026/kylhUNRXyt.md` (Speech-CLAP) | 2.50 (Reject) | Below: unfair comparisons undermine the paper; current paper avoids that pitfall |
-
-The paper delivers a well-engineered system where distillation clearly works and augmentation provides some benefit. However, its primary claimed novelty — cluster-guided classification — is unsupported by the evidence (mixed/negative results, no significance testing). Furthermore, the paper does not compare to the SOTA system it builds on (Primus et al., 2024), making it impossible to determine whether the overall approach advances the state of the art. The paper reads more as a capable technical report than a research contribution with validated novel components. Relative to the calibration anchors, it sits in the 3.5–4.5 range — below papers with clearly validated novel methods (DART 5.5, EM-KTD 6.0) and comparable to papers with similar novelty/reproducibility concerns that received mixed-to-negative reviews (VLAFP 4.0, Audio Captioning 4.5).
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>3</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

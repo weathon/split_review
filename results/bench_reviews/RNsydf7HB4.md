@@ -1,83 +1,75 @@
-Now let me write the final consolidated review.
-
 ## Summary
-
-This paper proposes GAMA, a neural neighborhood search method for the Capacitated Vehicle Routing Problem (CVRP) that models the problem instance and the evolving solution as two distinct modalities, encodes them via a Dual-GCN, and fuses them through stacked self-attention, cross-attention, and a learned gated fusion mechanism. The resulting state representation feeds a PPO-based policy that selects local search operators adaptively. Experiments on CVRP20/50/100 and the Uchoa benchmark show that GAMA achieves competitive or better average costs than several neural baselines (DACT, L2I) and classical solvers (LKH3, HGS), with an ablation study confirming that the cross-attention and gated fusion each contribute to performance.
+GAMA proposes a learning-to-improve framework for CVRP that encodes the problem instance and current solution as two graph modalities via a Dual-GCN, fuses them with stacked self/cross-attention and a gated mechanism, and uses PPO to select among local-search operators. Experiments on CVRP20/50/100 and Uchoa benchmark instances are reported, plus ablations on cross-attention and gating.
 
 ## Strengths
-
-- **Principled multi-modal encoder design.** GAMA is the first method to treat the distance graph (instance geometry) and the solution graph (current routing topology) as distinct semantic modalities, then model their interaction via stacked self-attention (intra-modality) and cross-attention (inter-modality). This is a clean, well-motivated architectural improvement over prior work like GENIS, which uses dual GCNs without cross-modal communication. The ablation in Table 2 isolates this: on CVRP100, GAMA (15.6510) outperforms GENIS (15.7441) and the cross-attention-free variant GAMA_NG (15.7001).
-
-- **Rigorous ablation with statistical testing.** All ablation experiments are run 30 times independently and tested with the Wilcoxon rank-sum test (α=0.05), with clear notation (↑/↓/≈). This provides solid evidence that the reported improvements from cross-attention and gated fusion are not due to chance—a standard of rigor many concurrent papers lack.
-
-- **Competitive results and strong zero-shot generalization.** On CVRP100 (T=20k), GAMA achieves an average cost of 15.6510, surpassing LKH3 (15.6752), HGS (15.6994), DACT (15.6925), and L2I (15.7334). On the Uchoa benchmark (100–1000 customers, unseen distributions), GAMA achieves an average optimality gap of 4.956%—the best among all neural methods tested (ReLD: 5.018%, DACT: 25.305%, L2I: 13.557%)—without any retraining.
-
-- **Well-motivated problem framing.** The paper clearly identifies two genuine limitations of existing L2I methods: coarse state representations that miss structural detail, and naive concatenation of heterogeneous features. The proposed solution (modality-specific encoding + attention-based fusion) follows naturally from this diagnosis.
+- The architectural change over GENIS is concrete and well-isolated: Dual-GCN → self-attention → cross-attention → gated fusion. The §4.4 ablations (GENIS vs. GAMA_NG vs. GAMA) and Wilcoxon tests directly attribute gains to cross-attention + gating rather than to incidental hyperparameter changes.
+- Zero-shot evaluation on the Uchoa benchmark (instances up to 1000 customers, distribution shifted from training) is included rather than only the training distribution.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None — the work is not invalidated, but the headline claims are not supported.
 
 ### Major
-
-- **Uncontrolled comparison in search strategy.** GAMA applies exhaustive best-improvement neighborhood search per operator selection (Section 3.1: "the selected operator is applied exhaustively in the neighborhood of the current solution, the best improving move is then adopted"), while baselines DACT and L2I use different per-step search strategies. The paper reports results by number of steps (T=5k/10k/20k) and wall-clock time but never controls for the *number of solution evaluations* per step. Because GAMA evaluates the entire neighborhood of the chosen operator each step while baselines sample fewer moves, the comparison on step count alone conflates the learned policy's contribution with the search strategy's thoroughness. This does not invalidate the results—wall-clock times are comparable across methods at the same T (e.g., CVRP100 T=20k: GAMA 19m, DACT 19.3m, L2I 18.7m)—but without controlling for evaluation effort, the headline claim "significantly outperforms recent neural baselines" is not fully disentangled from the choice of search procedure. The authors should at minimum report per-step evaluation counts and ideally run a controlled experiment with equivalent search budgets.
-
-- **Missing statistical testing against classical solvers in the main comparison.** Statistical significance (Wilcoxon, Table 2) is reported only in the ablation section comparing GAMA to its ablated variants. The main results (Table 1) report point estimates over 30 runs but do not test whether GAMA's advantage over LKH3/HGS is statistically significant. On CVRP50, the gap between GAMA (10.3533) and HGS (10.3548) is only 0.0015 (≈0.014%), which is well within the noise range of a single standard deviation. The claim "GAMA maintains superior solution quality across all instance sizes" is not supported by statistical evidence for the smaller sizes.
+- **Headline empirical claim is not supported by Table 1.** Table 1 shows GAMA(T=20k) on CVRP100 at 15.6510 (19 min) versus HGS at 15.6994 (59 s) and LKH3 at 15.6752 (1.95 min). GAMA's gain over HGS (~0.3%) is achieved with ~19× the wall-clock time, and against DACT(T=20k) at 15.6925 the gap is ~0.0415 — only ~2× the reported std (0.0215). Significance testing is performed only on the ablation (§4.4), not on Table 1. The §4.3 narrative ("maintains superior solution quality across all instance sizes," "significantly outperforms") is not supported at matched compute, and no iso-time comparison is presented. This goes to the paper's central claim.
+- **Generalization table excludes the dominant classical solvers.** Table 3 reports GAMA at 4.956% avg gap on Uchoa instances, but includes only neural baselines and reports DACT at 25.305% and L2I at 13.557% — values that strongly suggest L2I-class methods were run out-of-regime. LKH3 and HGS, which were included in Table 1 and are state-of-the-art on Uchoa, are absent. The "strong zero-shot generalization" claim is therefore evaluated against a comparison set that flatters GAMA. The inconsistency with Table 1's baseline selection requires justification.
+- **Scope vs. claims mismatch.** The title, abstract, and §1 repeatedly say "Vehicle Routing Problem." All experiments are CVRP with uniform [0,1]² customers and integer demands in {1..9}. There is no evaluation on VRPTW, OVRP, PDP, or non-uniform distributions. The paper's positioning against general L2I methods (DACT, GIRE) is overstated relative to its actual experimental scope.
 
 ### Minor
-
-- **Very marginal improvements on small instances.** On CVRP20, GAMA's average (6.0810) vs. HGS (6.0812) and DACT (6.0811) represents a ~0.003% improvement. On CVRP50, GAMA (10.3533) vs. HGS (10.3548) is ~0.014%. While statistically significant in the ablation, these differences are so small that they lack practical significance. The paper's framing ("significantly outperforms") should be calibrated to problem size—the contribution is empirically strongest on CVRP100 and larger.
-
-- **Phase-level reward assignment creates temporal credit-assignment ambiguity.** The reward function (Section 3.2) assigns the same reward r_t = f(δ₀) − f(δ*₍ₖ₎) to all transitions within an improvement phase, computed at the end using the best solution found therein. Since the reward for an action at time t depends on outcomes of future actions within the same phase, this is technically non-Markovian. The paper follows the same design as Lu et al. (2019), so this is not a novel flaw, but the paper does not discuss the potential credit-assignment bias or justify why it does not harm learning. A brief discussion would strengthen the methodology section.
-
-- **Missing no-policy (random operator selection) baseline.** The ablation compares GAMA against GENIS (learned encoder without attention fusion) and GAMA_NG (without gated fusion). Both use the same exhaustive search and learned policy. What is missing is a baseline that uses *random operator selection* with the same exhaustive search. This would isolate whether the learned policy contributes anything beyond the search strategy itself. The GENIS comparison already shows the encoder matters, but a random baseline would be the cleanest ablation of the policy's value.
-
-- **Figure 2 y-axis labeling error.** The box plot caption labels the y-axis as "Gap %" but the range shown (10.35–10.41) corresponds to absolute costs, not percentage gaps relative to optimal. On CVRP50, the optimality gap is ~0.3–0.5%, not 10.35–10.41. This is a presentation error that should be corrected.
+- **Contribution over GENIS is small.** §4.4.1 gives mean improvements of 0.0004 (CVRP20), 0.0071 (CVRP50), 0.0931 (CVRP100). The smaller-instance differences are essentially within reported stds; the Wilcoxon "↑" marks significance but not effect-size meaningfulness.
+- **Variance claim is inconsistent with Table 2.** §4.4.2 asserts GAMA "exhibits notably lower variance." On CVRP100, GAMA's std is 0.0215 vs. GENIS 0.0053 and GAMA_NG 0.0042 — i.e., higher variance. The Figure 2 box-plot is on CVRP50 only; the broader claim is not supported by the numbers in Table 2.
+- **Initialization fairness.** §4.1 specifies that GAMA's initial solutions are "randomly generated." Whether DACT and L2I were re-implemented with identical initialization is not stated. For L2I-class methods, the initial-solution distribution is a non-trivial confound.
+- **Timing protocol underspecified.** §4.3 reports "run one instance average CPU time" while training/inference uses A100 GPUs; what exactly is timed (GPU+CPU; sequential vs. batched) is not specified, which weakens cross-method timing comparisons.
+- **Operator-selection mechanism not analyzed.** The motivation hinges on adaptive operator selection, but the paper never inspects the policy's operator-selection distribution, how it differs from L2I/GENIS, or which operators drive gains — so the proposed mechanism is not directly verified.
 
 ### Trivial
-- The paper does not explicitly state the number of operators in the action space or the exact GCN architecture (number of layers, hidden dimensions) in the main text, deferring architectural details to the appendix. While the appendix exists in the original submission, a brief summary in the main text would improve readability.
+- §4.1 mentions "the proposed GENIS" — appears to be a leftover reference to a prior method.
+- The depth of the GCN in Eq. 2 is not explicitly stated.
 
 ## Nice-to-Haves
-- **Solution evaluation counts:** Report the number of candidate solutions evaluated per step for all methods, allowing a fair comparison of search effort that separates the policy's contribution from the search strategy's.
-- **Random operator baseline:** Add a variant of GAMA with random operator selection (same exhaustive search) to directly measure the learned policy's contribution.
-- **Per-operator analysis:** Visualize which operators the learned policy selects at different stages of search, and how the cross-attention weights correlate with structural properties of the solution.
+- A cost-vs-wall-clock Pareto plot covering LKH3/HGS and the neural baselines, replacing the (T=5k/10k/20k) discrete table.
+- Attention/gating visualizations showing what cross-attention learns and how α concentrates across phases.
+- Per-instance Uchoa results in the main text.
+- One additional VRP variant (e.g., VRPTW or OVRP) to back the "VRP" framing.
 
 ## Removed Points
 These points are flagged to be removed, treat them with caution:
-- "The paper does not specify the exact set of operators used (only '2-opt, swap, insertion and so on')" — The paper explicitly states "The details of the operators are presented in supplementary material." The appendix exists in the original submission but is stripped by the parser. This is a parser artifact, not an author omission.
-- "Missing hyperparameters for baselines beyond a reference to original papers" — The paper states each baseline uses its official implementation with "hyperparameters set according to the original paper's recommendations." This is standard practice.
-- "The comparison with classical solvers is unfair because they run without a search budget cap while GAMA runs for fixed steps" — Reporting each method's converged solution quality is a standard experimental design for benchmarking.
-- "The paper claims GAMA is a 'neural' method but the actual search is exhaustive local search" — This is a description of the method, not a flaw. The neural component learns which neighborhood to explore; this is clearly stated in the abstract and introduction.
-- Criticism about the encoder's inference cost not being reported — This is a reasonable request but is a secondary analysis that does not undermine the core claims.
-- Claim that the method's reliance on a fixed-size action space is not discussed as a limitation — The paper discusses future work on operator interactions in the conclusion.
-- The criticism that Algorithm 1 pseudo-code is "poorly structured" — The algorithm is functional and follows standard conventions. The phase reward computation is correctly scoped within the no-improvement detection block.
+- Harsh critic's framing of §3.3 GCN as possibly "collapsing to near-linear difference" — this is speculative and the paper does specify L=3 stacked attention layers after the GCN; the architecture is more expressive than the reviewer implied.
+- Strength-finder's generic claims about "consistent superiority across scales and budgets" and "strong zero-shot generalization" — these conflict with the Major weaknesses (iso-compute and missing classical baselines) and so the weaknesses win.
+- Strength-finder's "Comprehensive experimental protocol" — generic; the protocol has known gaps (no VRPTW/OVRP, no iso-compute), so it does not support a kept strength.
+- Strength-finder's "Clear algorithmic description for reproducibility" — generic and not backed by specifically novel content.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself does not already articulate.
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Control for solution evaluations:** Re-run baselines while counting candidate solutions evaluated per step, and report results at equal evaluation budgets to disentangle the policy's contribution from exhaustive search.
-2. **Add statistical tests to Table 1:** Report whether GAMA's differences from LKH3/HGS are statistically significant (Wilcoxon, as done in the ablation).
-3. **Add a random operator baseline:** Include a variant with random operator selection and exhaustive search to directly measure the policy's value.
-4. **Fix Figure 2 y-axis label:** The range 10.35–10.41 corresponds to absolute cost, not Gap %. Correct the label.
-5. **Tone down claims on small instances:** The improvements on CVRP20/50 are practically negligible. Acknowledge this explicitly.
+- Replace Table 1 with an iso-time Pareto curve, and report Wilcoxon tests on the main result, not only the ablation.
+- Add LKH3 and HGS rows to Table 3; if they win, report it honestly and reposition GAMA as a competitive neural method rather than as dominating classical solvers.
+- Either rescope the paper to "CVRP" in title/abstract or add at least one additional VRP variant.
+- Analyze the operator-selection policy (entropy, per-phase preference) to back the AOS motivation.
+- Clarify the timing protocol (GPU vs. CPU, batched vs. sequential, hardware).
+
+## Evaluation by Axis
+- **Originality:** moderate — cross-attention + gated fusion over a dual-graph encoder is an incremental but reasonable refinement of GENIS.
+- **Importance:** moderate; CVRP is well-studied and dominated by mature classical solvers.
+- **Support for claims:** weak — central claims of "outperforming" classical solvers and L2I baselines do not hold up under iso-compute or significance scrutiny.
+- **Soundness of experiments:** mixed — clean ablation, but unbalanced compute budgets and inconsistent baseline selection in the generalization table.
+- **Clarity:** acceptable; methodology is readable, though some claims overstate what the tables show.
+- **Value to community:** limited unless the empirical claims are tightened and the scope broadened.
 
 ## Score and Decision
 
-**Calibration anchors** (all from /home/wg25r/review_agent/human_reviews_2026/):
+Anchor comparison:
+- `SrnTGdJKYG.md` (avg 3.00, Reject) — Neural Deconstruction Search for VRP. Stronger empirical record than GAMA (claims to surpass OR methods across three VRP variants) yet rejected. GAMA is weaker in scope (CVRP only) and matched-compute evidence; comparable or below this anchor.
+- `IA3wm5vwUl.md` (avg 3.67, Reject) — Dynamic encoder dual-channel decoder for routing. Similar incremental architectural novelty on routing; rejected. GAMA sits at a similar level.
+- `km2nHt2YoD.md` (avg 3.50, Reject) — Bilevel min-max CVRP integration. Comparable scope, rejected. GAMA at this level.
+- `Gs8jWk0F01.md` (avg 2.20, Reject) — Dynamic-CVRP DRL with weak experiments. GAMA's experiments are cleaner than this anchor, so GAMA scores higher.
+- `iWCfiDxLIY.md` (avg 3.00, Reject) — GREAT architecture for TSP, rejected. Comparable.
+- `TbTJJNjumY.md` (avg 6.25, Accept) — Boosting NCO for large-scale VRP, with linear-complexity cross-attention and self-improved training; substantively stronger contribution and scale than GAMA. GAMA clearly below this anchor.
+- `L0pMPCmEfN.md` (avg 4.33, Reject), `pTsP30MoBq.md` (avg 4.20, Reject), `7dufGaLYF8.md` (avg 4.00, Reject) — off-topic but anchor the 4-range as papers with mixed weak-empirical patterns.
+- `cUFIil6hEG.md` (avg 5.75, Accept), `oO6FsMyDBt.md` (avg 7.33, Accept), `qT1I15Zodx.md` (avg 4.75, Reject) — off-topic, well above GAMA.
 
-| Anchor | Avg Score | Comparison to GAMA |
-|--------|-----------|-------------------|
-| HADES (NLgJcADMtr.md) | 4.00 | Similar neural improvement paper for VRP with marginal gains on small instances and incomplete experimental controls. GAMA has a stronger architectural contribution and more rigorous ablation. |
-| AGOF (kivcvgV52Z.md) | 4.50 | 2-Opt neural framework with narrower scope. GAMA's multi-modal encoder is more novel and general. |
-| L2R (hAurIMOhOW.md) | 4.00 | Search space reduction paper. Strong generalization but less architectural novelty. GAMA is comparable in rigor. |
-| URS (EiEbn6FZsK.md) | 4.50 | Ambitious unified VRP solver with questionable LLM component. GAMA is cleaner and more focused. |
-| MoH (tIQZ7pVN6S.md) | 5.00 | LLM heuristic generation. Cleaner experiments and better generalization story. GAMA has a stronger architectural contribution but a weaker evaluation. |
-| RRNCO (sKvo9ZZfpe.md) | 5.50 | Real-world routing benchmark with practical contribution. GAMA is less impactful but offers a novel architectural approach. |
-| Rethinking Distance Metric (R6np5nEhJo.md) | 2.50 | Weak contribution, insufficient novelty. GAMA is substantially stronger. |
+GAMA most closely matches the cluster of routing papers around 3.0–3.5 (SrnTGdJKYG, iWCfiDxLIY, km2nHt2YoD): an incremental architectural idea, narrow CVRP scope despite "VRP" framing, gains in the noise band against neural baselines at much larger compute, and an unfavorable comparison to classical solvers.
 
-Relative to these anchors, GAMA sits between the rejected papers (4.0–4.5) and the accepted ones (5.0–5.5). Its architectural contribution (multi-modal attention with cross-attention and gated fusion) is genuine and well-validated by ablation. However, the evaluation has two significant shortcomings: (1) the uncontrolled search strategy comparison with baselines conflates the policy's contribution with exhaustive search, and (2) the improvements on small instances are practically negligible. Combined with the missing statistical testing against classical solvers, these issues prevent the paper from reaching the clarity and rigor expected for a clear accept.
-
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL SCORE: <pineapple>3.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

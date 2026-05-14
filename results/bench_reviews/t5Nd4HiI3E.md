@@ -1,20 +1,11 @@
-Now I have all the evidence needed. Let me write the review.
-
 ## Summary
-
-This paper studies preference optimization for Large Reasoning Models (LRMs) and identifies a key challenge: the intractable marginal preference objective over reasoning traces is replaced by a single-sample trace-based gradient, which introduces high variance. The authors propose BVPO, which mixes the noisy trace-based gradient $g_t$ with a low-variance empty-trace gradient $g_e$ (obtained by suppressing reasoning trace generation) via convex combination $g_c = \alpha g_t + (1-\alpha)g_e$. The paper provides theoretical results on variance reduction, MSE-optimal mixing, and SGD convergence, and demonstrates consistent empirical gains across three LRMs (1.5B–8B) on AlpacaEval 2 and Arena-Hard, while also reporting improvements on math reasoning benchmarks.
+The paper proposes BVPO, a drop-in preference-optimization method for Large Reasoning Models that mixes a high-variance trace-based DPO gradient `g_t` with a deterministic empty-trace gradient `g_e` (obtained by appending `<think></think>`) via a convex combination `g_c = α g_t + (1−α) g_e`. The authors prove (i) trace-induced variance shrinks by α², (ii) a closed-form MSE-optimal α exists, and (iii) under η L = 1, MSE-optimality implies per-step SGD optimality. Empirically, BVPO improves AlpacaEval 2 / Arena-Hard over DPO and SimPO on three R1-distilled models while preserving math-reasoning scores.
 
 ## Strengths
-
-- **Well-motivated problem with practical importance.** The paper identifies a genuine gap: existing preference optimization methods (DPO, SimPO, etc.) were developed for conventional LLMs and ignore the unique challenge of trace-induced gradient variance when applied to LRMs. The formalization of the marginal vs. trace-based objective (Section 3.2) clearly articulates why this matters.
-
-- **Consistent and substantial empirical gains across multiple settings.** Table 1 shows BVPO outperforms the best baseline (DPO or SimPO) by up to 7.8 points on AlpacaEval 2 Win Rate and 6.8 points on Arena-Hard, across three LRMs (1.5B, 7B, 8B) and both Thinking/NoThinking modes. The gains are systematic — BVPO wins on all 18 reported cells (6 metrics × 3 models).
-
-- **Clean theoretical connection between MSE and SGD convergence.** Theorems 3 and 4 formally link the MSE of the gradient estimator to the convergence bound of SGD, providing a principled rationale for MSE minimization. This bridges statistical estimator quality and algorithmic optimization behavior.
-
-- **Simple, practical, drop-in design.** BVPO requires only adding an empty-trace loss term alongside the standard trace-based loss. It is agnostic to the underlying preference optimization algorithm (instantiated with DPO in experiments) and does not require additional data collection, making adoption straightforward.
-
-- **Surprising but reported reasoning improvement.** Table 2 shows that BVPO, trained only on general conversational data, improves average math reasoning performance by up to 4.0 points — an interesting observation that, while mechanistically unexplained, is honestly reported.
+- The paper isolates a real and underexplored problem: when a preference signal is computed only over `y`, training with sampled traces `(r,y)` injects substantial extra gradient variance (§3.2, Appendix B log-prob/length statistics).
+- The empty-trace estimator is a simple, clean idea that is method-agnostic (works on top of DPO/SimPO) and trivial to implement with the `<think></think>` control token (§3.3).
+- Empirical gains on alignment are large and consistent across three different model scales and two benchmarks (Table 1): e.g., +7.8 AlpacaEval 2 and +6.8 Arena-Hard over the best baseline on R1-Qwen-7B. Math reasoning is preserved or improved (Table 2).
+- The convergence analysis (Theorem 3, adapted from Karimireddy et al.) is correctly tied to a bias² + ηL·variance error floor, giving the method a defensible theoretical scaffolding even if not all of it is operationalized.
 
 ## Weaknesses
 
@@ -22,42 +13,67 @@ This paper studies preference optimization for Large Reasoning Models (LRMs) and
 None.
 
 ### Major
-
-- **Missing α ablation — the core mechanism is unvalidated.** The paper claims BVPO works by optimally balancing bias and variance through the mixing coefficient $\alpha$. However, no ablation study varying $\alpha$ is reported — the paper never shows what $\alpha$ was used, how sensitive performance is to this hyperparameter, or whether intermediate $\alpha$ values outperform the extremes ($\alpha=0$ or $\alpha=1$). Without this, the empirical results cannot distinguish between the claimed bias-variance trade-off mechanism and alternative explanations (e.g., the empty-trace loss acts as a regularizer, or simply having more gradient signal helps). This is the single most important piece of missing evidence for the paper's central claim.
-
-- **No direct measurement of gradient variance during training.** The paper attributes BVPO's success to variance reduction from trace sampling, but never measures gradient variance (or a proxy) for any method during training. Appendix B reportedly measures variance of log-probabilities and response lengths, but this does not directly measure gradient variance, which depends additionally on the loss landscape and model parameters. Without variance measurements, the claimed mechanism is untestable from the presented experiments.
-
-- **Missing comparison to alternative variance reduction techniques.** Standard approaches such as larger batch sizes, gradient accumulation, or Polyak averaging would also reduce gradient variance. Without comparing against these, it is unclear whether BVPO's specific mechanism matters or whether any method that increases the effective gradient signal would perform similarly.
+- **The MSE-optimal mixing weight in Theorem 2 is uncomputable from the quantities the paper has access to.** `α_unc` depends on `b_e = E[g_e] − μ` and `b_t = E[g_t] − μ`, where `μ = ∇L_m(θ)` is the very marginal gradient declared intractable in §3.2. The paper never estimates α from data; from §5.1 it is treated as a tuned hyperparameter (no sweep or value is reported in the main text). The "principled MSE-optimal mixing" of the abstract is therefore not what the algorithm actually does — α is a hand-set scalar. This severs the headline theoretical contribution from the method that is run.
+- **The missing baseline of pure `g_e` (i.e., DPO trained with `<think></think>` prepended, no trace sampling) is the single most informative ablation, and it is absent from Tables 1–2.** Without it, the experimental section cannot separate three hypotheses: (a) mixing matters, (b) `g_e` alone is what helps, or (c) the gains come from training on each prompt twice (with sampled trace and with empty trace, a de facto data augmentation). Combined with no α-sensitivity sweep, the experimental claim that "optimizing the bias–variance trade-off" is what produces gains is not isolated.
+- **`g_e` is not an unbiased — or even bounded-bias — estimator of the marginal gradient μ.** `π_θ(y|x) = Σ_r π_θ(r,y|x)`; substituting `r = ∅` selects one term, not an approximation to the sum. The paper acknowledges "potentially higher bias" (§3.3) but never bounds `‖b_e‖`. This matters because Theorem 1's "variance reduction" is the algebraic identity `Var(αX + (1−α)c) = α² Var(X)` — it would hold even if `g_e` were the zero vector. Without a bound on `‖b_e‖`, MSE-optimality in Theorem 2 is meaningful only as a statement about a specific tunable α, not about useful proximity to μ.
 
 ### Minor
-
-- **Optimal $\alpha^*$ is a theoretical reference, not a practical prescription.** Theorem 2 derives a closed-form MSE-optimal mixing coefficient, but it depends on unknown quantities ($\mu$, biases, covariances). The paper never explains how $\alpha$ is actually chosen in experiments, creating a gap between the theory and the empirical implementation. This is standard in bias-variance trade-off work but should be discussed.
-
-- **Theorem 4's optimality claim requires $\eta L = 1$.** The equivalence between MSE-minimization and convergence-error-minimization holds only in this specific condition. The paper acknowledges this but the restriction limits the generality of the "algorithmic optimality" claim. In practice, $\eta L = 1$ is a known condition in the theory but is not verified in the experiments.
-
-- **Statistical significance on small test sets.** Several math reasoning benchmarks (AIME 2024, AIME 2025) have only 30 problems. While avg@32 evaluation is used, no confidence intervals or significance tests are reported, making it difficult to assess whether improvements (e.g., 2–3 point gains on AIME 2025) are reliable.
-
-- **The reasoning improvement from non-math data is unexplained.** The paper reports that training only on general conversational data improves math reasoning, but offers no analysis of why this happens or whether it is a BVPO-specific effect or a general phenomenon (e.g., the base model benefits from any additional fine-tuning). This does not undermine the alignment results but leaves an important empirical finding unexamined.
+- **Theorem 4's bridge from MSE-optimality to algorithmic optimality requires exactly `η L = 1`**, which lies on the boundary of the `η L ≤ 1` precondition of Theorem 3 and does not correspond to standard small DPO learning rates used with AdamW in §5. For any other η, MSE-minimizing α is not the per-step optimizer. The text in §4.3 ("when ηL ≈ 1") softens this, but the equivalence advertised is degenerate-point.
+- **No multi-seed or variance reporting** on the alignment numbers. Several Table 2 deltas (MATH-500 89.4 vs 89.8 on R1-Qwen-7B; Minerva 46.7 vs 47.5 on the 8B model; AMC 91.7 vs 91.0) are within plausible run-to-run noise. The headline alignment gains are large enough to likely survive seed variance, but the smaller reasoning-preservation claims would benefit from error bars.
+- **BT-derivation slip (§3.2):** the preference signal is constructed by ranking responses with ArmoRM scored only over `y` (§5.1), yet the trace-based loss applies the BT-derived ratio to *joint* `π(r,y|x)`. This conceptual mismatch between the supervision signal and the optimization objective is the actual root of the variance problem the paper then patches with `g_e`. A more honest framing would help.
+- The intro's "up to 4.0 points on math reasoning" is an extremum over models (the 1.5B); the average gain is closer to +0.9–+1.3, with some sub-benchmarks neutral or negative. "Consistently improves reasoning" is stronger than the table supports.
 
 ### Trivial
-
-- **The term "estimator" for $g_e$ is used loosely.** $g_e$ is the gradient of the empty-trace loss, not a sampling-based estimator of the marginal gradient $\mu$ in the traditional Monte Carlo sense. The paper defines its bias explicitly relative to $\mu$, so the MSE analysis is mathematically valid, but the terminology could mislead readers. Clarifying this would help.
+- Theorem 1 should be presented as the elementary variance identity it is, rather than as a substantive result.
 
 ## Nice-to-Haves
-
-- An ablation of $\alpha$ on at least one model/benchmark pair to validate the bias-variance trade-off mechanism.
-- Gradient variance measurements (or a proxy like per-step gradient norm variance) for DPO, SimPO, and BVPO during training.
-- Comparison to DPO with larger batch sizes or gradient accumulation as a control for the "more gradient signal" alternative.
-- Confidence intervals for small-test-set benchmarks.
+- An empirical estimate of `α*` from held-out gradient comparisons (using a K-sample MC estimate of μ as a proxy) versus the chosen α, to test whether Theorem 2 is at least *predictive* in practice.
+- A K-sample trace estimator (averaging `g_t` over K traces) as a stronger variance-reduction baseline.
+- Training-curve plots of gradient-norm variance under α=1, α=0, and α=BVPO — the paper's thesis directly calls for this visualization.
 
 ## Removed Points
+*These points are flagged to be removed; treat them with caution.*
+- Strength Finder framing of Theorems 1–4 as a "rigorous theoretical framework with domination guarantees": kept the empirical and method-design strengths, but the framing of theorem 1 as substantive variance reduction is weak (algebraic identity) — folded into Weaknesses instead.
+- Strength about "novel critical bottleneck identified" — kept in a more concrete form (signal-vs-supervision mismatch identified in §3.2). Pure version was generic.
+- "Methodological simplicity and drop-in nature" — true but generic; kept implicitly under method strengths.
 
-The following criticisms from the harsh reviewer are removed or weakened after verification against the paper:
+## Novel Insights
+None beyond the paper's own contributions. The signal-vs-supervision asymmetry the paper formalizes — applying BT/DPO to joint `(r,y)` log-probabilities while preferences are defined only over `y` — is a clean way to think about why naive DPO on LRMs is noisy, and is the most quotable insight here.
 
-1. **"$g_e$ is not a valid estimator; the entire theoretical framework collapses."** — Removed. The paper explicitly defines bias vectors $b_t, b_e$ relative to $\mu$ and acknowledges $g_e$ has "potentially higher bias." The MSE framework is mathematically valid for any pair of gradient vectors with defined first/second moments. The bias is a feature of the trade-off, not a flaw in the theory. The critic's claim of "structural collapse" is an overstatement.
+## Suggestions
+- Either (i) estimate α* online during training using mini-batch Monte Carlo gradient comparisons, or (ii) explicitly reposition the paper as introducing a tuned convex combination of two gradient flows, with Theorems 1–2 serving as motivation rather than algorithm specification.
+- Add the α=0 baseline and an α∈{0,0.1,…,1} sweep on at least one model; this alone would substantially raise the paper's evidential strength.
+- Add at least 3-seed averages on AlpacaEval 2 and Arena-Hard.
+- Bound or empirically characterize `‖b_e‖` (e.g., compare `g_e` to a K-sample marginal estimate at several checkpoints).
 
-2. **"Theorem 1 is trivial/vacuous."** — Removed. The result that $\text{Var}(g_c) = \alpha^2 \text{Var}(g_t)$ is mathematically simple but not vacuous — it establishes that $g_e$ being deterministic w.r.t. trace sampling creates a guaranteed variance reduction. This is a real property that depends on the specific construction of $g_e$.
+## Evaluation
+- *Originality:* moderate — the empty-trace control-variate-style idea applied to LRM preference optimization is fresh.
+- *Importance:* genuine — LRM alignment is underexplored.
+- *Claim support:* uneven — empirical claims well supported on the alignment side; theoretical claims oversold relative to what the algorithm actually uses.
+- *Soundness:* the core theorems are correct but partially decorative (Thm 1 trivial; Thm 2 uses uncomputable terms; Thm 4 holds only on a measure-zero boundary).
+- *Clarity:* good.
+- *Value to community:* modest — a simple recipe practitioners can adopt, with empirical results showing it helps.
 
-3. **"Contradiction: training on general data improves math reasoning contradicts the theory."** — Removed. The paper reports this as an empirical observation, not a theoretical prediction. There is no contradiction; the paper does not claim the theory predicts this outcome.
+## Score and Decision
 
-4. **"Appending 'thinking response' is not an empty reasoning trace."** — Removed. In DeepSeek R1 models, the `
+Anchor comparison:
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/9Hxdixed7p.md` (3D-Properties DPO), avg 6.25, accepted — broader analytical contribution + empirical analysis; cleaner theory-method coupling than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ZRDa2IT1sQ.md` (Step-Controlled DPO), avg 6.00, rejected — similar empirical-DPO-extension flavor with reasoning focus; slightly stronger experimental story.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/EvwnYpesoD.md` (Bias-Variance-Covariance Kernel Decomposition), avg 5.75 — comparable theory-heavy decomposition framing.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/8QkpCRio53.md` (Preference Optimization for Combinatorial), avg 5.75 — similar method+limited-ablation profile.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/z7usV2BlEE.md` (LLMs Better Reasoners with Alignment), avg 5.50 — also alignment+reasoning, also under-ablated.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MF7ljU8xcf.md` (Larger LMs Provably Generalize Better), avg 6.0 — stronger theoretical-empirical coupling than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/TU5ApbbeDZ.md` (Loss Landscapes PO), avg 5.0, rejected — similar tier: clear idea, partial ablation gaps.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2BfZMh9td4.md` (MODPO), avg 4.25 — weaker empirical breadth than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/bRfVj0Sh88.md` (Active PO), avg 4.33 — weaker empirical breadth than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MlxeUVCQgD.md` (Noise-DPO), avg 3.50, rejected — much weaker theoretical/empirical motivation than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/CgPs04l9TO.md` (Butterfly Effects SGD), avg 5.33 — also gradient-variance-themed; comparable.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/StYc4hQAEi.md` (SW with Control Variates), avg 6.50, accepted — cleaner theory-method coupling than the paper under review.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wUaOVNv94O.md` (Neural Spatial Integration), avg 4.00 — weaker.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/GBWqZNoeIk.md` (Stochastic Smoothing), avg 5.00 — comparable.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/XgYZT35N76.md` (VLM CoT), avg 4.25 — weaker scope.
+
+The paper sits above the clearly-weak rejects (MODPO/Active PO/Noise-DPO) due to the genuine empirical strength across three models and the cleanness of the method, but below 3D-Properties (6.25) and SW-with-Control-Variates (6.50) because of the disconnect between Theorem 2's uncomputable α* and the actually-tuned-α algorithm, the missing pure-`g_e` baseline, and the absence of any α sweep. Closest tier is the Loss-Landscapes-PO / Better-Reasoners / Step-Controlled-DPO band (5.0–6.0).
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>
