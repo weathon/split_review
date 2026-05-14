@@ -10,10 +10,12 @@ How retrieval works:
 
 What to put in your batch of queries:
 - 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
-- 3 queries that anchor each score band on a topic similar to the paper:
-   - "<topic>" with avg human score > 6 (high band)
-   - "<topic>" with avg human score around 5 (medium band)
-   - "<topic>" with avg human score < 4 (low band)
+- 2-3 queries that anchor each score band on a topic similar to the paper:
+   - "<topic>" with avg human score >= 8
+   - "<topic>" with avg human score around 5-8
+   - "<topic>" with avg human score 3-5
+   - "<topic>" with avg human score <3
+
   You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
 `calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
@@ -26,6 +28,7 @@ Scoring rules:
 - Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 - Do NOT cluster scores around 5, the score should be relative to the retrieval samples. Score a good paper high and a bad paper low. 
 - Compare the paper under review with every single anchor paper
+- Every paper has some flaws, do not score low just because they share the same flaw with a low or medium score paper. If the strength outweight the weakness, it is okay to score high. 
 
 When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
 

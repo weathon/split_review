@@ -49,7 +49,7 @@ implementation details, or large artifacts impractical to include in a submissio
 && - Be careful with the Strength Finder: a lot of its claimed strengths can be invalid. 
 && Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence. try this one later 
 
-- Be very careful with the Strength Finder: a lot of its claimed strengths can be complete nonsense. Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence.
+- Be careful with the Strength Finder: some its claimed strengths can be generic or nonsense.
 
 - FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
 
