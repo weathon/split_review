@@ -28,7 +28,7 @@ Scoring rules:
 - Compare the paper under review with every single anchor paper and determine the most likely score of current paper. The current review had generic strengths removed, so keep in mind that they do not have generic strengths by design and should not be used as a reason to score lower.
 - FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
 - Similarly, if the paper made real contributions do not reject just because it has some weaknesses. Every paper has some flaws, do not score low just because they share the same flaw with a low or medium score paper. If the strength outweight the weakness, it is okay to score high.
-- If the paper's contribution is genuinely novel and the weaknesses are gaps rather than logical flaws, do not downgrade below the high-anchor band.
+- If the weaknesses are gaps rather than flaws, do not make it a deal breaker.
 - In your final scoring paragraph, for each kept strength write one sentence on whether it is or isn't enough to lift the score relative to anchors, mirroring how you weigh weaknesses. Do not let the justification be weakness-only.
 
 When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
