@@ -1,93 +1,97 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me write the consolidated final review.
+Now I have a thorough understanding of the paper and my calibration anchors. Let me compile the final review.
 
 ---
 
 ## Summary
 
-This paper addresses output length volatility in LLM long-form generation through a three-stage approach: (1) VOLTBench, a new benchmark designed to quantify length volatility across heterogeneous tasks (structured/unstructured, multiple languages, up to 500 chapters / 100k words); (2) an attention-trace analysis identifying internal failure patterns ("Attention Collapse" and "Attention Instability") that correlate with premature termination and section skipping; and (3) SELB, a training-free decoding-stage method that enforces structural adherence via logits boosting and proactive failure token suppression, yielding substantial improvements in length stability on the benchmark.
+This paper investigates length volatility in long-form LLM generation through a three-stage approach: (1) VOLTBench, a multi-dimensional benchmark introducing multi-sample stability metrics (LSD, LVC, FAD); (2) an attention-trace analysis identifying internal failure patterns (Attention Collapse, Attention Instability); and (3) SELB, a training-free decoding strategy that enforces structural adherence via logit boosting and suppresses failure-mode tokens. The benchmark and large-scale empirical evaluation provide useful descriptive data on how current LLMs degrade at long output lengths.
 
 ## Strengths
 
-- **Genuinely overlooked problem.** The paper correctly identifies that existing long-form generation evaluation focuses on single-generation quality and systematically ignores output volatility — the inconsistency in length and content across multiple runs. This is a real and costly issue for reliable deployment, and the paper provides the first large-scale quantification of it.
+- **Novel benchmark for generation volatility**: VOLTBench is the first benchmark to systematically quantify output length volatility through multi-sample metrics across multiple runs. The experiments on 10+ models (Table 2) expose severe instability — e.g., LongWriter-8B generates 6,320 words on average for a 100-section task but with an LVC of 45.4%, and most models fail entirely beyond 50 sections. Moving beyond single-generation evaluation is a genuine contribution.
 
-- **Comprehensive multi-dimensional benchmark.** VOLTBench is carefully constructed across four dimensions (task type, language, instruction complexity, output format), covering both unstructured text and structured data (code, math), with length scales up to 100k words. Table 1 demonstrates convincingly that no prior benchmark combines multiple sampling with stability evaluation across this breadth.
+- **Multi-dimensional benchmark design**: VOLTBench integrates unstructured and structured tasks across multiple languages (English/Chinese), instruction complexities, and length scales up to 500 chapters (Section 3.1). This enables fine-grained analyses showing, for instance, that structured tasks yield longer and less volatile outputs (Figure 3), offering actionable insights.
 
-- **Simple, training-free mitigation that works.** SELB requires no additional training, no auxiliary models, and no iterative prompting. It achieves dramatic improvements on its target tasks: on a 100-section task, it lifts output from 445 words (base Qwen2.5-7B) to 15,651 words while reducing length volatility (LVC) by 69% and maintaining structured content accuracy at 100%.
+- **Attention-trace analysis provides useful diagnostics**: The attention trace methodology (Section 5) identifies two distinct failure signatures — Attention Collapse (premature termination) and Attention Instability (section skipping) — that correlate with observed generation failures. Figure 4 clearly communicates these patterns. While correlational, this analysis moves beyond pure output inspection.
 
-- **Generalization to free-form generation.** Section 6.4 demonstrates that an adapted SELB-Hybrid strategy extends to unstructured 20k-word novel writing, achieving 97% MLA and 12.1% LVC, where baselines collapse to under 600 words. This partially addresses concerns about the method's reliance on chapter-based prompts.
-
-- **Practical identification of failure modes.** The documentation of incomplete generation and section skipping as the two dominant failure patterns, with empirical evidence across multiple models, is a useful contribution for practitioners.
+- **SELB-Hybrid demonstrates generalization to free-form tasks**: The adaptation in Appendix I extends beyond section-enforced scenarios. On a 20,000-word novel task, SELB-Hybrid achieves MLA of 97% and LVC of 12.1%, outperforming baselines that suffer from severe length collapse (e.g., GPT-4o-mini generating <600 words). This partially addresses concerns about the method's reliance on explicit section anchors.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Misleading headline quantitative claim.** The abstract, introduction, and conclusion repeatedly state that SELB "improves the mean output length of the base model by 148%." However, the base model (Qwen2.5-7B) produces 445 words while SELB produces 15,651 words — an increase of approximately 3,400%, not 148%. The 148% figure actually corresponds to the improvement over LongWriter-8B (6,320 → 15,651 words), which is not the base model. This is either a significant error or a misleading formulation, and it appears in the paper's most prominent claims. Whether careless or intentional, it erodes trust in the reported results and should be corrected.
+- **Privileged structural oracle in SELB creates unfair comparisons**: SELB relies on explicit knowledge of the required section count, section titles, and target section length — information provided by the benchmark's task format. Baseline methods (repetition penalty, entropy stopping, length constraint, LongWriter-8B) receive the same input prompts but do not exploit this structural information at the decoding level. Consequently, SCA (100%) and MLA (78.25%) are partially artifacts of enforced structure rather than evidence of improved generation capability. A fair baseline that receives the same section-count and title information without strict logit boosting (e.g., constrained decoding or structured prompting) would be needed to interpret the performance claims. The SELB-Hybrid results partially mitigate this concern for unstructured tasks, but the main structured-task comparisons remain confounded.
 
-- **Tight coupling between benchmark structure and method evaluation.** VOLTBench's chapter-based format and SELB's structural enforcement are intimately linked: the benchmark defines success largely as chapter-count adherence, and the method hard-codes chapter-title injection and EOS suppression. This makes the primary evaluation partially circular — the method is being assessed on precisely the dimensions it was hard-coded to satisfy. The paper partially mitigates this concern through the free-form generalization (Section 6.4), which is a genuine validation that the approach can work without explicit chapter markers. However, that experiment is described only briefly in the main paper with full details deferred to the now-stripped Appendix I, and it remains a single experiment rather than systematic evaluation across diverse free-form tasks.
+- **The CKA representational stability analysis is confounded**: Appendix H claims that SELB prevents representational drift by showing higher cosine similarity between hidden states at late time steps and an early anchor. However, forced section titles reset the semantic context by reintroducing similar tokens, which mechanically increases cosine similarity regardless of whether the model's internal narrative state is preserved. The analysis as presented cannot distinguish genuine stability from this trivial confound.
 
 ### Minor
 
-- **Attention probing is observational, not causal.** Section 5 identifies "Attention Collapse" and "Attention Instability" from two hand-selected traces (Qwen2.5-7B and Qwen2.5-3B on one task). No statistical prevalence is reported across models or runs, and no intervention experiment demonstrates that fixing these attention patterns causally improves output. The link from attention findings to SELB is post-hoc: SELB does not manipulate attention — it bypasses the need for the model to self-regulate attention by forcibly injecting structure. The probing section reads more as a plausibility argument than a rigorous mechanistic investigation.
+- **Attention analysis is correlational, not causal**: Section 5 identifies patterns that correlate with failures but does not establish causation. The paper's language is appropriately qualified (patterns "precede" failures), but the framing in the introduction ("identify the root causes") overstates what the analysis demonstrates. A perturbation study (e.g., manipulating attention to test whether collapse causes deviation) would strengthen the mechanistic claim but is absent.
 
-- **Quality evaluation depth.** While SCA (execution-based verification for code) is a strong, objective quality metric for structured tasks, UCA for unstructured tasks relies on LLM-as-a-Judge checking three fine-grained constraints (character, keyword, theme). These are reasonable proxies, but they don't directly measure fluency, coherence, or factual consistency at extreme lengths. The paper mentions lexical diversity analysis (Appendix G) and representational stability analysis (Appendix H), which would address this, but they are inaccessible in this stripped version. Human evaluation would substantially strengthen the quality claims but is absent.
+- **Methodological simplicity limits contribution breadth**: SELB's core mechanism — boosting logits for predetermined section titles when a length threshold is reached, blocking EOS tokens, and suppressing conversational filler — is a collection of well-motivated but straightforward heuristics. The method works for its intended purpose but does not offer a generalizable principle for long-form generation control. This limits its significance as a methodological contribution, though it remains practically useful.
 
-- **The paper's main results are on a single base model for the mitigation method.** Table 2 evaluates many models, but SELB results are primarily demonstrated with Qwen2.5-7B as the base. While Figure 5 shows SELB applied to Qwen3-8B and Llama-3.1-8B for length curves, the full quality metrics (SCA, UCA) are not reported for those models with SELB.
+- **SELB-Hybrid details deferred to appendix**: The free-form generalization results (Section 6.4) are compelling but the full mechanism, evaluation setup, and comprehensive results appear only in Appendix I. The main paper would benefit from more detail on this adaptation.
 
 ### Trivial
 
-- The abstract's footnote about code release ("upon acceptance") is standard but worth noting.
+- The attention trace methodology averages over all layers and heads, which may obscure layer-specific dynamics that could differentiate the two failure patterns more precisely.
 
 ## Nice-to-Haves
 
-- A component ablation of SELB would clarify whether the structural enforcement alone suffices or whether the banned-phrase list and EOS suppression contribute meaningfully beyond simple title injection.
-- Side-by-side qualitative examples of baseline vs. SELB output at extreme lengths would help readers judge whether forced continuation produces coherent text or hollow filler.
-- Comparison with dedicated length-control decoding methods (e.g., FUDGE-style logit manipulation) beyond the four general decoding baselines included.
+- A fair baseline that receives structural information (section count, titles) without strict logit boosting — e.g., adding section titles to the prompt prefix or using constrained decoding — would substantially strengthen the experimental comparisons.
+- Human evaluation or qualitative examples of SELB-generated text to verify that forced section breaks produce coherent continuations rather than disjointed concatenations.
+- Ablation showing SELB performance degrades when section titles are not perfectly known, to test robustness.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points are flagged to be removed, treat them with caution.
 
-- *"The benchmark's reliance on chapter markers makes evaluation tautological"* — softened and retained as a Major weakness with the important caveat that Section 6.4 and the free-form experiments partially address this concern. The original harsh-critic framing as entirely invalid was too strong.
+- **"SELB is not a valid research contribution — it is a hand-crafted, rule-based decoding hack"**: This overstates the case. While SELB is indeed simple and heuristic-based, a method's simplicity does not disqualify it as a contribution. SELB addresses a clearly identified problem and produces measurable improvements. The legitimate concern about the structural oracle and comparison fairness is captured in the Major Weaknesses section above. The claim that SELB is "equivalent to writing a post-processor" ignores that it operates during decoding (single-pass) and influences the generation trajectory rather than post-hoc padding.
 
-- *"SCA/UCA are insufficient quality metrics"* — softened and retained as a Minor weakness. For structured tasks, SCA (execution-based verification) is actually a rigorous metric. For unstructured tasks, the paper does provide supplementary analyses (lexical diversity, representational stability) in appendices. The concern is valid but not as severe as originally framed.
+- **"Attention trace analysis provides no actionable insight beyond what a practitioner could infer from generation logs"**: The attention traces DO reveal *when* failures begin internally (attention collapse precedes output degradation), which is not directly visible from output inspection alone. This has diagnostic value, even if the methodological contribution is modest.
 
-- *"No human evaluation at all"* — retained as part of the Minor quality evaluation concern but not as a standalone fatal weakness, since LLM-as-a-Judge is standard practice and the paper has supplementary quality analyses.
+- **"The attention-trace methodology is under-specified"**: The paper provides a full mathematical definition of α^(t) in Section 5, including the layer-and-head averaging procedure. While averaging may lose resolution, the methodology is clearly specified.
 
-- *"Attention analysis is entirely post-hoc and meaningless"* — softened. The analysis is observational rather than causal, but it does provide useful characterization of failure modes. Retained as Minor.
+- **"Forced section titles will reset semantic context leading to higher cosine similarity"** (from Strength Finder): The strength finder claimed SELB "prevents representational drift" as a strength. This is moved to Removed Points because the CKA analysis is confounded (see Major Weaknesses).
 
-- *"Only two model instances shown"* — retained within the Minor attention probing weakness.
+- **"SELB achieves 148% increase in mean output length and 69% reduction in volatility"** (from Strength Finder, presented as standalone evidence): These numbers conflate enforced structure with improved generation. Moved because, while numerically correct, they cannot be interpreted as evidence of improved model capability without the structural-oracle caveat.
 
-- *Strength Finder's generic strengths* — removed. Examples: "The paper is well written" and general claims about importance without specific evidence tied to the paper's actual contributions.
+- **Generic strengths from Strength Finder about "addressing an important problem"**: These are removed as they are generic/superficial and do not constitute concrete evidence.
 
-- *Strength Finder's claim about "causal link"* — removed. The paper does not establish causal mechanisms between attention patterns and output failures; the link is correlational.
+- **"The paper identifies internal attention patterns driving instability"** (causal framing): Changed to correlational framing — the paper identifies patterns that *correlate with* instability, not patterns that *cause* it.
 
 ## Novel Insights
 
-The paper's key insight — that length volatility is a systematic and measurable property of LLMs that can be diagnosed through attention traces and mitigated through lightweight decoding interventions — is a useful reframing of the long-form generation problem. Prior work focused on whether models *can* generate long text at all; this paper shifts attention to whether they can do so *reliably*. The finding that structured tasks exhibit lower volatility (likely because format constraints provide stronger generation guidance) is an actionable insight that could inform prompt design in practice.
+None beyond the paper's own contributions. The observation that multi-sample length volatility is a distinct and severe failure mode in long-form generation is itself the paper's novel insight, and the benchmark provides systematic evidence for it.
 
 ## Suggestions
 
-- Correct the 148% figure throughout the paper. If the comparison is against LongWriter-8B, state this explicitly. If the comparison is against the base model, use the actual ~3,400% figure. The current formulation is misleading and must be fixed before publication.
-- Expand the free-form generation evaluation (Section 6.4) into the main paper with full metrics rather than a single paragraph. This is the strongest evidence against the tautology concern and deserves more prominence.
-- Add summary statistics for the attention patterns across multiple runs and models. Even a simple table reporting how often "attention collapse" precedes early termination across 10+ runs would substantially strengthen the probing section.
-- Provide at least one human evaluation or qualitative case study comparing baseline vs. SELB outputs at extreme lengths to complement the automated quality metrics.
+- Add a baseline that uses the same structural information as SELB but via prompt engineering (e.g., appending "You are now starting Chapter 3" at appropriate points) rather than logit manipulation. This would isolate the contribution of the decoding-level intervention.
+- Include at least one full SELB-generated text example in the main paper or a prominent appendix so readers can qualitatively assess whether forced sections produce natural continuations.
+- Either reframe the CKA analysis with appropriate caveats about the confound from forced section titles, or replace it with a more rigorous analysis of internal stability (e.g., measuring drift within a single section before the forced title boost).
+- Consider a perturbation experiment for the attention analysis — e.g., artificially suppressing attention to constraint tokens and measuring the effect on output volatility — to strengthen the mechanistic claims.
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Anchor comparison:
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| LongWriter-Zero (JWx4DI2N8k) | 6.00 (Oral) | Stronger: RL-based training paradigm, SOTA results, cleaner evaluation. Our paper's training-free approach is less ambitious and has the misleading figure issue. |
-| ExpertLongBench (nJvgBolRcR) | 5.50 (Poster) | Stronger: cleaner benchmark construction with expert validation, no misleading claims. Our paper adds a method but has evaluation concerns. |
-| Predicting LLM Output Length (3loQDtveWI) | 5.33 (Poster) | Slightly stronger: cleaner experiments, no misleading figures, clear baseline comparisons. |
-| Embedding Trust (ROTJZgRp7Q) | 5.00 (Reject) | Comparable: both have real contributions with some validation gaps. Our paper is broader (benchmark + probing + mitigation) but has the headline figure issue. |
-| MGAL (RdLSJ5CJsr) | 4.00 (Withdrawn) | Weaker: benchmark-only paper. Our paper adds method and probing. |
-| SagaScale (bYpSLBk8H8) | 3.50 (Reject) | Weaker: benchmark with significant quality/motivation concerns. Our paper is more comprehensive and better motivated. |
-| UPHELD (wCV1efgkyV) | 3.00 (Reject) | Much weaker: small dataset with severe limitations. Our paper is substantially stronger. |
+- **ExpertLongBench** (`/home/wg25r/review_agent/human_reviews_2026/nJvgBolRcR.md`, avg 5.50, Accept Poster): Stronger paper — expert-designed benchmark with rigorous CLEAR evaluation framework, thorough experiments on 13 LLMs. The current paper's benchmark (VOLTBench) is solid but less rigorously validated, and the SELB method is simpler than CLEAR. VOLTBench + SELB is below ExpertLongBench.
 
-The paper's strengths — identifying a real and overlooked problem, building a comprehensive benchmark, and proposing a simple effective mitigation — are genuine and would typically support a score in the 5.0–5.5 range. However, the misleading 148% headline figure and the somewhat tautological primary evaluation (even though partially mitigated by free-form experiments) pull the score down. The attention probing, while interesting, does not add as much as claimed since the connection to the mitigation is post-hoc. Relative to the anchors, this paper is clearly stronger than the low-band papers (3.0–4.0) but falls short of the clear accept papers (5.33–6.0). It lands in the borderline range where the misleading figure tips it below acceptance.
+- **Deco-G** (`/home/wg25r/review_agent/human_reviews_2026/XMb9poL2Mo.md`, avg 4.00, Withdrawn): A decoding framework using HMM training for format compliance. More technically sophisticated method than SELB, but reviewers found issues with baselines and evaluation scope. The current paper is comparable in overall quality — SELB is simpler but the benchmark contribution adds value. Roughly at the same level.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+- **Frankentext** (`/home/wg25r/review_agent/human_reviews_2026/wfmEwfaRxN.md`, avg 4.00, Withdrawn): Creative idea with thorough experiments but mixed reviews on coherence and focus. The current paper has a clearer three-stage structure but weaker method novelty. Comparable quality level.
+
+- **Oolong** (`/home/wg25r/review_agent/human_reviews_2026/lrDr6dmXOX.md`, avg 3.00, Reject): Benchmark paper criticized for limited novelty and missing baselines. The current paper is stronger — VOLTBench introduces multi-sample stability as a novel evaluation dimension, and the paper includes both analysis and a mitigation method.
+
+- **MGAL** (`/home/wg25r/review_agent/human_reviews_2026/RdLSJ5CJsr.md`, avg 4.00, Withdrawn): Multilingual long-context benchmark. Similar benchmark-contribution profile. The current paper's additional method and analysis components put it slightly above.
+
+- **SagaScale** (`/home/wg25r/review_agent/human_reviews_2026/bYpSLBk8H8.md`, avg 3.50, Reject): Novel-based long-context benchmark with automation pipeline. The current paper has a more comprehensive evaluation dimension (volatility) and a method contribution, making it stronger.
+
+The current paper sits between the 3.00–4.00 benchmarks (Oolong, SagaScale) and the 5.50 benchmark (ExpertLongBench). It is comparable to the 4.00 papers (Deco-G, Frankentext, MGAL) but adds a method component they lack, while having method weaknesses that prevent it from reaching the ExpertLongBench tier. Score: **4.0**.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

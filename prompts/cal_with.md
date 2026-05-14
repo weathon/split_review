@@ -4,13 +4,13 @@ How retrieval works:
 
 1. Make ONE call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
 
-2. From the returned list, pick a small number of anchors (at least 8) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
+2. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
 
 3. Score the paper relative to those anchors.
 
 What to put in your batch of queries:
-- 5 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
-- 4 queries that anchor each score band on a topic similar to the paper:
+- 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
+- 3 queries that anchor each score band on a topic similar to the paper:
    - "<topic>" with avg human score > 6 (high band)
    - "<topic>" with avg human score around 5 (medium band)
    - "<topic>" with avg human score < 4 (low band)
@@ -25,10 +25,7 @@ Scoring rules:
 - The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
 - Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 - Do NOT cluster scores around 5, the score should be relative to the retrieval samples. Score a good paper high and a bad paper low. 
-- Compare the paper under review with every single anchor paper and determine the most likely score of current paper. The current review had generic strengths removed, so keep in mind that they do not have generic strengths by design and should not be used as a reason to score lower.
-- FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
-- Similarly, if the paper made real contributions do not reject just because it has some weaknesses. Every paper has some flaws, do not score low just because they share the same flaw with a low or medium score paper. If the strength outweight the weakness, it is okay to score high.
-- In your final scoring paragraph, for each kept strength write one sentence on whether it is or isn't enough to lift the score relative to anchors, mirroring how you weigh weaknesses. Do not let the justification be weakness-only.
+- Compare the paper under review with every single anchor paper
 
 When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
 

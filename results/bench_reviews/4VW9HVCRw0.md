@@ -1,83 +1,97 @@
-Now I have a thorough understanding of the paper, the reviews, and the calibration anchors. Let me now synthesize everything into a final authoritative review.
+Now I have a thorough understanding of the paper and calibration anchors. Let me write the final consolidated review.
 
 ---
 
 ## Summary
-This paper introduces the Free-Form HOI Generation task, which extends hand-object interaction synthesis beyond grasp-centric paradigms to include diverse non-grasping manipulations (pushing, poking, rotating). The authors construct WildO2, a dataset of 4.4k 3D HOI samples reconstructed from internet videos via an automated O2HOI pipeline with manual refinement, annotated with multi-level language descriptions and 17-part hand segmentation. They propose TOUCH, a three-stage framework combining contact map prediction via CVAEs, a multi-level conditioned Transformer diffusion model with coarse-to-fine feature injection, and a cycle-consistency refinement module. Experiments demonstrate improvements over adapted baselines across contact accuracy, physical plausibility, diversity, and semantic consistency metrics.
+
+This paper introduces the task of **Free-Form HOI Generation** — generating diverse, text-controllable hand-object interactions beyond the grasp-centric paradigm that dominates prior work. The authors contribute (1) **WildO2**, a 4.4k-sample in-the-wild 3D HOI dataset reconstructed from internet videos via a semi-automated pipeline (O2HOI frame pairing, single-image reconstruction, differentiable-rendering camera alignment, and hand-object refinement), (2) **TOUCH**, a three-stage framework with contact-map prediction via CVAEs, a multi-level coarse-to-fine conditioned diffusion model, and cycle-consistency refinement, and (3) comprehensive experiments demonstrating controllable generation of diverse interactions including pushing, pressing, and rotating.
 
 ## Strengths
-- **Novel and well-motivated task definition.** The paper identifies a genuine gap: existing HOI generation is dominated by grasp-centric priors that constrain interaction diversity. Formalizing Free-Form HOI generation as a distinct task with emphasis on non-grasping interactions is a meaningful contribution that opens a new research direction. The framing is clearly articulated in Section 1 and Figure 1.
 
-- **Well-structured three-stage method with validated component contributions.** The TOUCH framework's design—contact map prediction, multi-level conditioned diffusion, and cycle-consistency refinement—is logically coherent. The ablation study (Table 2) provides strong evidence that each component matters: removing contact guidance drops P-IoU from 0.728 to 0.492, removing the refiner drops it to 0.513, and removing multi-level conditioning or text levels degrades both contact and semantic metrics. The coarse-to-fine conditioning strategy (Eqs. 4-5) is a sensible design for handling the high-dimensional interaction space.
+- **Novel task formulation**: The paper identifies a genuine gap — prior HOI generation is grasp-centric and cannot capture the diversity of daily non-grasping interactions. The free-form HOI generation task is well-motivated and timely for AR/VR and robotics. The paper explicitly argues why existing paradigms (force closure, grasp taxonomies) impose restrictive inductive biases (Sec. 1).
 
-- **Scalable automated data pipeline with broad coverage.** The O2HOI frame pairing strategy (mask transfer via dense matching instead of diffusion inpainting) is a practical engineering contribution. The resulting WildO2 dataset covers 92 intents, 610 object categories, and includes fine-grained annotations (17-part hand segmentation, DSCs via VLM). Figure 3 demonstrates meaningful diversity in the interaction distribution. The existence of this dataset enables research that was previously impossible.
+- **Substantial dataset contribution**: WildO2 provides 4.4k unique interactions across 92 intents and 610 object categories with per-vertex contact maps, fine-grained hand-part segmentation (17 parts), and multi-level language annotations (SSCs + DSCs). The O2HOI frame pairing strategy (dense-matching-based mask transfer avoiding diffusion inpainting) is clever and practically useful. The pipeline design is transparent, modular, and evolvable (Appendix A.2.1 demonstrates upgrading InstantMesh → Hunyuan3D 3.0).
 
-- **Meaningful quantitative improvements over adapted baselines.** Despite the difficulties of the task, TOUCH consistently outperforms ContactGen and Text2HOI across all metric categories (Table 1). The P-IoU improvement from 0.620/0.711 to 0.776 and P-FID improvement from 6.08/15.72 to 4.13 are substantial.
+- **Well-ablated method design**: The multi-level coarse-to-fine conditioning is the strongest technical contribution. Removing the multi-level injection structure drops contact IoU from 0.728 to 0.525 (Tab. 2), a dramatic degradation confirming the design's importance. The contact map prediction via CVAEs (Fig. 6) and the cycle-consistency refinement (Tab. 2, "✗ refiner" variant) are each validated through ablation. The text encoder comparison (Qwen vs. CLIP/BERT/MPNet) provides useful engineering insight.
+
+- **Honest failure analysis**: The paper includes a categorized failure case analysis (Appendix A.1.3) identifying pose bias toward grasping, orientation errors, contact mismatch, and penetration artifacts — a level of candor that strengthens credibility.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **No quantitative validation of dataset reconstruction quality.** The WildO2 dataset is produced by a multi-stage automated pipeline (image-to-3D, hand mesh recovery, camera alignment, contact refinement). The final 4.4k samples pass through manual inspection, but no quantitative metrics (e.g., reprojection error, 3D joint error against a reference, surface distance on a held-out subset against multi-view reconstruction or manual annotation) are reported. The 55% pipeline success rate and 31% "Pose Estimation Failure" (Fig. 3a) indicate a high drop-out rate, raising questions about what bias the filtering introduces. Since evaluation metrics (MPVPE, contact IoU, PD, PV) are computed against this same unreferenced ground truth, systematic pipeline errors could inflate apparent performance. This does not invalidate the work—the dataset fills a genuine gap and manual inspection provides some quality assurance—but it means the empirical claims carry more uncertainty than the paper acknowledges.
 
-- **Out-of-domain generalization claims are unsupported by quantitative evidence.** Section 5.4.2 claims "strong generalization capability" based on four hand-picked qualitative examples on Objaverse objects (Fig. 7). No quantitative metrics, no baseline comparisons, and no systematic evaluation are provided. The qualitative examples are suggestive but cannot support a claim of "strong generalization." This substantially weakens the paper's assertion about real-world applicability.
+- **Dataset ground-truth quality is unvalidated against independent 3D measurements**: The entire training and evaluation pipeline uses WildO2's reconstructed meshes as ground truth. The reconstruction relies on single-image InstantMesh for object geometry, single-image hand pose estimation, and heuristic contact-map computation. While the paper reports manual inspection/refinement and 2D consistency checks, no quantitative validation against multi-view stereo, depth sensors, or manual 3D annotations is provided. The paper itself demonstrates (Appendix A.2.2, Fig. 14) that many samples fail reconstruction. For successful samples, systematic geometric or articulation errors could propagate into the learned model and all reported metrics (MPVPE, penetration depth, contact IoU). This is the most substantive limitation: the evaluation metrics measure fidelity to the dataset's own reconstructions, not to true physical interactions. The paper's transparency about pipeline limitations (evolvability, failure modes) mitigates but does not eliminate this concern.
 
 ### Minor
-- **Semantic controllability evaluation could be more rigorous.** The force expression analysis (22-25% larger contact area for "firm" prompts, Section 5.4.3) is interesting but reported as a single aggregate statistic without confidence intervals, statistical tests, or per-sample variance analysis. The perceptual score relies on only 10 users, and the VLM-assisted evaluation protocol is not specified in detail. While the qualitative demonstrations (Figs. 8-9) and the ablation showing DSC removal hurts performance (Table 2) provide reasonable evidence, the controllability claims would benefit from a more controlled experimental design (e.g., systematically varying one semantic attribute while holding others constant).
 
-- **Overlap between dataset refinement losses and model refinement losses.** The Stage 3 dataset refinement (Eq. 2) uses physical losses (L_contact, L_pene, L_anatomy, L_self) that partially overlap with TOUCH's refinement loss (Eq. 7, which uses L_phy from Eq. 2 plus a cycle-consistency term). This creates a potential circularity where the model is evaluated against ground truth that was optimized with similar physical constraints, potentially inflating physical plausibility metrics (PD, PV). The cycle-consistency loss in the model's refinement is distinct, but the shared L_phy component warrants acknowledgment. The effect is likely modest given the different overall objectives (camera alignment + 2D evidence for dataset vs. cycle-consistency for model), but the paper should discuss this.
+- **Baseline breadth is limited**: The paper compares against ContactGen and Text2HOI, which are reasonable representatives for a new task. However, the field has seen recent text-guided grasp methods (e.g., SemGrasp; see Li et al., 2024b in the paper's own references) that, while grasp-focused, could serve as additional reference points after adaptation. The paper's strong performance over two baselines does not fully isolate the contribution of the TOUCH architecture from the contribution of training on the larger, more diverse WildO2 dataset.
 
-- **Baseline post-processing module is under-described.** The optimization-based post-processing added to baselines "to correct hand poses" (Section 5.2) is mentioned in one sentence without details about its components, loss functions, or computational cost. Since the post-processing could inadvertently help or handicap the baselines, readers cannot fully assess the fairness of the comparison. Notably, this likely favors the baselines (giving them additional correction), so it does not undermine the authors' advantage, but the lack of detail is a gap.
+- **Semantic controllability claims are partially conflated with dataset annotation structure**: The DSC captions contain explicit hand-part and object-part contact specifications (e.g., "applying [thumb, index pad] to gently lift one end of the [edge] of [card]"). The model is trained and evaluated on these captions. While the ablation removing TDSC (Tab. 2, contact IoU drops from 0.728 to 0.698) shows the model can operate without fine-grained text, the paper does not systematically evaluate whether the model generalizes to user-provided prompts that lack explicit contact-part directives — a more realistic deployment scenario. The "fine-grained semantic controllability" claim is thus partially supported but somewhat overstated.
+
+- **Out-of-domain generalization is purely qualitative**: The Objaverse experiments (Fig. 7) lack quantitative metrics (penetration, contact plausibility, human ratings). Without quantitative evaluation, it is unclear how far the method truly generalizes beyond the WildO2 distribution. The use of LLM-generated captions further confounds the evaluation since these may not match real user inputs.
+
+- **Force-expression analysis conflates adverb with action/object category**: The 22–25% larger contact area for "firm" vs. "gentle" prompts (Fig. 9) is measured across the whole dataset. Without a controlled experiment varying only the force adverb while holding action and object constant, it remains possible that the effect is driven by co-occurring factors (e.g., "firmly" appears more often with grasping actions that naturally have larger contact areas).
 
 ### Trivial
-- The "✗ hoc." entry in Table 2 is ambiguous. The caption clarifies it means "without M_O and M_H (hoc.)" but "hoc." is never explicitly defined. Readers must infer that this ablates the entire contact map prediction stage. A clearer label (e.g., "✗ contact pred.") would help.
 
-- The text encoder ablation (Table 2, bottom rows) shows differences among encoders that are small in absolute terms for some metrics (P-IoU: 0.704–0.728; MPVPE: 2.87–3.00). While the P-FID gap is more meaningful, the claim that Qwen-7B is superior is not strongly supported for all metrics. Statistical testing or multiple runs would clarify whether these differences are reliable.
+- The 500-iteration TTA (Appendix, line 1660) represents a substantial inference-time cost that is not discussed in the main text.
+- The VLM-assisted evaluation methodology is underdescribed, making its reliability difficult to assess.
 
 ## Nice-to-Haves
-- Reporting a simple contact ratio (percentage of generated samples where any hand vertex touches the object) would contextualize the PD/PV metrics, which the authors themselves note can be misleading when the hand drifts away from the object.
-- Including Zhang et al. (2025a,b) as baselines, or explicitly arguing why they cannot be adapted, would strengthen the claim that existing text-driven HOI methods fail on free-form tasks.
-- A systematic failure mode analysis would provide valuable insight into remaining challenges (e.g., cases of hand drift, implausible poses) and clarify the method's limitations beyond cherry-picked successes.
+
+- A controlled experiment disentangling the effect of force adverbs (firmly vs. gently) while keeping action and object fixed would strengthen the semantic controllability claims.
+- Quantitative evaluation (penetration, contact metrics) on the Objaverse out-of-domain samples would strengthen the generalization claims.
+- Reporting inference time including TTA would help practitioners assess practical deployability.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **"Pore Estimation Failure" is unexplained.** The harsh critic flagged this as unclear, but "Pore" is a PDF parsing artifact (the original likely reads "Pose Estimation Failure"). The paper does explain this in the Figure 3 caption as a pipeline outcome category. **Removed:** parser artifact, not a paper error.
+These points are flagged to be removed — treat them with caution.
 
-- **Missing adapter architecture details harms reproducibility.** The harsh critic flagged the lightweight adapter on Qwen-7B as under-described. However, the adapter is a minor component; demanding its full architecture is a reproducibility nitpick (the hard rules instruct removal of "trivial implementation details"). **Removed:** trivial implementation detail.
+- **Harsh Critic Point 1 (Unvalidated Dataset — framed as fatal)**: The critic calls this a "structural" and "decisive" flaw that invalidates all claims and recommends rejection solely on this basis. **Removal justification**: While the dataset quality concern is real and preserved as a Major weakness above, framing it as fatal overstates the issue. The paper's contribution includes the task formulation, method, and dataset pipeline — not just the dataset's geometric precision. The pipeline is transparent, evolvable, and includes manual refinement. Many accepted papers in this space use in-the-wild reconstructions without external multi-view validation. The paper acknowledges limitations. The concern is downgraded from fatal to major.
 
-- **Formatting/style nitpicks, typos, spelling, grammar issues.** **Removed per hard rules:** these are parser artifacts from PDF extraction.
+- **Harsh Critic Point 2 (Missing baselines: SemGrasp, GraspGPT, NL2Contact)**: **Removal justification**: Per the hard rules, I do not have external sources to verify these works' relevance or release status, and the paper already justifies its baseline selection (line 420-421: "As existing methods have not explored fine-grained controlled HOI generation"). The baseline criticism is preserved at a weaker level as a Minor point about breadth, not about specific missing methods.
 
-- **Strength Finder's claim about "well-written" and "important paper."** **Removed:** generic strengths that don't provide specific evidence.
+- **Strength Finder "The problem of moving beyond grasp-centric HOI generation is timely and important"**: **Removal justification**: Generic, no specific evidence beyond stating the problem. This is filler.
 
-- **Criticism that Zhang et al. methods are not baselined.** **Moved to Nice-to-Haves:** the paper argues these methods are fundamentally grasp-centric; adapting them is non-trivial and outside the paper's scope.
+- **Strength Finder "The dataset construction effort and the multi-level annotation scheme show significant engineering work"**: **Removal justification**: Generic praise. Moved to the specific strength about WildO2.
+
+- **Harsh Critic "cycle-consistency loss assumes near-bijective point-to-point contact"**: **Removal justification**: The critic speculates that surface-to-surface contact would be penalized but provides no evidence this occurs in practice. The paper's ablation (Tab. 2) shows the refiner improves contact IoU, suggesting the loss is effective. This is theoretical speculation without empirical grounding.
+
+- **Harsh Critic "user study involves only 10 volunteers, insufficient for statistical significance"**: **Removal justification**: This is a one-size-fits-all criticism — 10 users is standard for perceptual studies in this subfield (ContactGen and many HOI papers use similar sample sizes). The paper reports multiple quantitative metrics alongside the user study.
+
+- **Harsh Critic "The ablation of injection layer split (Appendix Tab. 4) shows later-biased fine injection yields comparable results, suggesting SSC may be redundant"**: **Removal justification**: The multi-level design ablation (Table 2, "✗mul.") shows a dramatic 0.525 vs. 0.728 drop, confirming the structure matters. The Appendix layer-split experiment explores a hyperparameter variant, not a refutation of the core design.
+
+- **Harsh Critic formatting/style nitpicks**: All removed per hard rules.
 
 ## Novel Insights
-The observation that contact geometry alone can encode force-related semantics (firm vs. gentle) without explicit force modeling (Section 5.4.3, Fig. 9) is genuinely interesting. The finding that the model spontaneously learns to generate larger, denser contact areas for "firm" prompts and sparser contacts for "gentle" prompts, purely from contact map supervision, suggests that contact representation may be a more expressive semantic channel than previously recognized in the HOI generation literature. This is a noteworthy empirical finding that could inform future work on embodied interaction modeling.
+
+The reviews raise a tension worth noting: the paper's DSC captions embed explicit contact-part directives that make the semantic controllability evaluation partially circular — the model is tested on the same distribution of captions it was trained on. This points to a broader methodological challenge for text-conditioned HOI: how to design captions and evaluations that separate "replicating dataset patterns" from "inferring appropriate interactions from high-level intent." The paper's SSC-only ablation partially addresses this but does not fully resolve it. A future benchmark where some captions omit contact-part details would cleanly test this distinction.
 
 ## Suggestions
-- Add a brief quantitative validation of the dataset pipeline on a small held-out subset. Even evaluating 50-100 samples against an external reference (e.g., multi-view reconstruction of the same interaction, or manual annotation of joint positions) would substantially strengthen confidence in the dataset and the reported results.
-- For the generalization evaluation, select a standardized set of 20-30 Objaverse objects and report the same metrics (P-IoU, MPVPE, PD, PV, P-FID) as in Table 1, with at least Text2HOI as a comparison. This would transform the generalization claim from anecdotal to measurable.
-- Clarify the "✗ hoc." notation and describe the baseline post-processing module in sufficient detail for reproducibility.
+
+- The authors should consider a held-out validation of reconstruction quality for at least a small subset of WildO2, e.g., comparing to photogrammetry or manual annotation, to bound the expected error.
+- Adding a quantitative evaluation (penetration, contact plausibility) for the Objaverse out-of-domain samples would substantially strengthen the generalization claim.
+- A controlled experiment on force expression that fixes action+object and varies only the adverb would cleanly isolate the effect.
 
 ## Score and Decision
 
-### Calibration Anchor Comparison
+**Anchor comparison:**
 
-| Anchor | Score | How current paper compares |
-|--------|-------|---------------------------|
-| SIGHT (ff3gboFkss) | 3.00 | Current paper has substantially stronger technical contributions, better ablations, and a working system with quantitative results. Clearly superior. |
-| HOIDiNi (mHgaCF2qI5) | 3.60 | Current paper has more complete experiments, clearer presentation, and a novel dataset contribution. Clearly superior. |
-| HOI-PAGE (qZhk7prB7v) | 4.50 | Current paper has more novel task definition, a new dataset (not just a pipeline of existing models), and stronger component ablations. Moderate improvement. |
-| SesaHand (sKMgGQQy7g) | 5.00 | Both have solid engineering contributions with reasonable novelty. Current paper's task and dataset are more novel; SesaHand's experiments are somewhat more thorough. Comparable. |
-| CLUTCH (W7YRskO47j) | 5.00 | Both build new in-the-wild datasets + methods, have dataset quality validation concerns, and make solid contributions. Very comparable in quality and contribution level. |
-| UniHand (upUl6hMYwy) | 5.33 | UniHand has a cleaner unified framework; current paper has a more novel task definition and dataset. Slightly below but comparable. |
-| SynHLMA (EzJowEZ1UJ) | 5.50 | SynHLMA was rejected despite 5.50; current paper has similar contribution level but somewhat weaker evaluation rigor on generalization/controllability. Slightly below. |
-| InfBaGel (TeyHNq4WlI) | 6.00 | InfBaGel has more thorough experiments, stronger validation, and a cleaner contribution. Current paper is clearly below. |
+| Path | Avg Score | Decision | Comparison to TOUCH |
+|------|-----------|----------|---------------------|
+| SIGHT (ff3gboFkss) | 3.00 | Reject | Much weaker: unclear motivation, insufficient metrics, no in-the-wild data. TOUCH is clearly stronger. |
+| HOIDiNi (mHgaCF2qI5) | 3.60 | Withdrawn/Reject | Weaker: methodological gaps, poor presentation of core technique. TOUCH has clearer ablations. |
+| HOI-PAGE (qZhk7prB7v) | 4.50 | Reject | Comparable task ambition but less rigorous evaluation; hand poses appear averaged. TOUCH has better quantitative results. |
+| CLUTCH (W7YRskO47j) | 5.00 | Accept (Poster) | Similar: in-the-wild dataset + method. TOUCH has more novel task formulation and stronger ablations. Slightly above. |
+| UniHand (upUl6hMYwy) | 5.33 | Accept (Poster) | Comparable: strong technical design with computational cost concerns. TOUCH is at similar level. |
+| SynHLMA (EzJowEZ1UJ) | 5.50 | Reject | Similar domain; limited novelty was a key rejection factor. TOUCH has a more clearly novel task. |
+| UniHM (cVX3VqO8BO) | 5.50 | Accept (Poster) | Comparable: dataset + language-guided HOI. TOUCH is at a similar contribution level. |
 
-The paper under review has a genuinely novel task definition, a well-engineered dataset pipeline, and a method whose components are validated through informative ablations. These strengths place it above the low-band anchors (3.00-3.60). The dataset quality and generalization evaluation weaknesses prevent it from reaching the high band (6.00+). Among the medium-band anchors, it closely resembles CLUTCH (5.00)—both contribute new in-the-wild datasets with automated pipelines, propose novel methods, and have some validation gaps that reviewers noted but did not consider fatal. The novel task definition and strong ablations slightly elevate it above CLUTCH.
+TOUCH sits between CLUTCH (5.0) and UniHM/UniHand (5.33–5.50). The novel task formulation and well-ablated method place it above CLUTCH, but the dataset ground-truth validation gap and limited baseline breadth pull it below the 5.5-tier papers. A score of **5.0** reflects a solid paper with real contributions and addressable weaknesses — suitable for poster acceptance.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

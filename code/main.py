@@ -36,10 +36,6 @@ import weave
 weave.init("openai-agents")
 
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
-from agents.model_settings import ModelSettings
-
-_EXTRA_BODY = {"provider": {"only": ["deepseek"]}, "reasoning": {"effort": "high"}}
-_MODEL_SETTINGS = ModelSettings(extra_body=_EXTRA_BODY)
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
@@ -56,6 +52,39 @@ from agents import set_default_openai_client, set_tracing_export_api_key
 
 custom_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
 
+# OpenRouter usage accounting — inject {"usage": {"include": true}} into every
+# chat completion and accumulate the per-response `cost` field returned by OR.
+# https://openrouter.ai/docs/cookbook/administration/usage-accounting
+_OR_COST_TOTAL = {"usd": 0.0, "calls": 0}
+
+
+def _install_openrouter_cost_hook(client: AsyncOpenAI) -> None:
+    orig_create = client.chat.completions.create
+
+    async def create_with_usage(*args, **kwargs):
+        extra_body = dict(kwargs.get("extra_body") or {})
+        extra_body.setdefault("usage", {"include": True})
+        kwargs["extra_body"] = extra_body
+        resp = await orig_create(*args, **kwargs)
+        try:
+            usage = getattr(resp, "usage", None)
+            cost = None
+            if usage is not None:
+                cost = getattr(usage, "cost", None)
+                if cost is None and hasattr(usage, "model_extra"):
+                    cost = (usage.model_extra or {}).get("cost")
+            if cost is not None:
+                _OR_COST_TOTAL["usd"] += float(cost)
+                _OR_COST_TOTAL["calls"] += 1
+                print(f"  [openrouter] call cost=${float(cost):.6f} cumulative=${_OR_COST_TOTAL['usd']:.4f} (n={_OR_COST_TOTAL['calls']})")
+        except Exception as e:
+            print(f"  [openrouter] cost extraction failed: {e}")
+        return resp
+
+    client.chat.completions.create = create_with_usage  # type: ignore[assignment]
+
+
+_install_openrouter_cost_hook(custom_client)
 set_default_openai_client(custom_client)
 tracing_api_key = os.environ["OPENAI_API_KEY"]
 set_tracing_export_api_key(tracing_api_key)
@@ -171,10 +200,10 @@ if HARSH_MODEL.startswith("claude_sdk:"):
     _HARSH_SDK_MODEL = HARSH_MODEL[len("claude_sdk:"):]
     _harsh_sdk_system_prompt = load_prompts(_harsh_prompt, paper_access=PAPER_ACCESS_FILE)
 else:
-    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt), model=resolve_model(HARSH_MODEL), model_settings=_MODEL_SETTINGS)
+    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt), model=resolve_model(HARSH_MODEL))
     _HARSH_SDK_MODEL = None
     _harsh_sdk_system_prompt = None
-neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt), model=resolve_model(NEUTRAL_MODEL), model_settings=_MODEL_SETTINGS)
+neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt), model=resolve_model(NEUTRAL_MODEL))
 
 _NO_CAL = "--no_cal" in sys.argv
 
@@ -224,7 +253,6 @@ else:
         instructions=_merger_instructions,
         model=resolve_model(MERGER_MODEL),
         tools=_merger_tools,
-        model_settings=_MODEL_SETTINGS,
     )
     _MERGER_SDK_MODEL = None
 
@@ -255,6 +283,7 @@ The paper was extracted from PDF by an automated parser. Treat formatting artifa
 import time
 async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool = False) -> dict:
     # time.sleep(random.uniform(10, 20))
+    _or_cost_start = dict(_OR_COST_TOTAL)
     paper_path_abs = os.path.abspath(paper_path)
     with open(paper_path, "r") as f:
         paper_content = f.read()
@@ -372,6 +401,9 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
             total_output += usage.output_tokens
             total_tokens += usage.total_tokens
     token_lines.append(f"  TOTAL: input={total_input} output={total_output} total={total_tokens}")
+    _or_cost_paper = _OR_COST_TOTAL["usd"] - _or_cost_start["usd"]
+    _or_calls_paper = _OR_COST_TOTAL["calls"] - _or_cost_start["calls"]
+    token_lines.append(f"  OpenRouter cost (this paper): ${_or_cost_paper:.6f} over {_or_calls_paper} calls")
 
     sdk_lines = []
     sdk_total_cost = 0.0

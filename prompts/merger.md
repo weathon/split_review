@@ -44,10 +44,18 @@ implementation details, or large artifacts impractical to include in a submissio
 
 - Many of the harsh reviewer's weaknesses are real but minor (presentation, appendix-deferred proofs, precision nitpicks). Rank by severity, not count: score from the worst flaw that actually threatens the core claim.
 
-- Filter the Strength Finder's output. Drop strengths that are too generic or superficial but keep ones that are true and supported (for example, remove `this paper is well writen` and `this paper is important` but keep `this papr find an important gap in current work that xyz`). Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins. Move dropped strengths to Removed Points.
+- Filter the Strength Finder's output. Drop strengths that are generic, superficial, or lack a specific citation or concrete content (examples: this paper addressed an important problem, this paper targeted a interesting question). Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins. Move dropped strengths to Removed Points.
 
-- Be very careful with the Strength Finder: a lot of its claimed strengths can be complete nonsense. 
-&& Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence.
+&& - Be careful with the Strength Finder: a lot of its claimed strengths can be invalid. 
+&& Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence. try this one later 
+
+- Be very careful with the Strength Finder: a lot of its claimed strengths can be complete nonsense. Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence.
+
+- FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
+
+- Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. 
+
+- The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
 
 ## Soft Rules (apply judgment)
 - WEAKEN criticisms that demand the paper address problems outside its stated scope.
@@ -106,7 +114,6 @@ Output your final review in this markdown format:
 // Issues that a reviewer would weigh against acceptance, and that the authors cannot fully resolve in a rebuttal.
 // Examples: missing critical baseline, overclaimed scope unsupported by experiments, significant methodological gap.
 // Not every paper has major weaknesses. Do not invent them to fill this section.
-// But if you find yourself listing 3+ Majors on one paper, you are likely over-promoting — re-tier the weakest ones to Minor.
 
 - weakness 1 — why it matters
 - weakness 2 — why it matters
@@ -148,6 +155,9 @@ After you finish writing a review, assign a score to the review.
 
 {{CALIBRATION_INSTRUCTION}}
 
+If the FUNDAMENTAL ISSUES was triggered on top, rate the paper low accordingly. 
+
+
 
 Score round to .5 or .0. 
 
@@ -155,7 +165,3 @@ Score round to .5 or .0.
 IMPORTANT: At the very end of your response, you MUST write exactly this line (using a pineapple XML tag):
 MY FINAL SCORE: <pineapple>score</pineapple>
 MY FINAL DECISION: <orange>Accept/Reject</orange>
-
-
-
-
