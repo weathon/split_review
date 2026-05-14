@@ -1,87 +1,99 @@
-I have now thoroughly read the paper and cross-checked every claim from the harsh critic. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and its calibration context. Let me compose the final review.
 
 ---
 
 ## Summary
-This paper identifies and characterizes the "underthinking" phenomenon in LongCoT LLMs — where models prematurely switch between reasoning paths without sufficient exploration — and proposes SmartSwitch, a training-free, plug-and-play inference framework that detects thought switches using linguistic cues, evaluates abandoned thoughts with an off-the-shelf Process Reward Model (PRM), and intervenes with a deepening prompt to encourage further exploration of promising paths. The method is evaluated across five math benchmarks and five model scales (1.5B–32B), reporting consistent accuracy gains (e.g., +11.1 to +23.3 points on AIME benchmarks) alongside reduced inference time and response length.
+
+This paper identifies and quantifies the "underthinking" phenomenon in LongCoT LLMs—where models prematurely switch between reasoning paths without fully exploring promising ones—and proposes SmartSwitch, a training-free, plug-and-play inference framework. SmartSwitch uses linguistic cues to detect thought switches, evaluates abandoned thoughts with an off-the-shelf process reward model (PRM), and injects a deepening prompt to encourage further exploration when a high-potential thought is prematurely discarded. Evaluated across five models (1.5B–32B) on five math benchmarks, SmartSwitch consistently improves accuracy (up to +23.3 points on AIME25) while simultaneously reducing inference time and response length.
 
 ## Strengths
-- **Consistent, substantial accuracy improvements across diverse models and benchmarks.** SmartSwitch yields notable pass@1 gains on all five mathematical reasoning benchmarks for models from 1.5B to 32B (Table 1). The gains are not limited to weak models — QwQ-32B improves from 79.5% to 86.7% (+7.2) on AIME24 and from 63.3% to 73.3% (+10.0) on AIME25. The improvements hold across all five benchmarks and five model sizes, demonstrating robustness.
 
-- **Simultaneous reduction of underthinking and computational waste.** SmartSwitch reduces both the Underthinking Frequency metric (Figure 4a) and number of thought switches (Figure 4b), while also decreasing total inference time (Table 3, e.g., −33.7% for the 1.5B model on AIME24) and average response length (Table 2). This dual improvement — better accuracy with less compute — is a meaningful practical contribution.
+- **Consistent, training-free accuracy gains across diverse models and benchmarks.** Table 1 demonstrates pass@1 accuracy improvements for all five models (DeepSeek-R1-Distill-Qwen 1.5B/7B/14B/32B and QwQ-32B) across all five benchmarks (AIME24, AIME25, AMC23, MATH-500, GaoKao2023en). Gains range from +0.6 to +23.3 points, with the strongest model (QwQ-32B) still gaining +7.2 points on AIME24. The plug-and-play, fine-tuning-free design makes the method broadly applicable.
 
-- **Targeted improvement without regressing on already-solved problems.** Section 5.3 reports that SmartSwitch recovers 20% of previously incorrect solutions for DeepSeek-R1-Distill-Qwen-14B on AIME24 while preserving 100% accuracy on problems the vanilla model solved correctly. This demonstrates non-destructive, selective enhancement.
+- **Efficiency improvements alongside accuracy gains.** Despite explicitly encouraging deeper exploration, SmartSwitch reduces both average response length (Table 2, e.g., −14.2% for the 32B model on AIME24) and wall-clock inference time (Table 3, e.g., −19.7% for the same model). These gains include all PRM scoring and intervention overhead, demonstrating that selective deepening prunes wasteful exploration rather than merely inflating compute.
 
-- **Quantitative characterization of underthinking grounds the motivation.** The proposed Underthinking Frequency metric (Eq. 1) and the empirical analysis showing correlations with problem difficulty and incorrect answers (Figure 2) provide a useful framework for studying this phenomenon, even if the metric itself is coarse.
+- **Well-motivated problem characterization.** The paper provides a concrete, quantitative operationalization of underthinking (UF metric, Eq. 1) and demonstrates its prevalence across six LongCoT models (Figure 1b), its correlation with problem difficulty (Figure 2a), and its association with incorrect answers (Figure 2b). SmartSwitch is shown to reduce both the UF metric and the raw number of thought switches (Figure 4), directly linking the mechanism to mitigated underthinking.
+
+- **Thorough ablation studies.** The paper systematically ablates the PRM choice (Table 4, including an "Always Intervene" baseline that degrades performance to 18.9%, confirming the value of selective intervention), process division strategy (Table 6, four variants across five models), score-mapping policy (Table 7), and score threshold (Table 8). The ablations are well-conceived and provide practical guidance.
 
 ## Weaknesses
 
 ### Fatal
-None. The core claims are reasonably supported by the evidence presented.
+
+None.
 
 ### Major
-- **Thought-switch detection relies on an unvalidated, fixed set of linguistic cues.** The Perception module scans for a small set of phrases (Table 10) such as "Alternatively," "Let me try another method," etc., to identify thought switches. The paper provides no evaluation of detection precision or recall — we do not know what fraction of genuine switches are caught or how many false positives are generated. The paper acknowledges this limitation in Section 6 ("may not capture all instances of premature abandonment, especially those that occur without explicit textual markers"), but the acknowledgment does not substitute for validation. Since the Perception module's output gates whether the PRM is invoked at all, an unreliable detector can undermine the entire pipeline. This is not fatal because the empirical gains provide indirect evidence that the detector catches enough meaningful switches, but it is a significant gap in the method's validation.
 
-- **Extreme threshold sensitivity raises concerns about practical generalizability.** Table 8 shows that performance is acutely sensitive to the PRM score threshold τ. For DeepSeek-R1-Distill-Qwen-7B on AIME24, accuracy drops from 66.7% at τ=0.70 to 43.3% at τ=0.69 and 43.3% at τ=0.71 — both well below the vanilla baseline of 55.5%. Similar patterns hold across all five models. The paper does not explain how τ=0.70 was chosen beyond stating it in Section 5.1; if it was selected by sweeping the test benchmarks, the reported gains may not generalize. That said, the fact that the same τ=0.70 value is optimal across all five models (rather than each model requiring a different tuned value) somewhat mitigates the concern, suggesting a genuine sweet spot in the PRM's scoring distribution rather than per-model cherry-picking. The paper's own limitation statement that "these parameters may require domain-specific or model-specific tuning" is honest but understates the practical deployment challenge.
+None.
 
 ### Minor
-- **No statistical significance or variance reported.** The paper reports point estimates of pass@1 accuracy averaged over 32 generations per question, with no standard deviations, confidence intervals, or hypothesis tests. For benchmarks with 30 questions (AIME24, AIME25), this matters. However, the reported gains are large enough (+7 to +23 points) that they are unlikely to be purely noise, and reporting practices in this subfield rarely include formal statistical testing for pass@1 on math benchmarks.
 
-- **Comparison with TIP is limited to one model/benchmark.** SmartSwitch is compared against the TIP baseline (Wang et al., 2025) only on DeepSeek-R1-Distill-Qwen-1.5B on AIME24 (Table 5). While the comparison is favorable (40.0% vs. 31.3%), a single data point is insufficient to claim consistent superiority. A broader comparison across at least two model scales would strengthen the claim.
+- **Comparison with existing underthinking mitigation method (TIP) is limited to a single model and benchmark.** Table 5 compares SmartSwitch against TIP only on DeepSeek-R1-Distill-Qwen-1.5B on AIME24. While the gain is substantial (40.0% vs. 31.3%), demonstrating consistent superiority across additional model scales or benchmarks would strengthen the claim that SmartSwitch is the preferred approach. This is addressable in rebuttal.
 
-- **UF(L) metric depends on an arbitrary threshold L=100 without justification.** The Underthinking Frequency metric defines a thought as "underthinking" if it is shorter than L=100 tokens. The paper does not justify this threshold or analyze sensitivity to L (beyond showing the metric for varying L in Figure 1b). A 100-token thought could be perfectly sufficient for certain reasoning steps.
+- **Threshold tuning conducted directly on test benchmarks.** Table 8 shows threshold sensitivity on AIME24, and the same threshold (0.70) is used for all other benchmarks. While the fact that a single threshold works across all five models is itself evidence of robustness, the paper provides no evidence that this value was selected via held-out validation rather than by maximizing AIME24 performance. This raises a mild concern about whether reported gains on AIME24 are partially inflated by hyperparameter tuning on the test set. The gains on other benchmarks (AIME25, AMC23, etc.) are less affected by this concern since the threshold was fixed before evaluating them.
 
-- **PRM scoring on paragraph chunks may not align with process-level evaluation.** The Adaptive Paragraph (v4) strategy segments reasoning traces at switch cues and then subdivides long segments at paragraph boundaries. Process Reward Models are trained to evaluate atomic reasoning steps, but arbitrary paragraph chunks may not correspond to coherent processes. The reliability of PRM scores on these segments is assumed rather than analyzed.
+- **Underthinking metric is heuristic and not validated against ground-truth reasoning quality.** The UF metric (Eq. 1) classifies any thought shorter than L tokens as underthinking, which conflates concise-but-complete reasoning with genuinely shallow exploration. The paper acknowledges this implicitly by treating the metric as a descriptive tool rather than a gold standard, but this limitation should be stated more explicitly when interpreting Figures 1–2.
 
 ### Trivial
-- The process-division ablation (Table 6) is on AIME25 while the process-to-thought mapping ablation (Table 7) and threshold ablation (Table 8) are on AIME24, making cross-ablation comparison difficult.
-- Figure 1(a) is illustrative but referenced in the abstract as if it were a standalone finding; the qualitative example could be better integrated with the quantitative analysis.
+
+- The paper reports "significant" improvements in the abstract and main text but does not provide formal statistical tests. This is a wording issue—"substantial" or "consistent" would be more precise than "significant" without accompanying statistical evidence.
+
+- The causal mechanism for efficiency gains ("prunes wasteful reasoning on less fruitful thoughts") is stated as an interpretation (Section 5.3) but could be supported more directly, e.g., by analyzing where token savings occur in the reasoning trace.
 
 ## Nice-to-Haves
-- A systematic error analysis categorizing failure modes (e.g., detector misses vs. false positives vs. PRM mis-scoring) would strengthen understanding of the method's limits.
-- A lightweight classifier trained on hidden states or surface patterns to replace the keyword-based detector could improve robustness and is suggested as future work; a prototype here would have strengthened the contribution.
-- Reporting the empirical distribution of PRM scores on correct vs. incorrect reasoning paths would clarify whether the PRM is genuinely identifying promising thoughts or merely flagging formal correctness of completed sub-calculations.
+
+- Confidence intervals or bootstrapped standard errors for accuracy estimates on the smaller benchmarks (AIME24: 15 problems, AIME25: 15 problems, AMC23: 25 problems) would increase reader confidence in the reliability of reported gains. However, reporting point estimates without error bars on these competition benchmarks is standard practice in this subfield, so this is not a weakness per se.
+
+- A held-out validation procedure for hyperparameter selection (e.g., splitting MATH-500 into tuning/evaluation halves) would formally rule out concerns about test-set overfitting and is straightforward to implement.
+
+- Expanding the TIP comparison to at least one additional model scale and benchmark would make the comparative claim more robust.
+
+- Reporting PRM score distributions for thoughts that lead to correct vs. incorrect final answers would validate the core assumption that higher PRM scores correlate with eventual success.
+
+- A side-by-side case study showing a full reasoning trace with and without SmartSwitch intervention, annotated with switch detection points and PRM scores, would make the mechanism more concrete for readers.
 
 ## Removed Points
-These points were flagged by the reviewers (Harsh Critic) but are removed from the main review for the stated reasons:
 
-- **Claim that the QwQ-32B ablation results contradict the main table.** The Harsh Critic stated that "QwQ-32B v1/v2/v3/v4 scores 70/70/73.3/73.3, which is basically indistinguishable, whereas the main table claims 73.3% with SmartSwitch." This is a misunderstanding: the main Table 1 reports QwQ-32B + SmartSwitch = 73.3% on AIME25, which exactly matches the v4 result of 73.3% in Table 6 (also on AIME25). The critic confused AIME24 (main results for QwQ: 86.7%) with AIME25 (ablation for QwQ: 73.3%). Removed as factually wrong.
+These points are flagged to be removed; treat them with caution.
 
-- **Claim that the paper provides no information on how threshold was selected.** The paper states in Section 5.1: "We set the promising score threshold to 0.7." While it does not detail a held-out tuning procedure, the explicit statement that 0.7 was the chosen threshold AND the consistent optimality across all models suggests a principled choice (likely based on PRM calibration norms) rather than per-model test-set tuning. The sensitivity concern is retained as a weakness but the accusation of undisclosed tuning is weakened.
+- **Harsh Critic claim: "The main results lack statistical rigor, rendering the claimed improvements unreliable."** → **Demoted to Nice-to-Have.** Reporting point estimates without confidence intervals on small benchmarks like AIME is standard practice across this subfield. None of the human-reviewed anchor papers (e.g., Think-with-Me at 4.00, OptimalThinkingBench at 5.33, Hop Generalization at 5.50) were criticized for lacking confidence intervals on AIME-scale benchmarks. The 32-response averaging per problem provides a reasonable point estimate. The paper would benefit from error bars but their absence does not invalidate the results.
 
-- **Demand for comprehensive TIP comparison across all models/benchmarks.** While more comparison would be nice, TIP is a recent baseline and the paper includes it as a comparison point, not as the central contribution. Moved to minor weakness.
+- **Harsh Critic claim: "Extreme sensitivity of the score threshold... strongly suggest overfitting."** → **Demoted to Minor.** The harsh critic claims that moving threshold from 0.70 to 0.71 drops accuracy by 10 points, implying knife-edge sensitivity. But Table 8 tests the threshold across all five models simultaneously, and 0.70 is the best for all of them. This is evidence of a genuine optimal region, not random overfitting to one model. Additionally, 0.70 outperforms vanilla for all models, and even the worst thresholds (0.68, 0.69, 0.71) match or slightly exceed vanilla for some models. The valid concern—tuning on the test set—is already captured in the Minor weaknesses above with proportionate severity.
 
-- **Demand for statistical testing as a fatal flaw.** While reporting variance would be good practice, the field norm for pass@1 on math benchmarks with 32 generations rarely includes formal statistical testing. Retained as minor rather than fatal.
+- **Harsh Critic claim: "Short thoughts can be logically complete and appropriate" (re: UF metric).** → The paper uses UF as a descriptive heuristic, not as a ground-truth label. This is already noted as a Minor weakness with appropriate framing.
 
-- **Criticism that the inference time breakdown is insufficiently detailed.** The paper states that reported time "comprehensively includes all overhead from PRM scoring and intervention management." A more granular breakdown would be nice but is unusual for the field and is not required to support the efficiency claim.
+- **Strength Finder claim: "SmartSwitch substantially surpasses the token-suppression method TIP"** → **Retained but contextualized.** The TIP comparison is real and favorable but limited in scope, as noted in Minor weaknesses above.
 
 ## Novel Insights
-The paper's most novel contribution is the insight that underthinking can be mitigated at inference time through a simple two-stage perception-intervention loop — namely, detecting thought switches linguistically and selectively redirecting the model to deepen exploration of promising paths using an off-the-shelf PRM, without any fine-tuning. The empirical finding that selective PRM-guided intervention not only improves accuracy but also *reduces* total inference time (because pruned shallow exploration wastes more tokens than focused deep exploration) is counterintuitive and practically valuable.
+
+The paper's most novel empirical insight is the dual benefit of selective PRM-guided deepening: it simultaneously improves accuracy AND reduces inference cost. This is counterintuitive (one might expect deeper exploration to cost more tokens) and suggests that SmartSwitch effectively prunes unproductive exploration—the model spends fewer total tokens because it stops fruitlessly switching and instead commits to promising paths. The "Always Intervene" ablation (18.9%, below the 20.0% vanilla baseline) elegantly demonstrates that indiscriminate deepening is harmful, making the PRM's role in selectivity clear. This finding has implications beyond this paper: it suggests that the quality of reasoning exploration matters more than its quantity, and that external quality signals can guide more efficient compute allocation at inference time.
 
 ## Suggestions
-- The authors should conduct and report a human annotation study on a sample of generations to quantify the precision and recall of the cue-based thought-switch detector. This is the single highest-impact improvement for strengthening the paper's credibility.
-- Add a robustness experiment showing performance as the threshold τ varies continuously from 0.5 to 0.9 on a held-out subset, or at minimum explain how τ=0.70 was chosen (e.g., based on PRM calibration on a validation set, or inherited from the PRM's training distribution).
-- Extend the TIP comparison to at least one larger model (e.g., 7B or 14B) to strengthen the claim of superiority over existing underthinking mitigation methods.
-- Provide a brief analysis of what PRM scores look like on segments that eventually lead to correct vs. incorrect final answers, to validate that the PRM is genuinely identifying promising intermediate reasoning.
+
+- The simplest and most impactful improvement would be to select the score threshold via cross-validation on a held-out portion of MATH-500 (or another dataset not used for final evaluation) and report all benchmark results with that fixed threshold. This directly addresses the test-set tuning concern and is achievable in rebuttal.
+
+- Expand the TIP comparison minimally—even adding one additional model (e.g., the 7B variant) on AIME24 would substantially strengthen the comparative claim.
+
+- Replace "significantly enhances" with "substantially/consistently improves" throughout to avoid implying formal statistical testing that was not performed.
+
+- Add a note in Section 3.2 clarifying that UF is a descriptive heuristic that correlates with but does not perfectly capture reasoning depth, so readers do not over-interpret the metric.
 
 ## Score and Decision
 
-**Anchor calibration:**
+**Anchor comparison:**
 
-| Anchor | Path | Avg Score | Comparison to this paper |
-|--------|------|-----------|--------------------------|
-| OptimalThinkingBench | N5kWa3sRJt | 5.33 (Accept Poster) | Benchmark paper with limited method development; this paper has a more substantive methodological contribution and broader experiments, but the benchmark paper has cleaner validation of its core construct. Comparable quality. |
-| TFPI | RKYO6R8Jgb | 6.00 (Accept Poster) | Similar "simple idea, well-executed" profile with strong empirical results. TFPI has cleaner methodology (no unvalidated heuristic components) and stronger ablations. This paper is a notch below. |
-| RLMT | trBEiQFkxw | 4.50 (Reject) | Had confounded comparisons and unclear novelty framing. This paper has cleaner, more interpretable experiments and a clearer narrative. This paper is a notch above. |
-| Interleaved Reasoning | DIWdk9Zo7g | 3.50 (Withdrawn) | Marginal novelty and significant evaluation concerns. This paper is clearly stronger. |
-| Unthinking Vulnerability | J7TSrBuzjd | 2.50 (Reject) | Disjointed structure, combining existing techniques. This paper is substantially stronger. |
-| Think Deep Think Fast | Ibx2P7K2Tl | 3.00 (Withdrawn) | Analysis paper with limited novelty. This paper is stronger. |
-| Beyond the Last Answer | r57fj2b5N9 | 3.00 (Reject) | Similar cue-based segmentation but weaker evaluation. This paper is stronger. |
-| ProRefine | yEj55Bp4dZ | 2.67 (Withdrawn) | Different domain. This paper is substantially stronger. |
+| Anchor | Avg Score | Decision | Comparison |
+|--------|-----------|----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/89RGVbULYt.md` (Think-with-Me) | 4.00 | Reject | SmartSwitch is training-free vs. requiring GRPO fine-tuning, has broader experiments (5 models × 5 benchmarks vs. limited evaluation), and demonstrates efficiency gains alongside accuracy. SmartSwitch is clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/PVooP3d7cI.md` (Price of a Second Thought) | 3.50 | Withdrawn | SmartSwitch has a more concrete mechanism (PRM-guided intervention vs. two-stage prompting) and stronger empirical results. SmartSwitch is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/N5kWa3sRJt.md` (OptimalThinkingBench) | 5.33 | Accept (Poster) | Both address underthinking; OptimalThinkingBench is a benchmark, SmartSwitch is a method. SmartSwitch's empirical contribution is comparably solid (systematic ablations, diverse evaluation). Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/qK4JKOu0Gx.md` (Hop Generalization) | 5.50 | Accept (Poster) | Hop Generalization has deeper mechanistic analysis; SmartSwitch has broader practical applicability. Roughly comparable overall contribution level. |
+| `/home/wg25r/review_agent/human_reviews_2026/KBknLdXxTa.md` (CORE-MATH) | 5.50 | Accept (Poster) | CORE-MATH evaluates 61 models with rigorous benchmark construction. SmartSwitch has a more novel method but less exhaustive evaluation. Roughly comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/aQZIpELFwp.md` (Are Reasoning LLMs Robust) | 4.50 | Accept (Poster) | Both are intervention studies on reasoning LLMs. SmartSwitch has more practical impact (actual performance gains rather than robustness measurement). SmartSwitch is somewhat stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/ae6bKeffGZ.md` (Arithmetic-Bench) | 2.50 | Reject | SmartSwitch is substantially stronger across all dimensions. |
+| `/home/wg25r/review_agent/human_reviews_2026/ZZAIF9fjlU.md` (ProofRM) | 4.50 | Reject | Different focus; SmartSwitch has a more complete methods+evaluation package. SmartSwitch is somewhat stronger. |
 
-The paper under review sits between the TFPI paper (6.0, cleaner methodology) and the OptimalThinkingBench paper (5.33, less methodological contribution). The unvalidated thought-switch detection and acute threshold sensitivity are real weaknesses that prevent a higher score, but the consistent empirical gains across five models and five benchmarks, the simultaneous efficiency improvement, and the clear problem characterization make a genuine contribution. 
-
-**Score: 5.0**
+The paper proposes a practical, well-motivated, and carefully ablated inference-time intervention. Its key weaknesses—limited TIP comparison, threshold tuned on test benchmarks, and heuristic underthinking metric—are real but moderate in severity and largely addressable. The core contribution (training-free PRM-guided selective deepening that improves both accuracy and efficiency) is solid and supported by consistent evidence across models and benchmarks. Compared to anchors, this paper sits in the Accept (Poster) range, comparable to the 5.33–5.50 anchor papers in contribution quality, but somewhat below them in evaluation rigor. I assign a score of **5.0**.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

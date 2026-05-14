@@ -1,95 +1,99 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and calibration anchors. Let me write the consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes a Covariance-Adjusted Support Vector Machine (CSVM) for binary classification. The core idea is that traditional SVM uses Euclidean distance but data in the input space should be measured by Mahalanobis (statistical) distance. The authors apply class-specific Cholesky-based whitening transformations to map data into a Euclidean space where SVM is valid, then derive how margins in the input space depend on class covariance matrices. They propose the SM Algorithm — an iterative procedure that estimates population covariance from training data, runs SVM in both Euclidean and input spaces, and adjusts the classifier intercept to split the margin in proportion to class covariances. Experiments on five datasets compare CSVM against linear, RBF, polynomial, sigmoid SVMs and PCA/ZCA whitening.
+This paper proposes a Covariance-Adjusted Support Vector Machine (CSVM) that transforms data from a "non-Euclidean statistical space" to a Euclidean space via class-wise Cholesky decomposition of covariance matrices before performing SVM. The authors claim that standard SVM is valid only in Euclidean space, derive per-class optimization problems, and propose an iterative SM Algorithm that uses pseudo-labeled test data to estimate population covariance. Experiments on five binary classification datasets compare CSVM against linear, RBF, sigmoid, polynomial kernel SVMs and PCA/ZCA whitening approaches.
 
 ## Strengths
 
-- **Lemma 2.3 identifies a concrete relationship between margin allocation and class covariance**: The derivation showing that the margin ratio in the input space equals \(\sqrt{\theta^T(\Sigma_{y=-1})^{-1}\theta} / \sqrt{\theta^T(\Sigma_{y=1})^{-1}\theta}\) (Equation 14) provides a principled reason why covariance should influence where the decision boundary sits. This formalizes the intuition that higher-dispersion classes should get a wider margin.
+- **Well-motivated problem**: Incorporating intra-class covariance structure into SVM classification is a genuine and well-recognized challenge. The paper correctly identifies that class-conditional distributions can have meaningfully different covariance structures, and that treating them uniformly (as standard SVM does) discards useful information. Prior work (MCVSVM, Twin Mahalanobis SVM, etc.) has addressed related ideas, and the paper situates itself within this lineage.
 
-- **The paper clearly identifies a genuine limitation of standard SVM**: Standard SVM assumes equal margins on both sides of the decision boundary regardless of class distribution. The observation that class covariance structure should affect margin allocation is well-motivated and connects to prior work (Tsang et al., Peng & Xu, Huang et al., Zafeiriou et al.) while attempting to resolve dimensional consistency issues the authors identify in those earlier formulations.
+- **Class-wise whitening insight**: The paper's emphasis on performing whitening separately per class — rather than globally on the entire dataset — is a sensible design choice. Global whitening can mix covariance structures from different classes and obscure class-conditional geometry. The iterative refinement of covariance estimates is conceptually interesting as a form of semi-supervised learning.
 
-- **The SM Algorithm addresses a real practical obstacle**: Computing population covariance requires knowing test-data labels, which are unavailable. The iterative pseudo-labeling approach is a pragmatic attempt to estimate population-level covariance from finite training data, and the paper acknowledges its heuristic nature in the conclusion.
+- **Clean empirical presentation**: The tables and ROC curves are well-organized and make the claimed improvements easy to inspect at a glance. The five-dataset selection spans diverse domains (healthcare, astronomy, quality control, text mining).
 
 ## Weaknesses
 
 ### Fatal
 
-None. The theoretical core (Section 2) does not contain a mathematical error that invalidates the entire contribution.
+- **Test data is used during training, invalidating all experimental results**: The SM Algorithm (Section 3, steps 2f–2h) explicitly pseudo-labels the held-out validation data, adds those data points to the training sets, recomputes covariances, and iterates until convergence. The paper states directly: "(f) Label test datapoints as +1 and −1 based on whether θ_input^T X_Test + θ'_0 ≥ 0 or ≤ 0. (g) Add the test datapoints to Train_1 and Train_{−1}." The experimental section then evaluates on this same validation split (80/20 train/validation). This means the model was trained on the same data it was tested on — an elementary evaluation error that inflates performance and renders every reported number untrustworthy. The baselines (linear SVM, RBF, PCA/ZCA whitening) do not have access to the test data, making the comparison fundamentally unfair. This alone is sufficient grounds for rejection.
 
 ### Major
 
-- **Experimental comparison is confounded by test-data leakage**: The SM Algorithm iteratively adds test data points (with pseudo-labels) to the training sets to update covariance matrices (Steps 2f–2h). This means test-data features enter the training process, whereas all baseline SVMs are trained exclusively on the original training split. The comparison is fundamentally unfair: CSVM operates in a transductive/semi-supervised regime while baselines are purely supervised. Any observed improvement could stem from exploiting test-data structure rather than from the claimed covariance adjustment. Without a clean train/test separation for CSVM — e.g., using a separate unlabeled pool for iterative refinement and a held-out test set for evaluation — the experimental evidence does not support the paper's conclusions.
+- **Theoretical framework does not coherently handle two distinct per-class transformations**: The derivation in Section 2 applies two different transformations (Ψ_{y=1}^{−1} and Ψ_{y=−1}^{−1}) to map each class to a Euclidean space, then posits a single classifier θ^T X^Euclidean + θ_0 = 0 (Eq. 4) in that space. Since the two transformations are different linear maps, data from each class lives in a different Euclidean coordinate system; the paper never explains how a single weight vector θ can simultaneously serve both. This is resolved only in the extreme case where Σ_{y=1} = Σ_{y=−1}, which contradicts the paper's motivation. Lemma 2.2 correctly notes this yields N classifiers for N classes, but the paper never reconciles this with the need for a single decision function. The SM Algorithm sidesteps this by running two separate SVMs (one in transformed space, one in original space) and heuristically adjusting the bias — a practical workaround, but one with no formal justification and no connection to any unified optimization objective.
 
-- **The SM Algorithm is heuristic with a weak connection to the theory of Section 2**: Step 2d of the algorithm runs standard linear SVM in the input space — the very space the paper's Lemma 2.1 declares invalid for SVM — to obtain \(\theta_{\text{Input}}\). Step 2e then shifts only the intercept \(\theta_0\) using a ratio derived from \(\theta_{\text{Euclidean}}\) and the sample covariance matrices. This intercept adjustment is not derived from any optimization principle or SVM-like objective. The paper acknowledges the algorithm is heuristic (Section 6), but the gap between the clean theoretical derivation of Section 2 and the ad-hoc correction in Section 3 is large. The reader is left uncertain whether the empirical gains (if real) come from the covariance adjustment or from the transductive pseudo-labeling mechanism.
+- **No comparison against prior covariance-adjusted SVM methods**: The paper cites MCVSVM (Zafeiriou et al., 2007), Twin Mahalanobis SVM (Peng & Xu, 2012), MD-BLSSVM (Ke et al., 2018), maxi-min margin machine (Huang et al., 2004), and weighted Mahalanobis distance kernels (Wang et al., 2007) as the prior art it aims to improve upon. Yet none of these methods appears as a baseline in the experiments. The paper compares only against standard SVM kernels and PCA/ZCA whitening. Comparing against the specific methods one claims to improve is a basic expectation.
 
 ### Minor
 
-- **No statistical significance or variance estimates are reported**: Tables 1–4 present single-point estimates of accuracy, precision, recall, and F1 without confidence intervals, standard deviations, or cross-validation over multiple random splits. Many differences are small (e.g., CSVM 0.981 vs. linear SVM 0.979 on Pulsar accuracy) and may not be statistically meaningful. This makes it difficult to assess whether the claimed improvements are genuine or within noise.
+- **No hyperparameter tuning reported**: The RBF kernel yields AUC 0.62 on Red Wine vs. 0.74 for linear SVM and 0.75 for CSVM, and the sigmoid kernel drops to AUC 0.40 on Breast Cancer — results strongly suggestive of default (untuned) kernel parameters. Without reporting any tuning strategy, C selection, or kernel bandwidth choices, the comparison against kernel SVMs cannot be considered trustworthy, even setting aside the test-data leakage issue.
 
-- **Only 5 datasets, all relatively small and standard**: While the diversity of domains (healthcare, astronomy, quality, safety) is a positive, the scale is modest. The paper would benefit from a broader empirical evaluation, particularly since the claimed improvements are small in absolute terms.
+- **No repeated trials or variance estimates**: All results are from a single 80/20 split with no cross-validation, no standard deviations, and no statistical significance tests. The absolute improvements (e.g., accuracy 0.974 vs. 0.956 on Breast Cancer) could fall within the noise of a single random split.
 
-- **No comparison against existing Mahalanobis-based or covariance-aware SVM variants**: The paper cites Tsang et al. (2006), Peng & Xu (2012), Huang et al. (2004), and Zafeiriou et al. (2007) as prior work incorporating covariance into SVM but does not compare against any of them empirically. This makes it impossible to assess whether CSVM advances the state of the art in covariance-adjusted classification or merely improves over standard kernels that don't use covariance at all.
+- **Overclaimed novelty of the whitening interpretation**: The paper claims as a contribution the explanation that "whitening transforms the data from non-Euclidean space to Euclidean space, and it is in Euclidean space that the equations for various ML models... are based" (Section 4). This is well-understood: whitening decorrelates and standardizes features so that Euclidean distance becomes meaningful. Restating this as a novel vector-space insight inflates the contribution.
+
+- **The SM Algorithm lacks convergence analysis**: The convergence criterion is vague ("changes in test data labels are below a certain threshold") and no empirical or theoretical analysis of convergence behavior is provided. The algorithm is an ad-hoc iterative procedure with no guarantees.
 
 ### Trivial
 
-- The paper's framing that SVM is "invalid" in non-Euclidean spaces is somewhat overstated. SVMs operate in inner-product spaces and can incorporate covariance through kernel design; the real contribution is about margin asymmetry, not about fundamentally invalidating SVM.
+- The discussion of Lemma 2.3 conflates KKT boundary conditions with the role of non-support-vector data points. Even in standard SVM, all data points influence the classifier indirectly through the optimization — the KKT conditions describe which constraints are active at the optimum, not which points "matter." The lemma's statement that "KKT boundary conditions are not valid in the input space" is imprecise phrasing rather than a substantive error, but it reflects the paper's loose handling of optimization theory.
 
 ## Nice-to-Haves
 
-- A transductive-SVM (TSVM) baseline would be appropriate given that the SM Algorithm uses unlabeled test data during training.
-- An ablation study separating the effect of class-specific whitening from the effect of iterative pseudo-labeling would clarify which component drives performance.
-- Derivation of the intercept adjustment in Step 2e from an optimization principle (e.g., a modified SVM that penalizes unequal margins) would strengthen the theoretical narrative.
+- A visualization of how the bias adjustment (step 2e) shifts the decision boundary relative to the standard linear SVM boundary would help build intuition for the method's claimed effect.
+- Discussion of when class-specific covariance adjustment is expected to help (e.g., heterogeneous class covariances) versus when it provides no benefit (near-equal covariances) would sharpen the contribution.
 
 ## Removed Points
 
 These points are flagged to be removed, treat them with caution:
 
-- **Harsh Critic Point 1 (class-specific transformation destroys single Euclidean space)**: This criticism is factually incorrect. Both transformations \(\Psi^{-1}_{y=1}\) and \(\Psi^{-1}_{y=-1}\) map \(\mathbb{R}^n \to \mathbb{R}^n\). After transformation, all data points reside in the same \(\mathbb{R}^n\) with the standard Euclidean inner product. SVM operates on the union of these transformed points without any mathematical incoherence. The critic confuses different coordinate transformations with different vector spaces. The optimization in Equations (6)–(7) is well-defined: each constraint uses the appropriate transformation for its class, and \(\theta\) and \(\theta_0\) are shared parameters in \(\mathbb{R}^n\) and \(\mathbb{R}\) respectively.
+- **"The paper does not discuss the more serious issue of learning a single classifier from two differently whitened representations"** — moved to Major weaknesses with the substantive theoretical inconsistency point.
 
-- **Harsh Critic claim that the paper "misrepresents how SVMs work" (Abstract/Introduction notes)**: The paper's claim that SVM is derived from Euclidean distance and is therefore native to Euclidean space is a legitimate perspective — it's essentially arguing that standard SVM assumes isotropic covariance. This is a reasonable starting point, not a misrepresentation.
+- **Strength Finder claim: "Novel interpretation of whitening" as a contribution** — removed from Strengths. The paper's claim is that whitening transforms data from non-Euclidean to Euclidean space, which is essentially a restatement of what whitening does (decorrelate + standardize → Euclidean distance applies). This is not novel.
 
-- **Harsh Critic claim about PCA/ZCA comparison missing the point (Section 4 notes)**: The paper explicitly acknowledges that PCA/ZCA use a single transformation on all data while CSVM uses class-wise transformations, and presents this as a deliberate point of differentiation. This is not a flaw.
+- **Strength Finder claim: "Empirical validation across diverse datasets"** — removed as a stand-alone strength because the experiments are fatally compromised by test-data leakage. The surface-level organization of the experiments is clean, but the evaluation is invalid.
 
-- **Strength Finder point about "empirical validation across diverse datasets" as a core strength**: While the diversity of domains is positive, the experimental validation is compromised by the data leakage issue. This strength is therefore unreliable and dropped from the main review.
+- **Harsh critic's formatting/style nitpicks** — removed per hard rules. These are parser artifacts.
 
-- **Strength Finder point about "clear theoretical foundation for covariance-adjusted SVM" as a core strength**: The derivation in Section 2 is presented but the transition to the SM Algorithm is weak. The theoretical foundation is partially valid but not fully realized.
+- **Harsh critic's claim about missing references / unreleased models** — removed per hard rules. All cited works are assumed to exist.
+
+- **Harsh critic's demand for "proper optimization formulation" as obvious next step** — moved to Nice-to-Haves. The paper could benefit from this, but demanding it as a weakness is scope-creep for what is already an empirical paper with a theoretical motivation.
+
+- **Strength Finder claim: "The paper attempts to tackle a genuine challenge"** — removed. This is too generic and superficial to count as a strength.
+
+- **Demand for convergence analysis of the SM algorithm** — kept as Minor rather than Major because heuristic iterative algorithms without convergence proofs are common in applied ML papers. The lack of analysis weakens the contribution but does not by itself invalidate it.
 
 ## Novel Insights
 
-The observation that class-specific whitening followed by SVM in the Euclidean space naturally produces an asymmetric margin allocation in the input space (Lemma 2.3, Equation 14) is a genuinely interesting geometric insight that does not appear to be widely discussed in the SVM literature. The idea that the margin-splitting ratio is determined by the ratio of inverse-covariance-weighted norms provides a clean geometric interpretation of why and how covariance should affect the decision boundary. This insight survives even if the practical algorithm and experiments need substantial revision.
+None beyond the paper's own contributions. The idea that class-conditional covariance should inform margin allocation is sensible but has been explored in prior work. The paper's specific framing via vector-space transformation from "statistical" to "Euclidean" space offers a lens for thinking about whitening in SVM, but the execution is undermined by the unresolved problem of combining two distinct transformations into a single classifier.
 
 ## Suggestions
 
-1. **Fix the experimental design**: Split data into train / unlabeled-pool / test. Run the SM Algorithm's iterative refinement on the unlabeled pool only, evaluate on the held-out test set. Compare against transductive SVM and semi-supervised baselines that also have access to the unlabeled pool.
+- **Fix the evaluation protocol immediately**: The SM Algorithm must be restricted to using only training data during its iterative phase. A proper three-way split (train / validation for early stopping / held-out test) is essential. Without re-running all experiments under a clean protocol, no performance claim in this paper is credible.
 
-2. **Add a transductive SVM baseline**: Since CSVM uses test features during training, the natural comparator is TSVM, not purely supervised SVM.
+- **Clarify the single-classifier problem**: Either derive a single objective that naturally handles two different per-class covariances (e.g., a margin definition that interpolates between the two Mahalanobis metrics), or explicitly argue why the two-stage heuristic (Euclidean SVM → bias adjustment) is a valid approximation, with empirical evidence of when it works and when it fails.
 
-3. **Report statistical significance**: Use cross-validation with multiple random splits and report means with confidence intervals. Run paired tests (e.g., McNemar's test) for the claimed improvements.
+- **Add comparisons against MCVSVM, Twin Mahalanobis SVM, and other cited prior methods**: These are the methods the paper positions itself against, and they should be baselines.
 
-4. **Strengthen the theory-to-algorithm connection**: Either (a) derive the intercept adjustment from a modified optimization problem that explicitly penalizes unequal margins, or (b) acknowledge the gap more explicitly and position the SM Algorithm as a practical approximation that is motivated by but not derived from the theory.
+- **Report hyperparameter tuning**: At minimum, describe how C and kernel parameters were selected for all methods, and use the same tuning budget for all competitors.
 
-5. **Compare against prior covariance-aware SVM methods** (Tsang et al., Peng & Xu, Zafeiriou et al.) to establish where CSVM stands relative to the existing literature.
+---
 
-## Score and Decision
+## Anchor Comparison
 
-### Anchor comparison:
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| GDA Framework | bp9DOHb1mk | 5.00 | Coherent geometric framework, strong empirical validation on 27 datasets, clear novelty. Our paper is substantially weaker — the theoretical framework has an unresolved inconsistency and the experiments are invalid due to test-data leakage. |
+| Dissecting Mahalanobis | HuuCWjlJuQ | 4.29 | Comprehensive empirical study with clarity and fairness issues but genuine analytical insights. Our paper is weaker — it has fewer datasets, a fatal evaluation error, and less rigorous analysis. |
+| FedCova | ZzhfTlqnyp | 4.00 | Interesting covariance-based FL framework with limitations but a sound evaluation. Our paper is weaker — the evaluation is fatally flawed and the theoretical contributions are less coherent. |
+| Dual-Phase Whitening | MGg4ymeH7R | 4.00 | Limited novelty but sound experimental methodology. Our paper is weaker — the evaluation protocol is invalid. |
+| FINDER | Oe5Min0Na2 | 2.50 | Formal framework with limited novelty and clarity issues; experiments don't fully connect to theory. Our paper is comparable in severity — different problems (test-data leakage + theoretical inconsistency vs. limited novelty + formalism-experiment disconnect) but similar overall quality level. |
+| GDA / High-dim Synthetic | Y54P2BBPPh | 5.33 | Strong theoretical and empirical contribution. Our paper is much weaker on both fronts. |
+| Data Processing Inequality | zWxXfe7cwH | 5.33 | Well-theorized study of a fundamental question. Our paper is much weaker. |
 
-| Anchor | Avg Score | Decision | Comparison to paper under review |
-|--------|-----------|----------|----------------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/bp9DOHb1mk.md` (GDA) | 5.00 | Accept (Poster) | Stronger: clean theory-to-algorithm connection, 27 datasets, proper evaluation. CSVM is weaker on all fronts. |
-| `/home/wg25r/review_agent/human_reviews_2026/C0qgkcCehg.md` (Mini-batch kernel k-means) | 4.40 | Reject | Stronger: solid theory, clean algorithm, fair experiments, just seen as incremental. CSVM has worse experimental flaws. |
-| `/home/wg25r/review_agent/human_reviews_2026/HuuCWjlJuQ.md` (Mahalanobis OOD) | 4.29 | Reject | Comparable in topic (Mahalanobis + classification) but stronger empirically (broader evaluation, statistical metrics). CSVM is weaker due to data leakage. |
-| `/home/wg25r/review_agent/human_reviews_2026/ytbX1CRzah.md` (Geometric Moment Alignment) | 3.50 | Reject | Comparable: interesting geometric idea with experimental limitations. CSVM shares similar severity of issues. |
-| `/home/wg25r/review_agent/human_reviews_2026/Pkm5u3OjRB.md` (Training-Free Diffusion) | 3.00 | Reject | Weaker: theory disconnected from practice, method reduces to heuristic. CSVM has a stronger theoretical core but similar algorithmic gap. |
-| `/home/wg25r/review_agent/human_reviews_2026/nn5Vf6GEsV.md` (Kernel Regression Learning Curves) | 6.40 | Accept (Poster) | Much stronger: rigorous theory, strong empirical validation. CSVM is far below this standard. |
+The paper under review falls closest to the FINDER (2.50) and the lower end of the 4.00-group anchors. The fatal test-data leakage error and unresolved theoretical inconsistency place it below the 4.00-tier papers, which at minimum have sound evaluation protocols. A score of **2.5** reflects: one fatal flaw that invalidates all experiments plus major theoretical gaps, offset slightly by a well-motivated problem and a conceptually interesting algorithmic idea.
 
-The paper's theoretical core (Section 2, Lemmas 2.1–2.3) has genuine merit as a geometric analysis of how covariance affects SVM margins. However, the practical algorithm is heuristic with a weak connection to the theory, and the experimental validation is fundamentally compromised by test-data leakage. These are not minor issues — the empirical claims cannot be trusted without a redesign, and the theory-to-practice gap is substantial.
-
-Positioned against the anchors: this paper is clearly below the accepted GDA paper (5.00) and the rejected-but-solid mini-batch kernel k-means (4.40). It is comparable to the Geometric Moment Alignment paper (3.50) — an interesting geometric idea undermined by experimental limitations — and stronger than the Training-Free Diffusion paper (3.00) whose theory was largely decorative. I score it **3.5**.
-
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+MY FINAL SCORE: <pineapple>2.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>
