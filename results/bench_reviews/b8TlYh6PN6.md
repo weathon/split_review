@@ -1,88 +1,78 @@
-I've now read the full paper and all calibration anchors. Let me synthesize the final review.
-
----
-
 ## Summary
 
-This paper provides the first complete characterization of distributional equivalence for linear non-Gaussian latent-variable causal models with arbitrary structure (including cycles and unfettered latent-observed interactions). The authors introduce (1) a new theoretical tool — *edge ranks* — with a duality to the familiar path ranks, (2) a local graphical criterion (Theorem 2, "children bases") for deciding equivalence, (3) a transformational characterization (Theorem 3, cycle reversals + edge additions/deletions) for traversing the equivalence class, and (4) an algorithm (glvLiNG) that recovers models up to equivalence from data via OICA. The theoretical framework is mathematically thorough and spans irreducibility, algebraic rank constraints, matroid theory, and a presentation analogous to CPDAGs.
+This paper provides the first graphical characterization of distributional equivalence for linear non-Gaussian latent-variable models with arbitrary latent structure and cycles — crucially, without any structural assumptions on how latents are indicated or how they interact with observed variables. The authors introduce *edge ranks* as a new theoretical tool, prove their duality with the classical path ranks (Theorem 1), and use them to derive both a local graphical criterion (Theorem 2) and a transformational characterization (Theorem 3) for equivalence. A proof-of-concept algorithm, glvLiNG, recovers models from data up to this equivalence class. This is the first structural-assumption-free method for latent-variable causal discovery in any parametric setting.
 
 ## Strengths
 
-- **First complete equivalence characterization for LiNG latent-variable models with cycles.** The paper fills a recognized gap: prior to this work, no distributional equivalence characterization existed for latent-variable models without structural assumptions in any parametric setting. The result is clean and general (§4, Theorems 2–3).
+- **First general distributional equivalence characterization for LiNG models without structural assumptions.** Theorem 2 reduces an exponential number of subset checks to a local, efficiently checkable condition involving "children bases." Theorem 3 shows equivalence classes are connected via admissible cycle reversals (Lemma 6) and edge additions/deletions (Lemma 7), with at most one cycle reversal. These are genuinely novel and foundational results.
 
-- **Edge-rank duality (Theorem 1, §3.3).** The duality between path ranks and edge ranks (min(|Z|,|Y|) − ρ_G(Z,Y) = |V| − max(|Z|,|Y|) − r_G(V\Y, V\Z)) is elegant and genuinely novel. It not only enables the paper's own results but enriches the broader rank-based discovery toolbox. The local edge-rank perspective allows the singleton decomposition that makes Theorem 2 practical, circumventing the combinatorial explosion of path-rank checks.
+- **Edge ranks and their duality with path ranks (Theorem 1).** The introduction of edge ranks — a local, edge-level constraint defined via maximum bipartite matching — fills a missing piece in the rank-based causal discovery toolbox. The duality theorem reveals that path ranks and edge ranks offer complementary perspectives on bottlenecks in digraphs. This tool is likely to find uses beyond the paper's specific setting (as the authors sketch for Gaussian and discrete settings in Appendix C.5).
 
-- **Transformational characterization (Theorem 3, §4).** Proving that two irreducible models are equivalent iff one can be transformed into the other via admissible cycle reversals and edge additions/deletions — with at most one cycle reversal — is a substantial result. It provides a principled traversal mechanism analogous to the Meek conjecture for Markov equivalence, and the matroid-theoretic proofs in Appendix B are rigorous.
+- **Transformational characterization enabling class traversal.** Theorem 3 provides an analogue of Meek's conjecture for this setting, yielding a natural BFS/DFS procedure for enumerating all equivalent digraphs. The interactive demo at https://equiv.cc makes this tangible and is a valuable contribution in itself.
 
-- **Matroid-theoretic algorithm construction (Appendix A).** The two-phase algorithm design (Phase 1: bipartite realization via strict gammoid duals; Phase 2: singleton column augmentation via transversal matroids, Lemma 10) is clever and leverages deep matroid theory to avoid expensive constraint-solving. The runtime comparisons against MILP (Table 4) demonstrate orders-of-magnitude speedup.
-
-- **Irreducibility canonicalization (§2.2).** Propositions 1–2 provide a clean graphical condition and reduction procedure that eliminates trivial non-identifiability without increasing edges or cycles, ensuring the equivalence characterization operates on meaningful models only.
+- **Reasonable multi-angle evaluation for a theory paper.** The paper quantifies equivalence class sizes exhaustively for small digraphs (Table 3), benchmarks structurally misspecified baselines under oracle conditions (Table 5), runs finite-sample simulations (Figure 7), and applies glvLiNG to real stock-market data recovering interpretable patterns (Appendix D.5). The authors are transparent that glvLiNG is a proof-of-concept and that OICA is a practical bottleneck.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Empirical evaluation does not test the algorithm's central claim of equivalence-class recovery.** The paper states (lines 700–702) that glvLiNG is "guaranteed to recover the entire class of irreducible models equivalent to the ground-truth model." Yet the evaluation (Appendix D.4) reports only the minimum SHD between the output graph and the true equivalence class. This metric measures whether *some* graph within the class is close to the output — it does not verify that the traversal procedure (Theorem 3) correctly enumerates the class, nor does it report class-level metrics such as precision/recall of generated graphs or the proportion of runs where the output graph actually belongs to the true equivalence class. The disconnect between the paper's strongest claim and its supporting evidence weakens confidence in the algorithm's correctness. The authors could substantially address this by adding oracle-input experiments that check whether the constructed graph belongs to the true class and whether the traversal covers it.
+None. The theoretical contributions are rigorous and well-supported. The algorithmic limitations are explicitly scoped as proof-of-concept.
 
 ### Minor
 
-- **OICA dependence limits practical viability, and sensitivity is unexplored.** The algorithm requires an OICA-estimated mixing matrix, and OICA is acknowledged to be fragile (lines 759–763). The experiments use only SDP-ICA, graphs of at most 13 vertices, and no sensitivity analysis to misspecified latent count, OICA initialization quality, or faithfulness violations. While the paper explicitly frames glvLiNG as a proof of concept, the absence of any robustness evaluation makes it hard to assess when the full pipeline might fail in practice.
+- **No sensitivity analysis for the rank-thresholding parameters (α=25, ε=0.02) used in glvLiNG.** In Appendix D.4 (lines 3767-3773), the paper mentions a sigmoid-based confidence score with fixed α and ε, and briefly states robustness was verified under synthetic noisy ranks (N(0.75, 0.2) vs N(0.25, 0.2)). However, no systematic sweep over α/ε values is presented, nor is there analysis of how misclassification of ranks propagates to graph errors. Given glvLiNG is presented as a proof-of-concept, this is minor, but it would strengthen the empirical case for the algorithm's practical viability.
 
-- **Algorithm description in the main text is too sparse.** Phase 2 (column augmentation for X vertices) is only sketched in the main text (lines 716–721). The critical Lemma 10 construction and the reasoning for why singleton checks suffice (Lemma 9) are deferred entirely to the appendix. A brief worked example or walk-through in the main text would substantially improve readability and help readers trust that the algorithm is correct.
-
-- **Real-world analysis has no ground truth.** The stock-market experiment (Appendix D.5) is illustrative only — there is no way to validate the recovered structure. This is acceptable as a case study, but the paper should be clearer that it does not constitute empirical validation.
+- **No evaluation of equivalence-class coverage.** The simulation experiments only report SHD to the closest equivalent graph (Appendix D.4, line 3781). Since Theorem 3 enables traversal of the entire estimated equivalence class, one could measure recall of true equivalent graphs on small instances where exhaustive enumeration is feasible. The absence of this experiment leaves open whether the algorithm systematically over- or under-estimates the class. The authors acknowledge the algorithm is proof-of-concept, so this is a missed opportunity rather than a fatal gap.
 
 ### Trivial
 
-- The paper could benefit from explicitly stating which graph generated by the pipeline (the initial constructed graph G̃, or some representative from the traversed class) is used for the SHD computation in Figure 7.
+- **The 19,008-graph equivalence class in the stock-market analysis is presented without critical discussion of its practical informativeness.** Reporting that the class contains 20 solid and 14 dashed edges (Figure 8) is useful, but could be enriched by discussing what fraction of edges are invariant and what structural questions remain unresolved.
 
 ## Nice-to-Haves
 
-- An oracle glvLiNG experiment (bypassing OICA, supplying the true mixing matrix) that tests class-membership and traversal coverage would strongly support the algorithm's theoretical guarantees.
-- A sensitivity study varying OICA noise levels or mis-specified latent counts.
-- A small worked example in the main text illustrating Phase 1 and Phase 2 of glvLiNG.
+- A comparison with Salehkaleybar et al. (2020), which also uses OICA but assumes acyclicity, would help contextualize the practical benefit of being assumption-free versus trading some structural flexibility for potentially more robust estimation.
+- A discussion of how OICA estimation errors (mis-estimation of latent count, inaccurate column scaling) affect the recovered equivalence class would ground practical expectations.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed — treat them with caution.
 
-- **"Unresolved dependence on OICA and limited scale" as a fatal criticism:** The paper explicitly acknowledges OICA limitations in §5 "Final remarks" (lines 759–768), stating that "the main focus of this work is to characterize distributional equivalence" and that glvLiNG "serves more as a proof of concept." The paper scopes its own limitations. Kept as a minor concern rather than a fatal one.
+- **"Reduction requires knowledge of the true graph; the paper does not discuss whether the same reduction can be soundly applied to an estimated graph."** Removed because the reduction (Proposition 2) is a theoretical canonicalization to rule out trivial equivalence cases, not an algorithmic step applied to data. The paper is explicit that this lets us "restrict attention to irreducible models for the remainder" (line 268).
 
-- **"Unclear evaluation protocol" about which graph is used for SHD:** The paper states (line 3780–3781) the protocol clearly: "We calculate the minimum SHD between all graphs in the true equivalence class to the discovery output graph." The protocol is specified; only the exact identity of the "discovery output graph" among pipeline outputs could be clarified. Kept as trivial.
+- **"Runtime comparison against MILP is of limited value — MILP is an obviously inefficient baseline."** Removed. The paper uses MILP as a brute-force satisfiability baseline precisely to demonstrate the speedup from its constraint-based approach. This is standard practice, and the paper does not oversell the comparison. The real story is in the absolute runtime: glvLiNG solves n=10 in under 5 seconds.
 
-- **Strength Finder claim of "Algorithm evaluation on multiple fronts" as fully supporting the main claim:** The evaluation has the major gap noted above — it does not test equivalence-class recovery, only single-graph SHD. This strength is weakened in the main review.
+- **"Missing baseline: Salehkaleybar et al. 2020."** Moved to Nice-to-Haves. The chosen baselines (LaHiCaSl, PO-LiNGAM) are structurally misspecified by design — they serve the paper's purpose of showing what goes wrong when structural assumptions are violated. Adding an OICA-based acyclic method would be informative but is not essential to the paper's core claim.
 
-- **Strength Finder's "The algorithm's practical performance on synthetic and real data confirms that the theoretical characterization indeed enables structural-assumption-free discovery":** Overstated given the evaluation limitations. The results are suggestive but not confirmatory.
-
-- **Any criticism about missing appendix, missing proofs, or absent references:** All proofs are in the appendix as stated; the parser may have stripped sections. Not an author issue.
-
-- **Formatting/style nitpicks and typos:** Removed as parser artifacts per instructions.
+- **Formatting/typo/style criticisms from the harsh critic.** Removed — these are parser artifacts, not author errors.
 
 ## Novel Insights
 
-A genuinely novel insight emerging from the reviews is the recognition that this paper does for distributional equivalence in LiNG latent-variable models what the Meek conjecture + CPDAG framework did for Markov equivalence in fully observed DAGs — but the paper goes further by providing a complete three-level hierarchy: a local graphical criterion (Theorem 2, Level 2), a presentation with maximal graph and invariant edges (Theorem 4, Level 3), and a transformational traversal (Theorem 3). The side-by-side comparison in Table 2 makes this structural parallel explicit and useful. The edge-rank/path-rank duality (Theorem 1) may prove to be a reusable tool beyond this specific setting, particularly for translating results between the Gaussian and non-Gaussian rank-based discovery literatures.
+None beyond the paper's own contributions. The paper's introduction of edge ranks as a dual perspective to path ranks, and the demonstration that this duality enables a clean decomposition from global rank constraints to local singleton checks, is genuinely novel and may influence how the broader community approaches rank-based causal discovery.
 
 ## Suggestions
 
-- Add oracle-input experiments that bypass OICA entirely: given the true mixing matrix, report (a) the proportion of runs where glvLiNG's constructed graph belongs to the true equivalence class, and (b) class-level precision/recall of the traversal output. This would directly test whether the algorithmic construction and traversal are correct, cleanly separating algorithmic correctness from OICA estimation error.
-- Include a small sensitivity experiment varying the signal-to-noise ratio in the OICA mixing matrix to characterize the pipeline's robustness.
-- Add a brief illustrative walk-through of glvLiNG's two phases on a small (3-4 vertex) example in the main text to make the algorithmic contribution accessible.
+- Add a sensitivity analysis varying α and ε by at least an order of magnitude, showing SHD as a function of threshold choice, to support the claim of robustness.
+- On small graphs (n ≤ 6) where exhaustive enumeration of true equivalence classes is feasible, report recall of true equivalent graphs within the estimated class to validate that Theorem 3 traversal operates correctly on estimated inputs.
+- Discuss the stock-market results more critically — quantify what fraction of edges are invariant (solid) vs. uncertain (dashed), and what domain-level claims can or cannot be made given the ~19k ambiguity.
 
-## Score and Decision
+---
 
-**Calibration anchors used:**
+**Anchor comparison:**
 
-| Path | Avg Score | Decision | Comparison |
-|------|-----------|----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/qLbTww6vv2.md` | 4.00 | Reject | Much weaker than the paper under review: had proof flaws and limited novelty. This paper's theoretical development is far more rigorous. |
-| `/home/wg25r/review_agent/human_reviews_2026/expkpx9TWg.md` | 4.00 | Reject | Weaker: incremental contribution on effect identification. This paper solves a more fundamental open problem. |
-| `/home/wg25r/review_agent/human_reviews_2026/TAOpnCPnjg.md` | 4.50 | Accept (Poster) | Comparable setting (LiNG + latents), but CICA's contribution is narrower. This paper's theoretical depth and completeness exceed CICA. |
-| `/home/wg25r/review_agent/human_reviews_2026/BNHplerBYE.md` | 5.33 | Accept (Poster) | Similar topic (latent-variable causal discovery), stronger empirical validation, but this paper's theoretical contribution is deeper and more novel. |
-| `/home/wg25r/review_agent/human_reviews_2026/ssYeoL4ksl.md` | 5.50 | Reject | Similar setting (cycles + latents + LiNG), but bivariate only. This paper is substantially more comprehensive. |
-| `/home/wg25r/review_agent/human_reviews_2026/ta8BKRa1bl.md` | 6.00 | Accept (Poster) | Comparable theoretical depth with limited experiments. This paper's theory is at least as deep; experiments are more thorough though with similar proof-of-concept framing. |
-| `/home/wg25r/review_agent/human_reviews_2026/5VN11Hd3uY.md` | 6.67 | Accept (Poster) | Strong empirical validation on a different problem. This paper has deeper theory but weaker empirical validation. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/BNHplerBYE.md` | 5.33 (Accept Poster) | Same domain (latent-variable causal discovery). That paper proposes a score-based greedy search algorithm; this paper is more theoretically original with a first-of-its-kind equivalence characterization. The theory here is stronger; experiments are comparable. |
+| `/home/wg25r/review_agent/human_reviews_2026/ssYeoL4ksl.md` | 5.50 (Reject) | Also handles cycles + latent variables in linear non-Gaussian models, but limited to bivariate case. This paper is substantially more comprehensive (arbitrary latent structure, full graph characterization). |
+| `/home/wg25r/review_agent/human_reviews_2026/Uc1EAICxTD.md` | 4.50 (Accept Poster) | Independence test for LiNG data. Narrower contribution with comparable experimental depth. This paper's theoretical contribution is broader and more foundational. |
+| `/home/wg25r/review_agent/human_reviews_2026/V7pT2ZRoTB.md` | 4.50 (Accept Poster) | Pure theory paper for causal discovery on random graphs. Narrow scope, experimental evaluation limited to simulations on graph models. This paper has broader scope and includes real-data evaluation. |
+| `/home/wg25r/review_agent/human_reviews_2026/qLbTww6vv2.md` | 4.00 (Reject) | Latent additive noise models. Less rigorous theory, weaker experiments. This paper is clearly stronger on both axes. |
+| `/home/wg25r/review_agent/human_reviews_2026/mA78uXqcnl.md` | 7.00 (Accept Oral) | Hawkes processes with latent confounders. Strong theory + strong experiments. This paper has comparable theoretical depth but weaker experimental validation (explicitly proof-of-concept). |
 
-The paper's theoretical contribution — the first distributional equivalence characterization for latent-variable models without structural assumptions — is genuinely significant and well-executed. The edge-rank duality and transformational traversal are elegant results likely to influence future work. The empirical evaluation has a real gap (not testing class-level recovery) but this is mitigable and does not invalidate the core contribution. I position this paper above the 5.33 anchor (BNHplerBYE, which had a narrower theoretical contribution) and comparable to the 6.00 anchor (ta8BKRa1bl, which had strong theory with limited experiments). I score at 6.0.
+**Calibration reasoning:** This paper's theoretical contribution is foundational — the first equivalence characterization in its setting — and is more original than the 4.50-5.50 anchors. It falls below the 7.00 oral anchor (mA78uXqcnl) primarily because the algorithm and experiments are explicitly proof-of-concept while that paper delivers a more complete practical package. The score lands at 6.5: strong theoretical paper with acknowledged experimental limitations, clearly above borderline-accept territory but not at the oral level.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

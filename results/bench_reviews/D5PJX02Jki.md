@@ -1,97 +1,107 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and calibration anchors. Let me write the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes RoPE++, which re-incorporates the previously discarded imaginary component of the complex-valued RoPE attention score as a parallel set of attention heads. The method comes in two configurations: RoPE++EC (doubled heads, equal KV cache) and RoPE++EH (equal heads, halved KV cache/QKV parameters). The authors derive a characteristic curve showing the imaginary attention favors long-range dependencies, and validate empirically at 376M–1.5B scales across short- and long-context benchmarks, with consistent gains over standard RoPE.
+This paper proposes RoPE++, an extension of Rotary Position Embeddings that re-injects the ordinarily discarded imaginary component of the complex-valued dot product as a parallel set of attention heads. By simply rotating query vectors by −π/2 before applying standard RoPE, the method produces both real and imaginary attention scores without altering the core rotation mechanism. Two configurations are introduced: RoPE++EC (equal KV cache, doubled heads) and RoPE++EH (equal heads, halved KV cache). Pre-training experiments at 376M, 776M, and 1.5B model scales show consistent improvements over vanilla RoPE on both short-context and long-context benchmarks, with the gains growing as context length increases.
 
 ## Strengths
 
-- **Elegant core idea with theoretical motivation**: The paper identifies a genuinely overlooked aspect of RoPE — the discarded imaginary component of the complex dot product — and shows through the characteristic curve (Eq. 5, Figure 1) that the imaginary attention has a slow-decaying profile favoring long-range dependencies. The derivation that imaginary attention reduces to a \(-\pi/2\) rotation of queries followed by standard RoPE is clean and principled.
+- **Novel and principled insight**: The paper identifies a genuinely overlooked aspect of RoPE — that the imaginary part of the complex dot product is simply discarded, and that this discarded term has favorable properties for long-range modeling. The characteristic-curve analysis (Section 3.2, Figure 1) showing the imaginary component decays much more slowly than the real component as a function of distance provides clear motivation for why recovering this term should help long-context tasks.
 
-- **Practical efficiency benefits (RoPE++EH)**: RoPE++EH halves KV cache and QKV parameters while matching or surpassing vanilla RoPE on short-context tasks (Table 1: e.g., 376M avg 40.3 vs 40.1 RoPE; 1.5B avg 43.6 vs 42.9 RoPE) and delivering measurable memory/throughput gains (Figure 4). This is an independently valuable contribution — even if the imaginary component were only a reparameterization trick, the compression result stands on its own.
+- **Elegant, low-overhead implementation**: The method requires only rotating query vectors by −π/2 before applying standard RoPE, with keys unchanged (Equation 4). This fits naturally into existing FlashAttention implementations, and the two configurations (EC and EH) offer practical trade-offs between memory and compute. No extra KV cache is needed for the EC variant.
 
-- **Consistent long-context improvements for RoPE++EC**: On RULER and BABILong (Table 2), RoPE++EC delivers substantial gains at 376M (RULER avg 25.0 vs 18.8; BABILong avg 16.1 vs 11.0) and maintains advantages at 64k context lengths. These benefits persist across different extension methods (NTK, PI, YaRN; Table 3).
+- **Consistent empirical gains across multiple model scales**: Tables 1 and 2 show RoPE++EC outperforming RoPE and other position embeddings (FoPE, Pythia, ALiBi) on both short-context aggregate scores and long-context benchmarks (RULER, BABILong). The gains are consistent across 376M, 776M (main paper) and 1.5B (Appendix C) model sizes. On RULER, RoPE++EC improves average scores from 18.8→25.0 at 376M and 27.4→29.4 at 776M relative to RoPE — gains that widen at longer contexts.
 
-- **Generality and practical integration**: The method integrates with FlashAttention, works with standard long-context training recipes, and is validated at three model scales (376M, 776M, 1.5B) with training convergence checks (Appendix C, Tables 7–9). Code and checkpoints are publicly released.
+- **EH variant demonstrates efficiency with competitive performance**: RoPE++EH matches or slightly exceeds vanilla RoPE performance while using half the KV cache and QKV parameters (Table 1, Table 2), with memory and TPOT benefits confirmed in Figure 4. This is a strong practical result.
+
+- **Compatibility with existing long-context techniques**: Table 3 demonstrates that RoPE++ combines effectively with NTK scaling, Linear PI, and YaRN, consistently outperforming RoPE under each interpolation method. This suggests the imaginary extension provides orthogonal benefits.
+
+- **Informative attention-pattern analysis**: Figure 5 provides compelling visualization that imaginary heads attend more globally while real heads focus locally, and the noise-injection experiment shows that corrupting imaginary heads degrades long-context performance more severely than corrupting real heads (an 8-point gap at 776M).
+
+- **Convincing training dynamics**: Tables 7-9 in the appendix show that RoPE++ training loss curves nearly overlap with RoPE, converging stably and ultimately surpassing RoPE on downstream scores — addressing concerns about training stability.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Missing capacity-matched baseline for RoPE++EC**: RoPE++EC doubles the number of attention heads (and the output projection size \(W_o\)) relative to standard RoPE, yet no experiment controls for this increase. A comparison against standard RoPE with \(2\times\) heads and independent query/key projections would isolate whether the gains stem from the imaginary formulation or simply from additional capacity. The RoPE++EH variant provides a partial control (equal heads, halved cache), but its long-context results are mixed (e.g., BABILong at 776M: 19.4 vs RoPE 22.8; 1.5B RULER: 31.0 vs 35.1), so it cannot fully carry the burden of proving the imaginary component drives the RoPE++EC gains. Without this baseline, the paper's central claim — that the imaginary part specifically improves long-context modeling — remains incompletely demonstrated.
+None. The core claims are reasonably supported.
 
 ### Minor
 
-- **Short-context gains are small and of unclear reliability**: Many of the claimed improvements are 0.2–1.0 points averaged over 11 heterogeneous benchmarks (e.g., 376M Short: RoPE++EH 40.3 vs RoPE 40.1; 776M Short: RoPE++EH 42.5 vs RoPE 42.0). Results come from single training runs with no standard deviations or confidence intervals reported. While single-run evaluation is common in pretraining papers at this scale, the small margins make it difficult to distinguish signal from noise, especially given that some individual benchmark scores fluctuate substantially across configurations.
+- **No strictly capacity-matched baseline for EC**: RoPE++EC doubles the number of attention heads and the output projection W_o compared to vanilla RoPE (while keeping KV cache equal). The paper would be substantially strengthened by comparing against a RoPE model with the same total parameter count — e.g., by widening layers or increasing head count in the RoPE baseline. As it stands, some fraction of EC's gains may be attributable to increased model capacity rather than the imaginary attention structure specifically. This is mitigated by the EH results (which show benefits with *fewer* parameters) and by the fact that EC is explicitly positioned as the "equal cache" variant, but a parameter-controlled comparison remains a gap. The paper acknowledges this cost in Section 3.3 and Appendix C.2 (Table 11), which is good, but a controlled baseline would resolve the attribution question more cleanly.
 
-- **Noise-injection experiment provides only suggestive evidence (Section 5.2)**: The conclusion that imaginary attention plays "a more dominant role in long-context modeling" rests on observing larger RULER-4k score drops when Gaussian noise is added to imaginary vs. real heads. The experiment uses equal standard deviation across branches without normalizing for potential differences in attention-score magnitude or variance between the two branches. The finding is directionally interesting but the gap could partially reflect differing numeric sensitivity rather than a genuine difference in functional importance.
+- **Theoretical analysis relies on untested statistical assumptions**: The characteristic-curve derivation (Section 3.2, Appendix B) assumes query and key features are i.i.d. with nonzero mean. The paper itself notes this is "expectation-based" (line 1798 of Appendix B). While this is a standard analytical technique also used in the original RoPE paper, the gap between the i.i.d. Gaussian assumption and trained transformer feature distributions means the theoretical motivation, while suggestive, is not conclusive. The empirical results largely compensate for this, but a stronger theoretical connection would elevate the contribution.
+
+- **Small absolute gains on short-context tasks**: In Table 1, the average score improvements over RoPE are often within 1 percentage point (e.g., 376M Short: RoPE 40.1 vs RoPE++EC 41.0). While the pattern is consistent, no variance estimates are reported, making it difficult to assess whether individual task differences are statistically meaningful. The long-context gains (Table 2) are more substantial and less affected by this concern.
 
 ### Trivial
 
-- The 1.5B BABILong result for RoPE++EC (22.9 vs RoPE 29.5, Table 6) is a noticeable exception to the otherwise positive long-context trend and is not discussed in the main text.
+- **Noise-ablation experiment shows correlation, not mechanism**: The experiment in Section 5.2 demonstrates that trained models rely more on imaginary heads for long-context tasks, but it does not cleanly disentangle whether this reliance arises *because of* the imaginary-attention formulation versus post-hoc specialization during training. This is an inherently difficult causal question, and the combined evidence (theory + attention patterns + ablation) is reasonably convincing, so this is a minor limitation of the analysis rather than a flaw.
 
 ## Nice-to-Haves
 
-- A controlled experiment replacing the imaginary heads with an alternative fixed rotation (e.g., \(+\pi/4\)) while keeping the same parameter-sharing architecture would help disentangle whether the benefits come from the specific \(\sin/\cos\) combination or from the general architectural pattern of doubled query transformations on shared keys.
-- A per-subtask breakdown of RULER performance (e.g., needle-in-haystack at various depths, multi-hop composition) would provide finer insight into where and why imaginary attention helps.
-- Validation at ≥7B scale would strengthen the practical relevance claim, though the current 376M–1.5B range is reasonable for an ICLR submission.
+- A controlled comparison where a standard RoPE model is given the same total parameter budget as RoPE++EC (e.g., by increasing head count or FFN width) would more cleanly attribute gains to the imaginary extension specifically. The authors could also ablate by comparing against a dummy extension that adds extra heads with random fixed rotations rather than the principled −π/2 rotation — this would test whether the specific structure of the imaginary attention matters.
+
+- Validation on larger model scales (e.g., 3B or 7B) would increase confidence that the gains persist, though the 1.5B results in Appendix C already provide a meaningful step beyond the 376M/776M results in the main paper.
+
+- Reporting variance across multiple seeds for the benchmarking results would help readers assess the reliability of small-margin improvements.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points are flagged to be removed, treat them with caution:
 
-- **"Missing head-count-equivalent baseline is fatal"** (Harsh Critic #1): The paper has RoPE++EH which partially controls for capacity (equal heads, halved cache) and shows comparable or better performance. This baseline does not fully resolve the concern, which is why a weakened version appears as a Major weakness above, but it is not fatal — the paper has independent value through the efficiency results and the theoretical analysis.
+- **Harsh Critic: "The paper's central contribution is unsubstantiated / experimental design error that invalidates the headline results"** — This overstates the issue. The EC comparison controls for KV cache (the primary long-context bottleneck), and the EH variant *already* demonstrates benefits with fewer parameters and less cache than standard RoPE. The missing capacity-matched baseline for EC is a limitation but not a fatal error. The gains on long-context tasks are substantial (e.g., RULER 25.0 vs 18.8 at 376M) and unlikely to be explained purely by the doubled W_o.
 
-- **Absence of statistical evidence as a blocking issue** (Harsh Critic #2): Single-run evaluation with no error bars is noted as a Minor weakness above, but the consistency across 3 model scales, multiple benchmarks, and training stages provides implicit signal. This is standard practice in pretraining papers at small-to-medium scale and does not block acceptance.
+- **Harsh Critic: "Theoretical motivation is insubstantial and does not distinguish the method from trivial reparameterization"** — The expectation-based analysis is a standard technique (also used by the original RoPE paper), and the paper explicitly acknowledges it is expectation-based. The imaginary attention has a principled origin (the naturally discarded term from the complex multiplication), which distinguishes it from arbitrary transformations.
 
-- **Uncontrolled noise-injection experiment** (Harsh Critic #3): Kept as a Minor weakness with reduced force — the experiment provides suggestive evidence, and the equal-σ approach is a reasonable starting point for an ablation study, though it could be more rigorous.
+- **Harsh Critic: "No baseline is provided that controls for total parameter count or computational budget... this is a basic experimental design error"** — See above. The EH variant already controls for head count while providing cache savings. Also, the harsh critic's claim that EC gains could be "entirely due to increased model width" is speculative — the doubled W_o in EC is a relatively small fraction of total parameters.
 
-- **"The claim that omitted phase information necessarily hurts performance is not established"** (Harsh Critic, Abstract/Introduction note): The paper does not claim necessity; it claims "potential loss" (line 18), which is appropriately hedged. The theoretical analysis in Section 3.2 provides a plausible mechanism, not a proof of necessity. Removed as a strawman.
+- **Harsh Critic: "The extrapolation improvement is marginal and does not lead to usable extrapolation performance"** — Section 5.3 and Appendix D.2 explicitly note that RoPE++ cannot directly extrapolate without degradation, and Figure 6 shows the perplexity does rise. The paper frames this as a slower degradation, not a solution to extrapolation. The paper is honest about this limitation.
 
-- **"Characteristic curve analysis relies on strong distributional assumptions... does not connect to any actual mechanism"** (Harsh Critic, Section 3.2 note): The i.i.d. assumptions are explicitly stated and standard for this type of expectation-based analysis (following Su et al., 2024 and Su, 2024b). The expectation-based framework is a legitimate analytical tool for understanding average behavior of positional embeddings. The connection to long-context retrieval is theoretical motivation, not a proven mechanism — and the paper treats it as such ("helping LLM retrieve," line 458). Weakened substantially; the theoretical derivation is a genuine strength, not a weakness.
+- **Harsh Critic: "The choice of the negative imaginary part (Eq. 2) is motivated only by the subsequent expectation analysis, which is weak"** — The choice of negative imaginary part is explicitly justified (line 454: "when q_t, k_s are similar, their attention is on average larger regardless of relative distance, which is the reason why we take the negative imaginary part"). This is a clear, valid motivation.
 
-- **"Efficiency argument is only evidence for parameter-sharing, not for sin/cos swap"** (Harsh Critic, Section 3.3 note): The paper does not claim efficiency as evidence for the imaginary component specifically. Section 3.3 describes efficiency as a property of the architecture, and the paper treats efficiency and long-context improvements as separate contributions. The efficiency argument supports the practical value of the architecture design; it does not need to prove the imaginary component is uniquely responsible. Removed.
+- **Harsh Critic: "The efficiency analysis shows that EH reduces memory and latency, but this is a direct consequence of halving the number of heads—any head-count reduction would yield similar savings"** — This misrepresents the paper. The paper's claim is that RoPE++EH achieves competitive or better *performance* while halving the cache, not that halving cache is novel. The efficiency gains are presented as a practical benefit of the architecture choice, not as a novel mechanism.
 
-- **"The extrapolation argument is incremental... does not provide usable zero-shot extrapolation"** (Harsh Critic, Section 3.4 note): The paper explicitly acknowledges in Appendix D.2 that "RoPE++ cannot directly extrapolate like FoPE" — this is presented as a minor observation, not a core contribution. Removed as mischaracterizing the paper's claims.
+- **Strength Finder (dropped): "Improved length-extrapolation behavior" as a core strength** — While the paper does claim and show slower perplexity increase (Figure 6), the paper itself acknowledges in Appendix D.2 that "RoPE++ cannot directly extrapolate like FoPE or PaTH." This is a modest benefit rather than a headline result.
 
-- **"Not compared with simply reducing the number of KV heads"** (Harsh Critic, Section 5.1 note): RoPE++EH is compared against RoPE directly. The fact that reducing KV heads in standard RoPE would also save cache is a fair question but goes beyond what the paper sets out to evaluate. The paper demonstrates that RoPE++EH achieves comparable or better results with halved cache — this is a valid efficiency claim regardless of whether other methods could also save cache. Removed as scope creep.
-
-- **Strength Finder claim that noise-ablation confirms dominant role** (Strength Finder, Supporting #1): Kept but weakened — the evidence is suggestive, not confirmatory (see Minor weakness above). The overstated claim is removed; the experiment itself is noted in the main review.
-
-- **"The paper investigates a concrete aspect of RoPE that has received little attention"** (Harsh Critic strengths): Kept as part of the Elegant core idea strength above.
-
-- **"RoPE++EH demonstrates... intriguing efficiency/accuracy trade-off"** (Harsh Critic strengths): Kept as the Practical efficiency benefits strength above.
+- **Harsh Critic: Section-by-section notes about "overstating the case" in abstract/introduction** — These are matters of framing and rhetoric, not substantive errors. The abstract's claim that standard RoPE "discards the imaginary component... leading to a potential loss of relational details" is defensible — the paper demonstrates that the imaginary part carries useful information.
 
 ## Novel Insights
 
-The most genuinely novel insight is not just the re-incorporation of the imaginary component, but the architectural observation that imaginary attention can be computed as a \(-\pi/2\) rotation of queries followed by standard RoPE with shared keys — enabling either a cache-halving configuration (RoPE++EH) or a head-doubling configuration (RoPE++EC) with no additional KV overhead. The characteristic curve analysis showing the imaginary attention approximates a sine integral with slow long-range decay provides a clean theoretical motivation that is new relative to prior RoPE analyses.
+The paper's most interesting insight is that the imaginary component of RoPE's complex attention product is not merely a mathematical artifact to be discarded, but carries structural properties (slower distance-dependent decay) that make it naturally suited for long-range dependencies. This emerges cleanly from the characteristic curve analysis without requiring additional parameters or learned components. The dual-head architecture that results — where real heads capture local semantics and imaginary heads capture global context — emerges naturally from the algebra rather than being engineered. This perspective may inspire similar re-examinations of other "discarded" terms in standard deep learning components.
 
 ## Suggestions
 
-- Add a RoPE baseline with matched head count (e.g., \(2\times\) heads, independent Q/K projections) for at least one model size to isolate the contribution of the imaginary component from additional capacity. This is the single most impactful experiment for strengthening the paper's core claim.
-- Report at least one measure of variance (e.g., std over the 11-benchmark average, or a bootstrap confidence interval) to contextualize the small-margin improvements.
-- Discuss the 1.5B BABILong exception (Table 6) in the main text — it is a notable deviation from the otherwise consistent long-context pattern and readers will notice it.
+- Add a parameter-matched RoPE baseline for EC (e.g., RoPE with increased head count or FFN width to match total parameters) to strengthen attribution. This is the single most impactful improvement the authors could make.
+- Consider an ablation comparing the −π/2 imaginary attention against a control with random fixed rotations on extra heads, to demonstrate that the specific structure matters.
+- Report standard deviations across at least 3 seeds for the main benchmark results in Tables 1-3.
+- The expectation-based analysis could be empirically validated by measuring whether the characteristic curve actually predicts trained attention patterns — this would bridge the gap between theory and practice.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors used:**
 
-- **MrRoPE** (`1J63FJYJKg.md`, avg 6.50, Oral): Stronger — unifying theoretical framework, training-free, comprehensive evaluation at 7B+ scale, large consistent gains. RoPE++ is clearly below this level.
+| Path | Paper | Avg Score | Comparison |
+|------|-------|-----------|------------|
+| `1J63FJYJKg` | MrRoPE | 6.5 (Oral) | Stronger: deeper theory, training-free, larger-scale experiments on existing LLaMA models. RoPE++ has less theoretical depth and requires training from scratch. |
+| `W8ZXfNaqku` | Frayed RoPE | 6.0 (Poster) | Comparable scope (1B-3B, geometric analysis). RoPE++ has more consistent results and cleaner method; Frayed RoPE has stronger geometric analysis. RoPE++ slightly below. |
+| `D0u0glT060` | Deconstructing Positional Info | 7.2 (Poster) | Stronger: more comprehensive theoretical analysis across all positional encodings. RoPE++ is narrower in scope. |
+| `AQo1SEElNb` | Selective RoPE | 4.5 (Poster) | RoPE++ is stronger: broader evaluation, multiple model scales, clear practical benefits. |
+| `kf2mzS6xfk` | PoPE | 4.0 (Reject) | RoPE++ is clearly stronger: standard long-context benchmarks, better theoretical grounding, larger scales. |
+| `U1xQiqTnBp` | TAPA | 4.0 (Reject) | RoPE++ has better evaluation breadth and practical utility, though TAPA has stronger formal theory. |
+| `RlPVSeKjoc` | DroPE | 3.5 (Poster) | RoPE++ has more comprehensive experiments and evaluation. |
+| `60Vj3aBnjw` | Position-Aware NTP | 3.0 (Reject) | Much weaker paper; not a close comparison. |
+| `QIIrjgUnL1` | Position-Aware Attention (EPAR) | 3.0 (Reject) | Much weaker paper; not a close comparison. |
 
-- **Frayed RoPE** (`W8ZXfNaqku.md`, avg 6.00, Poster): Comparable in spirit (RoPE modification, from-scratch training at 1B/3B, RULER evaluation). Frayed RoPE has a more developed theoretical story (geometric perspective on sink tokens) but similar experimental scale. RoPE++ has efficiency benefits Frayed RoPE lacks. Roughly comparable; RoPE++ slightly below due to the missing capacity baseline.
+RoPE++ is a solid contribution: it identifies a genuinely overlooked aspect of RoPE, proposes a clean solution, and validates it with consistent experiments across three model scales and multiple benchmarks. The theoretical motivation, while expectation-based, is clearly presented and aligns with the empirical findings. The two-configuration design (EC/EH) offers practical deployment flexibility. The main limitation is the absence of a strict parameter-matched baseline for EC, which prevents fully clean attribution of the gains to the imaginary structure specifically. This paper is clearly stronger than the rejected papers in the calibration set (PoPE, TAPA, EPAR) and comparable to accepted posters like Frayed RoPE and Selective RoPE. I do not see any fatal flaws.
 
-- **Frequency Bands in RoPE** (`PR1PPxvG9Q.md`, avg 5.20, Poster): Weaker — primarily analysis-focused, perplexity-based, less practical impact. RoPE++ is above this level.
-
-- **TAPA** (`U1xQiqTnBp.md`, avg 4.00, Reject): Weaker — limited evaluation (no RULER), questionable computational overhead, similar scale. RoPE++ is clearly above.
-
-- **DroPE** (`RlPVSeKjoc.md`, avg 3.50, Accept Poster): Weaker — simpler idea, less rigorous evaluation, less comprehensive benchmarks. RoPE++ is clearly above.
-
-The paper makes a genuine contribution with a simple, well-motivated idea that yields practical efficiency benefits and long-context improvements. The missing capacity-matched baseline is a real gap that prevents the strongest form of the central claim, but the paper has independent value through RoPE++EH's efficiency results and the theoretical analysis. Positioned between Frequency Bands (5.20) and Frayed RoPE (6.00), the paper merits a borderline-accept score reflecting both its genuine strengths and the experimental gap.
+**Originality**: The idea of re-injecting the discarded imaginary component is novel within the RoPE literature. **Importance**: Position embedding design is a central topic for long-context LLMs. **Claims supported**: Mostly yes, with the caveat about parameter matching for EC. **Soundness**: Experiments are well-designed overall, with reasonable baselines and comprehensive benchmarks. **Clarity**: Well-written and easy to follow. **Value to community**: High — the method is simple and the insight may inspire further work.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

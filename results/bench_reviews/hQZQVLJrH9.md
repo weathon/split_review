@@ -4,95 +4,91 @@ Now I have a thorough understanding of the paper and calibration anchors. Let me
 
 ## Summary
 
-This paper establishes a first-order theoretical bridge between activation steering and influence functions, proving that any steering vector corresponds to a signed re-weighting of training data (and vice versa). The framework yields practical tools: (i) an Influence-Aligned Steering (IAS) vector computable in two Jacobian-vector products, (ii) a scalar diagnostic ω (cosine of the smallest principal angle between Jacobian subspaces) that predicts when steering can fully substitute for weight-space editing, and (iii) a spectral recipe for choosing optimal steering directions. Experiments on GPT-2 Medium demonstrate IAS for detoxification, validate the first-order approximation (cosine 0.978), and confirm ω increases with layer depth.
+This paper establishes a first-order equivalence between activation steering and influence functions: any activation steering vector can be represented as a signed influence re-weighting over training data, and conversely, any influence re-weighting admits a corresponding minimum-norm steering vector (the Influence-Aligned Steering vector, or IAS). The paper introduces a geometric diagnostic ω(x)—the cosine of the smallest principal angle between two Jacobian subspaces—that bounds the irreducible error of steering and tells practitioners when steering can fully substitute for weight-space edits. Additional results include a spectral-optimality recipe for maximizing logit change under a norm budget and a generalization bound for low-rank steering. Experiments verify the first-order equivalence (cosine ≈ 0.978), validate ω's monotonic increase with layer depth, compare IAS against CAA on detoxification, and demonstrate the spectral direction on ResNet-50.
 
 ## Strengths
 
-- **Novel conceptual bridge.** The paper is, to my knowledge, the first to explicitly connect activation steering and influence functions through a shared Jacobian structure. Theorem 4.2 provides a constructive, invertible mapping between any steering vector and a signed data re-weighting — a genuinely fresh perspective that unifies two previously disconnected threads of interpretability research.
+- **Conceptual unification of two disconnected fields.** The paper bridges activation steering and influence functions under one first-order lens. While the underlying linear algebra is straightforward, the connection has not been made explicit before, and the unified framework yields productive downstream results (ω diagnostic, spectral optimality). This conceptual bridge is genuinely novel and useful to the interpretability community.
 
-- **Practical diagnostic with empirical support.** The ω metric (Theorem 5.1) gives practitioners a cheap, principled answer to "should I steer or should I retrain?" — computing it costs only two JVPs. Figure 2 validates that ω increases monotonically with layer depth on GPT-2 Medium (0.64 → 0.94), providing actionable guidance for layer selection.
+- **The ω(x) alignment diagnostic is practical and well-supported.** Theorem 5.1 gives a tight bound on steering error in terms of a single cheap-to-compute scalar. The empirical validation (Fig. 2, median ω rising from 0.64 to 0.94 across layers) confirms the theoretical prediction and provides an actionable layer-selection heuristic. This is the paper's strongest practical contribution — a principled "steer or retrain?" decision rule.
 
-- **Principled direction selection.** Theorem 5.3 replaces hand-crafted steering vectors (e.g., difference-in-means) with the top eigenvector of a Fisher-influence matrix. Figure 3 demonstrates this spectral direction lies far in the tail of a null distribution on ResNet-50 (p=0.00498), confirming its utility beyond language models.
+- **Strong first-order empirical verification.** Across 5,000 prompt–token pairs on GPT-2 Medium, the predicted IAS logit shift matches the actual shift with cosine 0.978 (Fig. 1), confirming the linear-regime theory holds well for small edits.
 
-- **First-order approximation validated.** Figure 1 reports cosine similarity of 0.978 between IAS-predicted and actual logit shifts over 5000 prompt–token pairs, confirming the linear theory holds with high fidelity in a real transformer.
+- **Generalization analysis for low-rank steering.** Theorem 6.1 bounds the Rademacher-complexity increase from rank-k IAS, showing the excess risk vanishes as width and sample size grow. This provides theoretical reassurance that low-rank steering does not catastrophically harm generalization — a practically relevant concern.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **The steer–influence equivalence is never demonstrated end-to-end.** The paper's central claim is that a steering vector can replicate the effect of an influence re-weighting and vice versa. Yet no experiment takes a computed influence update, builds the corresponding IAS vector, applies it, and verifies that the resulting model behavior matches the behavior obtained by actually implementing that influence update (e.g., via data re-weighting or fine-tuning on up-weighted examples). The detoxification experiment (Section 7.1) compares IAS against CAA — another steering method — not against any influence-based intervention. Figure 1 validates the *first-order Taylor expansion* (i.e., that the local linear approximation is accurate), which is a sanity check on the theory's assumptions, not a test of the equivalence construct itself. Without an end-to-end equivalence demonstration, the paper's headline contribution remains a formal statement whose practical significance is unverified.
+- **The steer-to-data mapping — one of the paper's three headline contributions — is never demonstrated.** The abstract and introduction prominently claim "a constructive algorithm for mapping undesired behaviors back to causal training examples" (contribution i). Corollary 1 states there exists an L1-minimal signed measure over training data. Section 4 says "see Section 7" for the practical payoff of identifying training examples. But Section 7 contains zero experiments validating this claim: no training examples are identified, no causality is verified, no connection is shown between a steering vector and specific data points. A paper whose introduction promises data provenance but whose experiments never deliver it has a significant gap between claims and evidence.
 
-- **Causal language is unwarranted and unsupported.** Corollary 1 and surrounding text (Section 4.1) claim that the measure ϱ_s isolates "the *most causal* training documents" (emphasis in paper). What the math actually proves is ℓ₁-minimality among first-order representations — i.e., ϱ_s is the sparsest signed measure *in the basis of influence vectors* that reproduces the first-order logit shift. This is a representational property, not a causal one. Influence functions for deep networks are known to be fragile (Basu et al., 2021, cited in the paper), and no experiment removes or relabels the top-weighted examples to test whether they are genuinely responsible for the steered behavior. The causal framing significantly overstates what the theory supports.
+- **Insufficient experimental scope for the claimed contributions.** Beyond the missing steer-to-data experiment, the empirical section is thin. The spectral optimality experiment (Section 7.4) compares the spectral direction only against random directions — a low bar that any top eigenvector of a PSD matrix would clear. No comparison is made against existing steering baselines (e.g., CAA's mean-difference direction, gradient-based directions) for this claim. The detoxification experiment (Section 7.1) uses only GPT-2 Medium with a single layer choice, limiting generality. For a paper proposing a "unified framework" and a "practical workflow," the experiments provide only partial validation.
 
 ### Minor
 
-- **Narrow experimental scope.** Only one model (GPT-2 Medium) and one task (toxicity reduction) are evaluated for the complete IAS pipeline. This is adequate for a theory-forward paper but insufficient to support the claimed "integrated workflow for debugging, auditing, and aligning" — a claim that implies broader applicability. Adding a second model family (e.g., Llama) or a second behavioral axis (e.g., bias, factuality) would substantially strengthen the practical contribution.
+- **Core equivalence rests on straightforward linear algebra.** The steer–influence duality follows directly from the chain-rule factorization: any Δh satisfying J_{h→y}Δh = J_{ω→y}Δω reproduces the logit shift of a parameter perturbation, and the minimum-norm solution is the Moore–Penrose pseudoinverse. This does not diminish the conceptual value of the bridge, but it means the paper's theoretical depth is modest — the subsequent bounds (principal angles, spectral optimality) are standard techniques applied to the resulting Jacobian matrices. The paper would benefit from acknowledging this simplicity more directly rather than presenting the equivalence as a deep theoretical result.
 
-- **No comparison with parameter-space editing methods.** The ω diagnostic is presented as a decision rule: when ω is small, practitioners should switch from steering to weight-space editing. Yet the paper never demonstrates this decision rule in practice — e.g., showing that on a prompt where ω is low, steering fails while a parameter-space method (ROME, MEMIT, or even LoRA fine-tuning) succeeds. This limits the practical value of what is otherwise the paper's most actionable contribution.
+- **IAS underperforms CAA on the only direct comparison.** In Table 1, CAA achieves both lower toxicity (0.0150 vs. 0.0164) and lower perplexity (13,291 vs. 13,701) than IAS on GPT-2 Medium detoxification. The paper does not claim IAS is a superior steering method, but the result is presented without discussion, leaving the reader to wonder whether the theoretically principled IAS offers any practical advantage over a simpler heuristic. A brief analysis would strengthen the paper.
 
-- **The ℓ₁-minimality interpretation is weaker than presented.** Corollary 1 claims ϱ_s uses the "fewest training examples" to reproduce a steering effect. This interpretation treats influence vectors as if they were an orthogonal dictionary, which they are not. The ℓ₁-minimal solution in a correlated basis may distribute weight across many nearly-collinear examples rather than isolating a few genuinely distinct ones. The paper should acknowledge this limitation.
+- **Scalability of the steer-to-data mapping is unaddressed.** Corollary 1 constructs an L1-minimal measure over the training set, which requires solving a linear program in |Z| variables — computationally infeasible at scale. The paper provides no approximation, heuristic, or small-scale demonstration. Without a feasible algorithm, the steer-to-data contribution remains purely conceptual.
+
+- **Layer and hyperparameter choices lack sensitivity analysis.** Layer ℓ=8 for GPT-2 Medium is chosen via a heuristic (ω ≥ 0.7), and no sensitivity analysis is provided for the damping parameter φ. The ω heuristic itself is reasonable, but the paper would benefit from showing that results are not brittle to these choices.
 
 ### Trivial
 
-- The running toy example referenced in Section 2 is deferred to an appendix (Appendix C), removing helpful intuition from the main text.
+- The affine independence assumption needed for uniqueness of the L1-minimal measure in Corollary 1 is stated but its plausibility in practice is not discussed.
 
 ## Nice-to-Haves
 
-- A demonstration of the full workflow: (i) use IAS to steer, (ii) compute ϱ_s to identify candidate training examples, (iii) remove/relabel those examples and show the behavior changes — would dramatically strengthen the paper's practical narrative.
-- Sensitivity analysis of ϱ_s to Hessian damping and Gauss–Newton approximation choices, since influence functions for deep networks are sensitive to these parameters.
-- Qualitative inspection of top-weighted training examples for a known steering vector to assess whether they are plausibly related to the steered behavior.
+- A small-scale demonstration of the steer-to-data mapping (e.g., on a curated subset of 100–1,000 training examples) would go a long way toward validating the paper's central claim, even if the full-scale version remains computationally challenging.
+- A comparison of the spectral direction against the mean-difference direction used in CAA (or a simple gradient-based direction) would strengthen the spectral optimality claim.
+- An experiment following the claimed diagnostic workflow — use ω to decide whether to steer or edit weights, and show this decision improves outcomes — would demonstrate the practical value of the framework end-to-end.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+*These points were flagged for removal. Treat them with caution.*
 
-1. **"The core theoretical contribution is a repackaging of elementary linear algebra."** Removed. While the mathematical tools (pseudoinverses, principal angles, Rayleigh quotients) are indeed standard, the *connection* between activation steering and influence functions is genuinely novel — no prior work has established this duality. The value is in the insight and its practical consequences (ω diagnostic, spectral recipe), not in inventing new linear algebra. This is comparable to how the "Belief Dynamics" paper (score 4.50) used Bayesian updating — a standard tool — to connect ICL and steering in a novel way.
+- **"Triviality of the core equivalence" as a fatal flaw.** The harsh critic argued the equivalence is trivial linear algebra and thus not a novel contribution. While the math is indeed straightforward, the conceptual bridge between two disconnected research areas is genuinely novel, and the downstream diagnostic/optimization tools are not obvious consequences. Removed as a fatal criticism; retained as a minor observation.
 
-2. **"Theorem 4.2 proof sketch is hand-wavy; ℓ₁-minimality ignores that influence vectors are not orthogonal."** Partially removed — the "hand-wavy" characterization is a presentation nitpick. The ℓ₁-minimality concern is retained as a minor weakness above, since the practical interpretation is overstated.
+- **"Experiments do not support claimed contributions — the only direct comparison is negative."** Partially removed. The claim that experiments provide *no* evidence is wrong: the first-order equivalence verification (cosine 0.978) and the layer-depth alignment analysis are positive, validating evidence. The remaining valid portion (undemonstrated steer-to-data mapping, thin spectral comparison) is retained in the Major and Minor sections.
 
-3. **"The Rademacher-complexity bound is imported from Pinto et al. with minimal modification."** Removed. Combining existing bounds to characterize a new intervention is standard and valid theoretical practice. The bound is correctly cited and the contribution is the application to IAS, not a new Rademacher bound.
+- **"Key proofs are sketchy / rely on unjustified assumptions."** The harsh critic claimed affine independence is unverified. The paper states this as an explicit assumption for the L1-minimality uniqueness — this is standard practice for theoretical statements. The assumption is acknowledged. Removed as a substantive criticism; retained as a trivial note.
 
-4. **"No ablations on steering magnitude."** Removed as a separate point. The detoxification experiment compares at matched ℓ₂ magnitude, and steering magnitude is not central to the theoretical claims.
+- **"The generalization bound adds little beyond prior art."** The paper explicitly credits Pinto et al. and the contribution is clearly scoped as an application of their result to the IAS setting. This is not claimed as a major novel contribution. Removed as a criticism.
 
-5. **"Missing experiments on causal data attribution test, sensitivity of signed measure, top-weighted training examples."** These are addressed in Nice-to-Haves rather than Weaknesses, since they concern the practical workflow claim rather than the core theoretical contribution.
-
-6. **Formatting/parser artifacts (garbled symbols, broken text).** Removed — these are parser artifacts, not author errors. The original submission does not have these issues.
-
-7. **"Several symbols appear without clear definition."** Removed. While true that the parser output is garbled, the original submission presumably defines symbols properly. The core notation (Jacobians, Hessian, influence function) is standard and used consistently.
-
-8. **"The paper never discusses the known fragility of deep-network Hessian approximations."** Removed. The paper explicitly mentions using a damped inverse with Tikhonov regularization (Section 2: "We use a damped inverse (H_ω + φI)^(-1) for stability") and acknowledges the Gauss–Newton approximation. The fragility concern is partially addressed.
+- **"The No-Free-Lunch result is a repackaging of the same bound."** Theorem 6.2 is indeed a corollary of Theorem 5.1, which the paper presents transparently. This is not a weakness — it shows the same geometric quantity has both positive (alignment bound) and negative (impossibility) implications. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most novel insight emerging from this work is that a single geometric quantity — the smallest principal angle cosine ω(x) between the activation–logit and parameter–logit Jacobian subspaces — serves as a unified certificate for both the fidelity of steering (when ω is large) and its impossibility (when ω is small). This collapses what previously required trial-and-error into one cheap computation, and the empirical validation that ω increases monotonically with layer depth provides an immediately actionable heuristic for practitioners. This diagnostic perspective — using subspace geometry to decide between inference-time and weight-space interventions — is not present in prior work and represents a genuine conceptual contribution beyond the linear-algebraic equivalence itself.
 
 ## Suggestions
 
-- Add an experiment that closes the loop: compute an influence update for a small set of up-weighted toxic prompts, construct the IAS vector, and show that applying IAS produces logit shifts matching the influence update (beyond the first-order sanity check of Fig. 1). Even on a small scale, this would substantiate the paper's central claim.
-- Tone down the causal language in Corollary 1 and Section 4.1. Replace "most causal training documents" with "training documents whose influence vectors best explain the steering direction in the first-order sense," and acknowledge that this is correlational rather than interventional.
-- Test ω as a decision rule on at least one example where ω is low — show that steering indeed fails while a simple parameter-space intervention (even LoRA on a small subset) succeeds.
+- **Demonstrate the steer-to-data mapping, even at small scale.** This is the single most important improvement. Take a known steering vector (e.g., the toxicity-reducing vector), compute the top-weighted training examples via the L1-minimal measure construction on a tractable subset, and verify that those examples are semantically related to toxicity. Without this, the paper's most distinctive claimed contribution remains unvalidated.
+
+- **Add a spectral-direction baseline comparison.** Compare the spectral direction from Theorem 5.3 against CAA's mean-difference direction and a naive gradient-based direction. The current comparison against random directions is insufficient to demonstrate practical value.
+
+- **Discuss the CAA vs. IAS result in Table 1.** Acknowledge that IAS is not claimed to outperform existing steering methods, and explain what the reader should take away from the comparison (e.g., that IAS achieves comparable performance while providing theoretical guarantees that CAA lacks).
+
+- **Provide a sensitivity analysis for φ and layer choice.** Even a brief ablation in an appendix would strengthen confidence in the results.
 
 ## Score and Decision
 
-### Calibration anchors used:
+### Anchor comparison
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `EDPvNhTOLK.md` (Directional Influence Function) | 6.00 | More technically sophisticated theory (VI-based), similar experimental limitations (MNIST + regression). This paper's theory is less deep but more directly practical. |
-| `wMtS3brldm.md` (Dynamically Scaled Activation Steering) | 5.00 | Better experiments (2 models, Pareto-front analysis), method-focused rather than theory. This paper has novel theory but weaker empirical validation. |
-| `guSVafqhrB.md` (Fine-Grained Activation Steering) | 4.67 (Accepted) | More comprehensive experiments across models/tasks, empirical contribution. This paper's theory is its differentiator. |
-| `XyQ5ui62mm.md` (Belief Dynamics) | 4.50 | Most similar: theoretical bridge between two control paradigms, 5 tasks, 3 models. Comparable novelty but this paper has thinner experiments. |
-| `ETT804iVAt.md` (Momentum Steering) | 4.67 | Practical method with moderate novelty. This paper has stronger theoretical contribution. |
-| `I3IeAZvxB4.md` (Painless Activation Steering) | 3.33 | Purely empirical, limited novelty. This paper clearly surpasses it on theoretical contribution. |
-| `MTlBNELM9S.md` (GLOSE) | 2.00 | Poorly motivated, multiple fundamental issues. This paper is substantially stronger. |
+| Path | Avg Human Score | Comparison to paper under review |
+|------|-----------------|----------------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/qQvaZ9yc9h.md` | 2.00 | Much weaker — scattered observations, no actionable items, insufficient evidence. Our paper has clear theoretical contributions and purposeful experiments. |
+| `/home/wg25r/review_agent/human_reviews_2026/I3IeAZvxB4.md` | 3.33 | Weaker — automated AS method with limited scope and thin evaluation. Our paper has stronger theoretical grounding. |
+| `/home/wg25r/review_agent/human_reviews_2026/XyQ5ui62mm.md` | 4.50 | Most comparable — unification paper (Bayesian framework for ICL + steering), 5-task empirical validation, rejected. Our paper has broader theoretical scope (any model) but weaker empirical execution and one undemonstrated headline claim. |
+| `/home/wg25r/review_agent/human_reviews_2026/dGQubVJQx6.md` | 5.00 | Slightly stronger — identifiability theory for SAE concepts, both theoretical and empirical contributions. Our paper's empirical gaps place it below this anchor. |
+| `/home/wg25r/review_agent/human_reviews_2026/JenMBia97B.md` | 5.50 | Stronger — more comprehensive experiments, accepted-contribution level. Our paper doesn't reach this empirical bar. |
+| `/home/wg25r/review_agent/human_reviews_2026/YEBpZVm70i.md` | 5.50 | Stronger — substantial methodological contribution (BIF) with strong scaling results, accepted poster. |
+| `/home/wg25r/review_agent/human_reviews_2026/EDPvNhTOLK.md` | 6.00 | Stronger — novel VI formulation for constrained IF, more substantial mathematical contribution. |
+| `/home/wg25r/review_agent/human_reviews_2026/ZecACxqqKo.md` | 3.60 | Weaker — applied IF to SAM, limited novelty. Our paper has a more original conceptual bridge. |
+| `/home/wg25r/review_agent/human_reviews_2026/8epkNiuAQC.md` | 4.67 | Comparable — stagewise data attribution with theory + experiments. Similar balance of theory and evidence; our paper has a larger gap between claims and experiments. |
 
-**Assessment:** This paper makes a genuinely novel theoretical connection between activation steering and influence functions, provides concrete practical tools (ω diagnostic, IAS vector, spectral recipe), and validates the first-order assumptions empirically. However, the headline equivalence claim lacks end-to-end empirical validation, the causal language is oversold, and experiments are narrow for a paper that claims a practical workflow. These issues place it below the stronger theory papers (DIF at 6.00) and the stronger empirical papers (DSAS at 5.00, Fine-Grained AS at 4.67), but above purely empirical papers with limited novelty (PAS at 3.33). The paper is most comparable to "Belief Dynamics" (4.50), which also proposed a theoretical bridge with limited-to-moderate experiments, but the current paper's weaknesses (unvalidated equivalence, oversold causal claims) pull it slightly below.
-
-**Score:** 4.5 — Weak Reject. The theoretical contribution is genuine and the tools are useful, but the gap between what the paper claims and what it empirically demonstrates is too large for acceptance in its current form. The paper would need at minimum a direct equivalence experiment and toned-down causal language to become a solid accept.
+The paper under review sits closest to the XyQ5ui62mm (4.50) and 8epkNiuAQC (4.67) anchors. It has a genuinely novel conceptual bridge and a practical diagnostic tool, but one of its three headline contributions is entirely undemonstrated and the experimental scope is limited. The ω(x) diagnostic and first-order equivalence verification are real strengths, and a revised version that demonstrates the steer-to-data mapping could merit a higher score. In its current form, the gap between claims and evidence is too large for acceptance.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

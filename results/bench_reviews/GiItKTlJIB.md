@@ -1,82 +1,111 @@
-Now I have all the information needed to produce the final consolidated review. Let me write it.
+Now I have a thorough understanding of both the paper and the calibration anchors. Let me write the consolidated review.
 
 ---
 
 ## Summary
-This paper introduces a deletion-based probing framework to evaluate whether LLMs genuinely depend on their chain-of-thought (CoT) traces when solving physics problems. The authors intercept CoT mid-generation, delete tokens using three strategies (from-the-end, random, physics-aware), and measure downstream effects on accuracy, answer length, and information overlap. Across three open-source models (Magistral, Phi-4, Qwen-A3B) and three physics benchmarks, they find that accuracy remains stable until ~40–60% of CoT tokens are removed, while final answer length consistently increases—a compensatory behavior they term "cramming." Overlap metrics suggest deleted content is partially reconstructed, but often only at a surface level, pointing to a gap between CoT as written and the model's actual reasoning.
+
+This paper investigates how faithfully LLMs depend on chain-of-thought (CoT) scratchpads during physics problem solving. The authors introduce a deletion-based probing framework: mid-generation, they intercept CoT traces and remove tokens before allowing the model to decode its final answer, then measure effects on answer quality, length, and information overlap. Across three models (Phi-4, Qwen-A3B, Magistral) and three physics benchmarks, they find that accuracy remains stable under 40–60% deletion before collapsing, that models exhibit "cramming" (producing longer final answers to compensate), and that deleted content often reappears in final outputs but with inconsistent patterns suggesting opportunistic rather than faithful reconstruction.
 
 ## Strengths
-- **Systematic multi-strategy deletion framework**: The paper introduces three distinct deletion strategies (from-the-end, random, physics-aware) that test positional, distributed, and domain-critical reliance on CoT tokens. This design enables differentiated analysis of how models depend on different portions of their reasoning traces (§3.2, Figures 6, 11, 14).
 
-- **Robust empirical identification of "cramming" behavior**: Across all models and benchmarks, final answer length consistently increases with deletion fraction while accuracy holds stable, producing a characteristic X-shaped pattern. This compensatory behavior is measured via an objective metric (character count) and is replicable across all three deletion strategies, providing credible evidence for the cramming phenomenon (§4.1, Figures 5, 6, 10, 11, 13, 14).
+- **Creative deletion-based probing methodology**: The core idea—intercepting CoT mid-generation and systematically deleting tokens to measure downstream effects—is a genuinely novel and causally motivated approach to probing reasoning dependence. This goes beyond correlational analyses common in prior faithfulness work and is applied across three distinct deletion strategies (end, random, physics-aware), providing convergent evidence.
 
-- **Multi-model, multi-benchmark evaluation**: Findings are validated on three open-source reasoning models (Phi-4, Qwen-A3B, Magistral) and three physics benchmarks of varying difficulty (UG Physics, PhyBench, PhysReason), strengthening confidence that the observed patterns are not model- or dataset-specific (§2.1–2.2, all result figures).
+- **Robust characterization of "cramming"**: The finding that models compensate for deleted reasoning by producing longer final answers is consistently demonstrated across all three models, three benchmarks, and three deletion strategies (Figures 4–6, 11, 14). The X-shaped pattern—where answer length increases as reasoning is removed—is a clear, objective behavioral signature independent of any LLM judge, measured purely by character counts.
 
-- **Calibration of experimental design**: The paper calibrates both prompting style (Full vs. Less Reasoning) to establish performance baselines and sample sizes needed for stable estimates (§3.1, Figures 2, 8), adding rigor to the experimental design.
+- **Multi-model, multi-benchmark, multi-strategy design**: Evaluating three open-source models (Phi-4 14B, Qwen-A3B 30.5B, Magistral 24B) across three physics benchmarks of varying difficulty (UG Physics, PhysReason, PhyBench) with three deletion strategies provides unusually broad empirical coverage for a faithfulness study, strengthening the generalizability of the observed patterns.
 
-- **Physics as a structured testbed for reasoning evaluation**: The paper makes a reasonable case that physics—with its equations, units, and numerical precision—provides a stringent and revealing domain for probing CoT faithfulness, more so than open-ended reasoning tasks where correctness is harder to define (§1).
+- **Physics-aware deletion reveals domain sensitivity**: The finding that removing annotated physics-specific tokens (equations, units) degrades scores more than removing non-annotated content (Figure 3) validates the paper's motivation that physics provides a structured testbed for faithfulness analysis, and that domain-relevant reasoning elements matter disproportionately.
+
+- **Information-overlap analysis with quantified trends**: The Jaccard/Manhattan overlap measurement across deletion sweeps (Figure 7) provides quantitative evidence for the recovery patterns, with standard error regions shown. The differential patterns across strategies (smooth under end deletion, delayed under random, noisy under physics-aware) are informative.
+
+- **Addresses an important and underexplored question**: The faithfulness of CoT in scientific/structured domains is genuinely underexplored compared to general math or commonsense settings, and the paper makes a credible case for why physics serves as a revealing testbed.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **LLM-judge evaluation metric conflates correctness with style**: All accuracy scores are produced by Claude-4 Sonnet judging solutions on a 0–1 scale that combines correctness, derivation accuracy, logic, formatting, and clarity (§2.4). Because physics problems often require precise numerical answers, a composite score that mingles factual correctness with stylistic factors is not a reliable measure of whether the model got the right answer. The paper provides no calibration against exact-answer matching (e.g., numerical tolerance, symbolic comparison) or human grading. Since the core claim about accuracy stability under deletion depends on this metric, the evidential basis is weaker than it appears. The answer-length measurements (objective) partially compensate, but the accuracy trends themselves should be interpreted with caution.
 
-- **Missing zero-CoT baseline in deletion experiments**: The deletion sweeps lack a condition where the model answers without any CoT at all (e.g., a direct-answer prompt). The observation that accuracy is stable until 40–60% deletion could simply mean the remaining CoT tokens plus the problem statement are sufficient, or that the model could have answered correctly from the question alone. The prompting-style comparison in §3.1 (Full vs. Less Reasoning) is a related but distinct comparison; it does not establish how the model performs with zero reasoning steps. Without this baseline, the interpretation of deletion robustness as evidence of CoT redundancy is incomplete.
+- **LLM-as-judge metric is unvalidated and conflates correctness with style**: The paper relies on Claude-4 Sonnet to score solutions on a 0–1 scale encompassing "correctness, derivation accuracy, logic, formatting, and clarity" (Section 2.4). No calibration against human expert ratings, exact-match accuracy, or ground-truth answer comparisons is provided. Including formatting and clarity in the rubric means the judge can systematically favor verbose, well-structured outputs regardless of factual correctness. This directly affects the baseline prompting comparison (Figure 2), where the "Full Reasoning" condition produces more elaborate outputs that the judge may reward stylistically. More subtly, since deletion induces cramming (longer final answers), the judge's formatting/clarity criteria could partially inflate accuracy scores under deletion, making the observed stability at 40–60% deletion less informative about actual physics correctness. The paper does use objective metrics (answer length, token overlap) that partially mitigate this concern, and the fact that scores *do* eventually drop under heavy deletion suggests the judge is at least partially tracking correctness. Nevertheless, the absence of any validation of the primary accuracy metric is a significant gap that weakens confidence in the quantitative thresholds reported.
 
 ### Minor
-- **Information-overlap analysis not controlled for answer length**: As deletion increases, final answers grow longer (§4.1), and longer answers naturally share more tokens with any reference text. The Jaccard and Manhattan distance metrics (§4.2) do not include length-normalized baselines or chance-level comparisons. The increase in overlap with deletion fraction may therefore be partially artefactual, weakening the claim that deleted content is genuinely reconstructed. The authors could address this by comparing against length-matched random baselines.
 
-- **Physics-aware tagging lacks validation**: The physics-aware deletion strategy relies on Claude-4 Sonnet to identify physics-specific spans (equations, units, constants). No validation of tagging accuracy against human annotators or programmatic extractors is reported (§3.2). Errors in span identification would distort the deletion sweeps and the finding that annotated deletions are most detrimental (Figure 3).
+- **Bag-of-words overlap metrics cannot capture equation equivalence**: The Jaccard similarity and Manhattan distance used in the faithfulness analysis (Section 4.2, Equation 1–2) operate on token-level sets and frequency vectors. These metrics would treat "F = ma" and "F = m * a" as different, and cannot recognize that rearranged or algebraically transformed equations represent the same physics content. The paper itself claims that physics provides "clear structure—equations, units, and terminology" that "enables precise quantification," yet the metrics are blind to that structure. This limits the informativeness of the overlap trends in Figure 7. That said, the paper's claim is about *surface-level* recovery, for which token-level metrics are not entirely inappropriate—but the tension between the domain's structure and the metrics used should be acknowledged more explicitly.
 
-- **Overclaiming the faithfulness interpretation**: The paper sometimes equates the *necessity* of CoT tokens (their removability without harming accuracy) with the *faithfulness* of the reasoning trace (whether the scratchpad reflects internal computation). Deletion experiments demonstrate redundancy, not unfaithfulness per se. The paper does partially acknowledge this in §4.3 ("CoT scratchpads are simultaneously informative and redundant"), but the abstract and introduction frame the findings as exposing a "faithfulness gap" more strongly than the evidence supports.
+- **Deletion strategies cannot fully distinguish redundancy from bypassing**: Removing tokens from the end, at random, or via physics-aware annotation removes large fractions of the scratchpad but does not isolate truly critical reasoning steps from verbose restatements. The physics-aware deletion partially addresses this by targeting equations and units, and the paper acknowledges the limitation (Section 4.4). However, the strong claim that models "bypass" CoT somewhat overinterprets the data, since the observed stability could also reflect that sufficient reasoning remains in the undeleted portions. The convergence of patterns across three strategies is suggestive but does not fully close this gap.
 
 ### Trivial
-- Deletion sweep figures (Figures 6, 11, 14) show average score and answer length without error bars or variance estimates, making it difficult to assess whether observed differences are statistically meaningful.
-- The calibration study (§3.1, Figure 8) uses only 50 UG-Physics questions with 5 re-runs; generalizability of this calibration to other datasets or the full deletion sweeps is not demonstrated.
+
+- **Some figures lack explicit error bars or variance estimates**: While Figure 7 includes shaded standard error regions, the deletion-sweep curves in Figures 4–6, 9–10, and 12–14 do not appear to include confidence intervals or variance information across the problems underlying each data point. The calibration study (50 questions, 5 re-runs) is modest for establishing stable estimates across the full sweep range and all benchmark/model combinations. This makes it difficult to assess whether the reported thresholds (e.g., 40%, 60%) are robust or subject to sampling noise.
 
 ## Nice-to-Haves
-- A direct-answer (zero-CoT) baseline in the deletion experiments would substantially strengthen the interpretation of results.
-- Validating the LLM judge against a programmatic answer checker (numerical tolerance, symbolic matching) would increase confidence in the accuracy trends.
-- Including length-normalized baselines for the overlap analysis would make the reconstruction claim more convincing.
-- Reporting agreement between Claude-based physics-span tagging and a human annotator would strengthen the physics-aware deletion results.
+
+- **Qualitative examples of crammed outputs**: Showing side-by-side examples of original CoT, post-deletion CoT, and the resulting final answer (annotated to show what was reconstructed vs. lost) would make the cramming phenomenon concrete and let readers assess fidelity directly. The current paper relies entirely on quantitative character counts and overlap metrics.
+
+- **Validation of the LLM judge against human expert scores or exact-match accuracy on a subset of problems** would substantially strengthen confidence in all reported accuracy trends.
+
+- **A human-annotated subset identifying critical vs. non-critical CoT spans** would enable a more targeted deletion experiment that directly tests whether removing only essential reasoning steps causes performance collapse while removing filler does not—this would directly address the redundancy-vs.-bypassing question.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-- **PhyBench characterization concern** (from Harsh Critic, point 1): The Harsh Critic claimed PhyBench is a benchmark for text-to-image models, not LLM reasoning, and that the paper's description is factually incorrect. Per the hard rules, I cannot question the existence or applicability of a cited benchmark without external verification. The paper cites Meng et al. (2024) for PhyBench and describes it as a physics problem-solving benchmark; any discrepancy between the reference title and the paper's usage cannot be adjudicated from the paper text alone and reflects a potential reviewer knowledge gap. If the AC has independent knowledge about PhyBench's suitability, they may wish to verify this point.
+- **"The LLM-as-judge metric is unvalidated and likely biased, rendering all accuracy-based conclusions unsupported"** — partially removed. The concern about lack of validation is real and kept as a Major weakness. However, the claim that this renders *all* accuracy-based conclusions unsupported is too strong, since the paper also reports objective metrics (answer length, overlap) and the judge does show sensitivity to deletion (scores drop under heavy deletion). The paper's core observations about cramming and reconstruction patterns do not solely rest on the judge.
 
-- **"No error bars"** complaint escalated to fatal/major: This is already captured under Trivial; it does not threaten core claims.
+- **"The deletion protocols do not distinguish redundancy from bypassing, and therefore cannot support claims about CoT dependence"** — weakened and moved to Minor. The paper uses three distinct strategies and the physics-aware deletion targets domain-relevant content specifically. The paper also explicitly acknowledges the limitation. The concern is retained but at reduced severity.
 
-- **Criticism that the approach is not novel** (Harsh Critic, Section-by-Section Notes): The paper explicitly positions deletion-based probing as an extension of prior work on CoT reliance (Turpin et al., Lanham et al.) applied to a new domain (physics). The novelty claim is appropriately scoped to the application domain and the three-strategy deletion design.
+- **"The experimental design lacks essential statistical reporting and is based on a tiny calibration set"** — moved to Trivial. The paper does report standard errors in Figure 7 and includes a calibration study (albeit modest). The absence of error bars in some figures is a presentation issue, not a fatal flaw.
+
+- **"The prompting-style calibration... the judge metric will naturally reward the more elaborate Full Reasoning outputs, so the observed performance gap is confounded"** — folded into the Major weakness about the unvalidated judge rather than kept as a separate point.
+
+- **"The cramming interpretation is based solely on final-answer length, without any qualitative analysis"** — moved to Nice-to-Haves. Quantitative length measurements are a valid way to demonstrate cramming; qualitative examples would strengthen but are not required.
+
+- **"Missing experiments: Validation of judge metric, controlled deletion of essential vs. non-essential steps, qualitative analysis"** — these are suggestions, moved to Nice-to-Haves.
 
 ## Novel Insights
-The most genuinely novel observation from this work is the consistent "cramming" pattern across deletion strategies: models increase their final answer length in proportion to how much CoT is removed, while accuracy remains stable until a critical deletion threshold. This suggests that LLMs possess a compensatory mechanism—likely drawing on internalized knowledge—that allows them to bypass or reconstruct missing reasoning steps. The finding that this behavior is strategy-dependent (end deletion yields smooth cramming, random deletion shows delayed cramming, physics-aware deletion produces sharp late-stage cramming) provides nuanced evidence about *how* models encode and recover different types of reasoning content. This goes beyond prior work that primarily documented CoT unfaithfulness in simpler settings.
+
+None beyond the paper's own contributions. The reviews converged on recognizing the deletion methodology as a creative contribution and the cramming phenomenon as an interesting empirical finding, while identifying the unvalidated LLM judge as the primary methodological gap.
 
 ## Suggestions
-- Replace or supplement the LLM judge with an automated answer extraction + comparison pipeline (e.g., extract final numerical answer, compare with tolerance). This would provide a more trustworthy accuracy signal and is feasible for physics problems with well-defined answers.
-- Add a "no CoT" / direct-answer condition to the deletion sweeps. This is a relatively low-cost experiment that would greatly improve interpretability.
-- For the overlap analysis, compute a length-matched chance baseline (e.g., random text with same token count as the final answer, or shuffle-based baseline) and report whether observed overlap exceeds chance.
-- Show concrete qualitative examples of cramming vs. faithful reconstruction (side-by-side snippets) to ground the claims in observable behavior beyond aggregate metrics.
+
+- Add a validation study correlating Claude-4 Sonnet scores with human expert ratings or exact-match accuracy on a subset of 50–100 problems. Report correlation coefficients and agreement rates. If correlation is high, the concern is resolved; if not, consider using a pure correctness metric (e.g., exact match or unit-aware comparison) for the primary accuracy results and relegating the judge to supplementary analysis.
+
+- Acknowledge the tension between using surface-level overlap metrics and the structured nature of physics more explicitly in Section 4.2. Consider adding a small experiment using equation-aware matching (e.g., symbolic normalization) to complement the BoW metrics.
+
+- Add error bars or confidence intervals to the deletion-sweep figures (at minimum for the key Figures 4 and 6), and report the number of distinct problems underlying each sweep point.
+
+- Include 2–3 annotated qualitative examples showing cramming in action (original CoT, after deletion, final answer with reconstructed content highlighted).
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Anchor Comparison
 
-| Anchor Paper | Path | Avg Score | Comparison |
-|---|---|---|---|
-| FaithCoT-Bench | lN3yKqqzF1.md | 6.50 | More rigorous: human-annotated benchmark, high inter-annotator agreement, systematic evaluation of 11 methods. Current paper is less methodologically mature. |
-| RFEval | 2Gc8aj0afg.md | 4.50 (Accept Poster) | Similar topic (reasoning faithfulness) with a more formal framework and larger scale (7,186 instances). Current paper has comparably interesting findings but weaker evaluation rigor. |
-| CoT In The Wild | emjPKK11Oo.md | 4.50 (Reject) | Similar level of contribution: identifies interesting phenomenon but has methodological gaps. Comparable. |
-| Breaking the Chain | yfqHr7l2tG.md | 4.50 (Reject) | Causal intervention protocol with similar rigor level. Comparable. |
-| Post-Hoc Reasoning | UMUYpeXtJQ.md | 4.50 (Reject) | Probing/steering approach is mechanistically deeper but narrower in model coverage. Comparable. |
-| CoT Inversion | bpmQnmnvp1.md | 4.00 (Withdrawn/Reject) | Current paper has stronger empirical basis and clearer findings. |
-| Chain of Time | f6ugrBWs3K.md | 3.00 (Reject) | Current paper is clearly stronger: more models, systematic methodology, objective metrics. |
-| VFaith | lDz41YfJVy.md | 3.00 (Withdrawn/Reject) | Current paper has stronger methodology and clearer contributions. |
+| Path | Paper | Avg Score | Comparison to paper under review |
+|------|-------|-----------|----------------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/lN3yKqqzF1.md` | FaithCoT-Bench | 6.50 | Stronger: human-annotated benchmark with κ=0.81–0.97, 11 detection methods evaluated. Our paper has a more creative probing methodology but weaker validation. |
+| `/home/wg25r/review_agent/human_reviews_2026/4PZMeopXzP.md` | PRISM-Physics | 5.50 | Comparable: creative process-level evaluation for physics, but relies on LLM-based extraction and has scalability concerns. Similar blend of novelty and validation gaps. |
+| `/home/wg25r/review_agent/human_reviews_2026/yfqHr7l2tG.md` | Breaking the Chain | 4.50 | Stronger than this paper: our intervention (deletion) is cleaner and less prone to creating contradictions than editing intermediate structures. Broader model/benchmark coverage. |
+| `/home/wg25r/review_agent/human_reviews_2026/emjPKK11Oo.md` | CoT In The Wild | 4.50 | Stronger: our paper is more comprehensive (3 benchmarks, 3 models, 3 strategies vs. focused behavioral study) and provides objective metrics alongside judge scores. |
+| `/home/wg25r/review_agent/human_reviews_2026/UMUYpeXtJQ.md` | Post-Hoc Reasoning | 4.50 | Stronger: our paper has broader empirical coverage and multiple measurement axes. The Post-Hoc paper has a more mechanistic approach but narrower scope. |
+| `/home/wg25r/review_agent/human_reviews_2026/SLlNqU2Syl.md` | On the Role of Reasoning Traces | 2.50 | Significantly stronger: our paper has a clearly defined intervention methodology with convergent evidence across strategies, whereas this paper relies on injected reasoning fragments into a private think space. |
+| `/home/wg25r/review_agent/human_reviews_2026/pY7NPetIsZ.md` | Is It Necessary to Inject Causality into CoT | 3.00 | Significantly stronger: our paper provides systematic empirical evidence rather than primarily formal modeling. |
+| `/home/wg25r/review_agent/human_reviews_2026/2Gc8aj0afg.md` | RFEval | 4.50 | Comparable in topic but our methodology is more causally direct (deletion interventions vs. counterfactual evaluation). |
 
-The paper under review is most comparable to the cluster of CoT faithfulness papers at ~4.5 (RFEval, CoT In The Wild, Breaking the Chain, Post-Hoc Reasoning). It has genuine empirical contributions (the cramming phenomenon, multi-strategy deletion, overlap analysis) but its core accuracy claims are weakened by a composite LLM-judge metric and a missing zero-CoT baseline. These are addressable gaps but not trivial to fix in a rebuttal alone. The paper is neither as rigorous as FaithCoT-Bench (6.50) nor as limited as the <4.0 papers. I place it at 4.0—slightly below the 4.5 cluster due to the evaluation metric concern being more consequential for the paper's specific claims (physics answer correctness depends on precise evaluation more than, e.g., stance consistency does).
+The paper sits clearly above the 4.50-tier papers (which tend to have narrower scope, less convergent evidence, or more contested methodologies) and is comparable to PRISM-Physics at 5.50. It falls short of FaithCoT-Bench at 6.50 due to weaker validation of its primary evaluation metric. The unvalidated LLM judge is the main factor preventing a higher score, but the paper's creative methodology, objective measurements, and consistent findings across models and benchmarks justify acceptance as a poster.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Originality**: The deletion-based probing framework is a genuinely novel methodology for studying CoT faithfulness, with a clean causal motivation. The cramming phenomenon is a new and interesting empirical finding.
+
+**Importance**: The question of whether CoT is faithfully used in scientific domains is important for AI-for-Science, and the paper makes a credible case for why current accuracy-based evaluation is insufficient.
+
+**Claims supported**: The cramming finding is well-supported by objective length measurements. The faithfulness/reconstruction claims are partially supported but weakened by the BoW metric limitations and unvalidated judge. The core empirical patterns are consistent across models and benchmarks.
+
+**Soundness**: The experimental design is generally sound, with multi-model, multi-benchmark, and multi-strategy coverage. The main soundness concern is the unvalidated judge metric, which affects confidence in the accuracy thresholds but does not fully undermine the paper's objective measurements.
+
+**Clarity**: The paper is well-structured and the figures effectively communicate the main patterns. The methodology is clearly described.
+
+**Value to community**: The deletion framework could inspire follow-up work on probing reasoning dependence, and the findings about cramming and opportunistic recovery contribute to the growing literature on CoT faithfulness limitations.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

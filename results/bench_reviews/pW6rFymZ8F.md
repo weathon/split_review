@@ -1,109 +1,118 @@
-Now I have sufficient context. Let me compile the final review.
+Now I have a thorough understanding of the paper. Let me compile my final review.
 
 ---
 
 ## Summary
 
-EmbodiedMAE proposes a multi-modal masked autoencoder that jointly learns from RGB, depth, and point clouds for robot manipulation, pre-trained on DROID-3D — a dataset constructed by the authors that enhances the original DROID recordings with high-quality metric depth and point clouds via ZED SDK processing across 76K trajectories. The model is evaluated as a frozen visual encoder feeding into an RDT policy across 70 simulation tasks (LIBERO, MetaWorld) and 20 real-world tasks on two robot platforms (SO100, xArm), consistently outperforming general-purpose vision foundation models (DINOv2, SigLIP, R3M, VC-1) and the embodied-specific SPA baseline.
+EmbodiedMAE presents a multi-modal masked autoencoder that learns unified 3D representations from RGB, depth, and point cloud data for robot manipulation. The authors construct DROID-3D—a 76K-trajectory dataset with high-quality ZED-SDK-processed depth and point clouds—and pre-train a ViT-Giant model with stochastic Dirichlet-distributed cross-modal masking and a cross-attention fusion decoder, then distill into Small/Base/Large variants. The model is evaluated against SOTA vision foundation models (DINOv2, SigLIP, R3M, VC-1, SPA) across 70 simulation tasks (LIBERO, MetaWorld) and 20 real-world tasks on two robot platforms (SO100, xArm), demonstrating consistent improvements.
+
+---
 
 ## Strengths
 
-- **DROID-3D is a substantial engineering contribution.** The paper systematically processes all 76K DROID trajectories (~350 hours) using ZED SDK temporal fusion, AI-augmented enhancement, and hardware-calibrated metric depth, producing temporally consistent depth maps and point clouds. This fills a real gap in 3D data availability for embodied pre-training. (Section 2.1, Figure 2)
+- **Novel multi-modal MAE architecture with principled masking.** The Dirichlet-distributed stochastic masking across RGB, depth, and point cloud patches, combined with a cross-attention decoder for explicit modality fusion, is a technically sound and well-motivated design (Section 2.2–2.3). The qualitative visualizations (Figure 3) compellingly demonstrate emergent cross-modal reasoning—e.g., the model propagates object-level color semantics when a single patch is altered, despite no segmentation supervision.
 
-- **Convincing qualitative evidence of cross-modal fusion.** Figure 3 demonstrates that the model can reconstruct a missing modality from another, separate geometry from appearance, and — in the re-coloring experiment (column 12) — propagate an edited color patch only to the semantically correct object while leaving surrounding elements unchanged. This indicates the MAE objective genuinely forces cross-modal reasoning rather than superficial pattern matching. (Section 3.2)
+- **DROID-3D is a genuine and valuable dataset contribution.** Processing the full 76K-trajectory DROID corpus with ZED SDK temporal fusion and AI-enhanced stereo yields temporally consistent, high-fidelity depth that fills a clear gap in 3D robot manipulation data (Section 2.1, Figure 2). The comparison against BridgeDataV2, RH20T, and AI-estimated depth makes the quality case convincing.
 
-- **Broad evaluation across diverse settings.** The paper evaluates on 40 LIBERO tasks (four suites), 30 MetaWorld tasks (three difficulty levels), 10 real-world SO100 tasks, and 10 real-world xArm tasks — 90 total. Across all simulation settings, EmbodiedMAE-RGB outperforms all baselines including DINOv2, SigLIP, SPA, R3M, and VC-1, and EmbodiedMAE-RGBD further improves performance while naive depth integration (DINOv2-RGBD) degrades it. (Figure 6, Table 1, Figure 8)
+- **Comprehensive and diverse empirical evaluation.** The paper evaluates across 70 simulation tasks (LIBERO's four suites + MetaWorld's three difficulty levels) and 20 real-world tasks on two distinct robot platforms (low-cost SO100 and high-performance xArm), covering a wide range of manipulation scenarios. The consistent use of a shared compact RDT policy network ensures fair comparison by isolating the visual representation (Section 3.1, Figure 5).
 
-- **Within-model evidence that the multi-modal design adds value.** The RGBD variant consistently outperforms the RGB-only variant of the same model on LIBERO (Figure 6) and MetaWorld (Table 1: 76.2 vs 73.0 average), and on xArm real-world tasks (Figure 8). Since both share the same pre-training data and architecture, this isolates the benefit of multi-modal input within the proposed framework.
+- **Effective knowledge distillation produces practical models.** The multi-layer feature alignment (bottom/middle/top) with joint MAE + SmoothL1 distillation loss (Section 2.4) yields Small/Base/Large models that maintain strong performance. Ablations in Table 4 show the approach is robust to masking ratio and loss weighting, and the ACT policy results (Tables 2–3) demonstrate that gains transfer across policy architectures.
+
+- **EmbodiedMAE successfully leverages 3D information where naive approaches fail.** The DINOv2-RGBD baseline (Appendix A.3) degrades relative to RGB-only DINOv2, while EmbodiedMAE-RGBD consistently improves over EmbodiedMAE-RGB, and EmbodiedMAE-PC substantially outperforms DP3 (Tables 1, 9; Figure 6). This directly validates the paper's core claim that careful architectural design is needed to benefit from 3D inputs, and that EmbodiedMAE provides such a design.
+
+---
 
 ## Weaknesses
 
 ### Fatal
 
-None. The paper's core contributions — the DROID-3D dataset and the multi-modal MAE framework — are not invalidated, and the empirical evidence, while imperfect, is not fabricated or fundamentally flawed.
+None.
 
 ### Major
 
-- **Domain-data confound limits claims about architectural contribution.** EmbodiedMAE is pre-trained on DROID-3D, a large domain-specific dataset of robot interactions. All general-purpose baselines (DINOv2, SigLIP, R3M, VC-1) are trained on static, in-the-wild data. The embodied baseline SPA uses only a subset of DROID with lower-quality depth. The paper provides no experiment where a strong vision model is further pre-trained on the same DROID-3D RGB data using a comparable self-supervised objective. Without this control, it is impossible to determine how much of EmbodiedMAE's advantage comes from domain-aligned pre-training data versus the multi-modal MAE architecture. The RGBD-vs-RGB comparison within EmbodiedMAE and the comparison against SPA provide partial evidence for the architecture, but the headline claim that EmbodiedMAE is a superior architecture remains entangled with the obvious benefit of training on robot data. This undermines the paper's central methodological narrative.
+- **The scaling claim conflates distillation with independent pre-training.** Section 3.3 Finding 2 and the abstract state that "EmbodiedMAE exhibits strong scaling behavior with model size," and Figure 6 plots Small through Giant on a single curve. However, Small, Base, and Large are all distilled from the same Giant teacher (Section 2.4), not independently pre-trained. The curve therefore reflects the capacity of students to absorb teacher knowledge plus model capacity, not the scaling behavior of the MAE pre-training objective itself. The Giant is the only model trained from scratch. This is a central claim in the abstract and needs to be qualified, e.g., as "scaling through distillation" rather than "scaling of pre-training." Appendix C's data-scaling experiment (25%/50%/100% subsets) partially addresses data scaling but not architectural scaling from scratch.
 
-- **Scaling claim (Finding 2) is confounded by distillation.** The paper claims "EmbodiedMAE exhibits strong scaling behavior with model size" based on performance ordering Giant > Large > Base > Small. However, Small/Base/Large models are obtained by distilling a single Giant teacher — they are not independently trained from scratch at each scale. Performance differences could reflect distillation quality (e.g., how well each student size absorbs knowledge from the teacher) rather than intrinsic scaling of the MAE pre-training objective. As presented, the scaling claim is not supported by the evidence.
+- **The SPA baseline comparison is confounded by data quality and scale differences.** The paper notes (Section 2.1) that SPA was pre-trained on ~1/15 of DROID using AI-estimated (CrocoV2-Stereo) depth, while EmbodiedMAE uses the full DROID-3D with ZED-SDK-processed depth. The performance gap between EmbodiedMAE and SPA thus cannot be cleanly attributed to architecture—differences in data quality, quantity, or both could explain the gap. The paper mitigates this somewhat by including DINOv2 (pre-trained on 142M diverse images—far more data than DROID-3D) as a strong baseline that EmbodiedMAE also beats, but the SPA comparison specifically overstates what can be concluded about architectural advantage.
 
 ### Minor
 
-- **No statistical variance reported.** Real-world tasks use only 10 trials per task; simulation experiments (150 trials for LIBERO, 50×3 seeds for MetaWorld) also report only point success rates without confidence intervals or standard deviations. While modest trial counts and absent error bars are common in robot learning, the paper makes strong "state-of-the-art" claims and would benefit from statistical support. The observed performance gaps (e.g., ~3% on MetaWorld average between RGB and RGBD) could fall within noise for some tasks.
+- **No variance estimates or error bars are reported for any result.** Simulation learning curves (Figure 6), MetaWorld success rates (Table 1), and real-world results (Figure 8, 10 trials/task) all report point estimates without standard deviations or confidence intervals. In real-world robotics, 10 trials per task with no variance makes it difficult to assess whether performance gaps are statistically meaningful. The simulation results (150 trials per task on LIBERO, Figure 6 caption) should likewise report seed variance. This does not invalidate the findings but weakens their reliability.
 
-- **Missing core pre-training ablations.** The ablation study (Table 4, Section 3.5) covers only distillation-phase hyperparameters (masking ratio during distillation, feature alignment positions, loss ratio β). There is no ablation of the pre-training architecture itself: the Dirichlet masking strategy, the cross-attention decoder, training with different modality subsets, or an RGB-only MAE pre-trained on DROID-3D. The paper cites prohibitive cost of Giant pre-training as justification, which is reasonable given the 1.1B parameter model trained on 76K trajectories. Still, this limits what can be concluded about which architectural components are necessary.
+- **The DINOv2-RGBD baseline is informative but limited in what it demonstrates.** Appendix A.3 constructs DINOv2-RGBD by freezing the DINOv2 encoder and learning only a zero-initialized depth patchifier. This baseline correctly demonstrates that *naively* adding depth degrades performance, supporting the paper's motivation. However, it does not isolate whether EmbodiedMAE's multi-modal decoder and masking strategy are specifically responsible for the gain—a baseline that fine-tunes DINOv2 jointly with an RGBD input on DROID-3D would provide a stronger point of comparison for the claim that EmbodiedMAE's specific design is necessary.
 
-- **No quantitative validation of DROID-3D depth quality.** The paper argues convincingly that existing depth data is poor (Figure 2) and that ZED SDK processing improves it, but provides no quantitative metrics (depth RMSE against any reference, temporal consistency scores). Given that the entire pre-training pipeline rests on data quality, a quantitative measure would substantially strengthen confidence.
+- **The ablation studies focus almost entirely on distillation hyperparameters** (Table 4: masking ratio, feature alignment positions, loss ratio β). Missing are ablations that isolate the core architectural contributions: (1) single-modality vs. multi-modal pre-training on equal data, (2) the cross-attention decoder vs. a simpler fusion (e.g., concatenation), or (3) the specific Dirichlet masking strategy vs. uniform independent masking. Appendix B partially addresses point cloud encoder choices (B.2) and data quality (B.3), but the central multi-modal design choices remain unablated.
 
-- **3D benefits are meaningful but overstated in places.** On MetaWorld, the RGBD gain is 3.2 points average (73.0→76.2), and the PC variant underperforms RGB-only (65.8 vs 73.0). The abstract states the model "promotes effective policy learning from 3D inputs" and that spatial perception is "critical." While the LIBERO and xArm results support this more strongly, the MetaWorld gains are modest and the PC modality consistently underperforms RGB-only in real-world settings. The paper does acknowledge PC limitations (Section 3.4, Finding 2; Appendix B), which partially mitigates this.
+- **The MAE reconstructions (Section 3.2) are qualitative only.** Figure 3 provides compelling visualizations of cross-modal inference, but claims about "strong cross-modal fusion capabilities" and "implicitly learned object-level semantic segmentation" (line 405–406) are not backed by any quantitative metric (e.g., reconstruction error, depth prediction accuracy, segmentation probing). The visualizations are suggestive but remain anecdotal.
 
 ### Trivial
 
-- The claim that MAE predictions demonstrate "implicitly learned object-level semantic segmentation" (Section 3.2) is speculative. The re-coloring visualization (Figure 3, column 12) is intriguing and suggestive, but without a quantitative segmentation probe, the claim overreaches.
+- The potential domain gap between ZED-processed depth (used for pre-training) and downstream sensor modalities (Intel RealSense L515 on xArm, dual RGB cameras on SO100) is not explicitly discussed. The paper addresses this implicitly through the enhanced point cloud pre-processing pipeline (Appendix B.3), but a brief acknowledgment in the main text would improve completeness.
+
+---
 
 ## Nice-to-Haves
 
-- A quantitative probe (e.g., linear classification on frozen features for semantic segmentation) would substantiate the intriguing qualitative cross-modal fusion results.
-- A breakdown of when 3D helps (e.g., per-task-category analysis: elevation-estimation tasks vs. planar-alignment tasks) would explain the inconsistent gains across MetaWorld and LIBERO.
-- Reporting depth error metrics on DROID-3D against a held-out reference would validate the dataset quality claim.
+- Training a competitive baseline (e.g., a jointly fine-tuned DINOv2 or SigLIP on DROID-3D with RGBD input) would strengthen the claim that EmbodiedMAE's architecture, rather than its pre-training data, drives the gains.
+- A quantitative probing benchmark (e.g., depth prediction error, 3D pose estimation) on the learned representations would complement the qualitative MAE visualizations and provide more rigorous evidence of multi-modal fusion quality.
+- Reporting success/failure breakdowns by failure mode (e.g., localization error, grasp failure, collision) for baselines vs. EmbodiedMAE, beyond the brief qualitative mention in Figure 7.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+*These points were flagged for removal. Treat them with caution.*
 
-1. **"The comparison with baselines does not isolate the effect of the proposed method from the effect of in-domain pre-training — need a baseline where a strong VFM is further pre-trained on DROID-3D RGB"** — KEPT as a Major weakness. This is a legitimate methodological concern.
+1. **"The evaluation does not isolate the proposed architecture from confounding factors" (Harsh Critic, Critical Issue 1 — partially removed).** The core concern about data confounds is real and was retained as a Major weakness. However, the framing that this makes the central claim "not supported" was weakened: EmbodiedMAE beats DINOv2 (trained on far more diverse data) on the same downstream tasks, and the DROID-3D dataset is itself presented as a contribution. The claim that this is a "structural flaw requiring redesigned evaluation" is an overstatement given the breadth of baseline comparisons.
 
-2. **"The evaluation protocol lacks statistical rigour"** — KEPT as a Minor weakness (downgraded from Evidential; modest trial counts are standard in this subfield and this does not threaten core claims).
+2. **"The DINOv2-RGBD baseline is a crippled comparison" (Harsh Critic, Critical Issue 1 — weakened and moved to Minor).** The baseline is not "crippled"—it is intentionally a naive integration following Zhu et al. (2024) to demonstrate the phenomenon that simply adding depth degrades performance, which is a stated motivation of the paper (line 45–48). It serves its purpose. The limitation is that stronger multi-modal baselines are missing for the *positive* claim about EmbodiedMAE's specific design.
 
-3. **"The scaling study is confounded by distillation"** — KEPT as a Major weakness. The evidence does not support the scaling claim as stated.
+3. **"Input-modality advantage not disentangled" (Harsh Critic, Critical Issue 1 — removed).** The comparison between EmbodiedMAE-RGBD and EmbodiedMAE-RGB (both using the same architecture, differing only in input modality) directly tests the benefit of 3D input within the same framework. The comparisons against DINOv2, SPA, etc. are primarily RGB-only vs. RGB-only comparisons, which are fair. The multi-modal comparisons do have an information advantage, but this is the point: EmbodiedMAE can effectively use that information where naive approaches cannot.
 
-4. **"The benefit of multi-modal over RGB-only input is marginal"** — KEPT as Minor (weakened; the gains are real and consistent on LIBERO and xArm, and the paper acknowledges PC limitations explicitly).
+4. **"Domain gap between ZED depth and downstream sensors" (Harsh Critic, Section-by-Section — moved to Trivial).** The paper acknowledges and addresses this through the enhanced pre-processing pipeline in Appendix B.3.
 
-5. **"Missing ablations on the core pre-training design"** — KEPT as Minor (the paper provides cost justification; pre-training a 1.1B model multiple times for ablations is genuinely prohibitive).
+5. **"Ablations do not address essential question" (Harsh Critic, Section-by-Section — partially retained as Minor).** The criticism about missing architectural ablations is valid and retained as Minor. However, the claim that *all* ablations are about distillation ignores Appendix B (point cloud encoder comparison, data quality analysis, comparison against PonderV2).
 
-6. **"Qualitative depth comparison is anecdotal; no quantitative validation"** — KEPT as Minor. Legitimate gap but does not threaten core claims.
+6. **"Comparison to PonderV2 again uses a model pre-trained on generic scenes" (Harsh Critic, Appendices — removed).** The paper explicitly uses this comparison to demonstrate the domain gap problem and argues this *motivates* domain-specific pre-training on DROID-3D. This is a valid experimental design choice, not a weakness.
 
-7. **"The claim of implicitly learned object-level semantic segmentation is purely speculative"** — KEPT as Trivial.
+7. **"No ablation of pre-training data quality or scale" (Harsh Critic, Section 3.5 — removed).** Appendix C directly studies data scaling (25%/50%/100% subsets of DROID-3D), showing minimal performance reduction with reduced data, which partially addresses data quantity concerns.
 
-8. **"The paper does not state whether hyperparameters of the policy training were tuned per VFM or held fixed"** — REMOVED. This is a minor implementation detail; the paper uses shared architecture and there's no evidence of unfair tuning. The rule about "reproducibility nitpicks about trivial implementation details" applies.
+8. **Strength Finder: "Systematic empirical superiority over strong baselines" (Strength Finder — retained with qualification).** Kept because the broad comparison against DINOv2, SigLIP, R3M, VC-1, SPA is genuinely strong evidence. The SPA-specific confound was noted separately.
 
-9. **"Train the policy directly on DROID-3D actions to evaluate in a true VLA setting"** — REMOVED. This is scope creep. The paper is explicitly about visual representation learning; demanding VLA training is outside the stated scope.
-
-10. **"DINOv2 initialization claim is only partially true since the architecture diverges"** — REMOVED. The paper clearly states the [CLS] token is removed and DINOv2 weights are used as initialization. This is standard practice (e.g., DINOv2 itself removes the CLS token for downstream tasks). The claim is accurate.
-
-11. **"DINOv2-RGBD is a deliberately weak baseline"** — REMOVED. The paper cites Zhu et al. (2024) as precedent and the point of this baseline is precisely to demonstrate that naive depth fusion hurts — it is intentionally asymmetric to prove a point about the value of pre-trained fusion. Per the hard rules, as this asymmetry favors the baseline interpretation (it demonstrates the problem the paper is solving), this is not an unfair comparison.
-
-12. **"Strong scaling and efficient distillation" (Strength Finder)** — REMOVED from strengths. The scaling claim is confounded by distillation as noted in Major Weakness #2.
-
-13. **"Comprehensive empirical superiority over baselines across many tasks" (Strength Finder)** — KEPT but with implicit caveat from Major Weakness #1. The empirical results are real, but what they mean about the architecture is unclear.
+---
 
 ## Novel Insights
 
-The re-coloring experiment (Figure 3, column 12) — where injecting an altered-color RGB patch during depth-to-RGB reconstruction causes the model to propagate the new color only to the semantically correct object — is genuinely novel as a diagnostic for multi-modal representation learning. It suggests that forcing cross-modal reconstruction under aggressive masking can yield object-level semantic organization without explicit supervision. This is a finding that transcends the specific architecture and could inform future work on unsupervised object discovery in multi-modal settings.
+The most novel insight emerging from this work is the demonstration that a Dirichlet-distributed stochastic masking strategy across three modalities (RGB, depth, point cloud), combined with cross-attention fusion in the decoder, enables learned representations that exhibit emergent object-level semantic understanding without explicit segmentation supervision. The "re-coloring" experiment (Figure 3, column 12) where modifying a single visible RGB patch propagates color only to the semantically corresponding object (the table changes color while the cup, background, and robot arm do not) provides a striking example of implicit semantic grounding emerging from multi-modal predictive learning. This goes beyond standard MAE reconstruction quality and suggests that cross-modal prediction objectives, when applied to carefully constructed 3D robot data, can induce spatially grounded object representations—a finding with implications beyond the specific architecture presented.
+
+---
 
 ## Suggestions
 
-- The most impactful single experiment to add would be pre-training a strong RGB-only baseline (e.g., a standard MAE initialized from DINOv2) on DROID-3D RGB data, then evaluating it with the same policy pipeline. This would isolate the data contribution from the architectural contribution and would dramatically strengthen (or appropriately qualify) the paper's central claim.
-- Consider re-framing the scaling claim as a distillation efficiency claim ("EmbodiedMAE distills effectively across scales") rather than a pre-training scaling claim, which would accurately reflect what was measured.
-- Add error bars or confidence intervals at least for the real-world experiments, where the small trial count (10 per task) makes variance particularly salient.
+1. Rephrase the scaling claim (Section 3.3, Finding 2; Abstract) to clearly state that scaling is *via distillation* rather than from-scratch pre-training. The claim itself is not false—larger models do perform better—but the mechanism matters for interpretability.
+
+2. Add seed-based standard deviation to all simulation learning curves and success rates. For real-world results, report the distribution of successes across the 10 trials per task (e.g., 7/10 with a binomial confidence interval).
+
+3. Consider adding one architectural ablation to the main paper: e.g., EmbodiedMAE with simple concatenation fusion (no cross-attention) vs. the full cross-attention decoder, or independent masking vs. Dirichlet masking. This would directly isolate a core design choice without requiring prohibitively expensive from-scratch re-training.
+
+4. Explicitly acknowledge in the discussion that the SPA comparison reflects differences in both architecture and pre-training data, and frame the contribution as the joint effect of DROID-3D + EmbodiedMAE architecture.
+
+---
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
 
-| Anchor | Avg Score | How it compares |
-|--------|-----------|-----------------|
-| NavFoM (kkBOIsrCXh) | 8.00 | Stronger: cleaner claims, better isolated contributions, more rigorous evaluation across 7 benchmarks + real. |
-| VLM4VLA (tc2UsBeODW) | 7.00 | Stronger: systematic empirical study with clean methodology where claims match evidence precisely. |
-| World-In-World (yDmb7xAfeb) | 7.00 | Stronger: novel benchmarking framework with clear contributions and rigorous closed-loop evaluation protocol. |
-| Nostra (OKGcbsGMqc) | 5.50 | Comparable: real innovation in multi-modal latent spaces, solid experiments, but limited novelty and theoretical gaps. Also rejected despite strong empirical results. |
-| RobotArena (OutljIofvS) | 5.50 | Comparable in scope and empirical breadth, but RobotArena has cleaner methodology. |
-| 3D-aware Disentangled (GE0IFoDx8a) | 5.33 | Similar: 3D representation for manipulation with clear novelty but significant assumptions/limitations. Accepted as poster. |
-| Geometric Constraints (brqEUN4i2s) | 4.00 | EmbodiedMAE is clearly stronger: broader evaluation, more substantial engineering contribution, better empirical results. |
-| ReLAM (vBFVaVf8aj) | 3.00 | EmbodiedMAE is clearly stronger across all dimensions. |
+| Anchor | Path | Avg Score | Comparison to Paper Under Review |
+|--------|------|-----------|----------------------------------|
+| VLM4VLA | `tc2UsBeODW.md` | 7.00 | Strong empirical study with clean methodology but simulation-only. EmbodiedMAE has real-world results, a novel architecture, and a dataset contribution, but its scaling claims are less carefully qualified. Slightly below. |
+| FALCON | `fzmittHfq3.md` | 6.50 | Novel 3D-spatial architecture for VLA with 11 real-world tasks. Comparable scope. EmbodiedMAE has broader evaluation (70+20 tasks) and a dataset contribution, but FALCON's claims are more carefully bounded. Comparable. |
+| D2E | `TRwQND3xpt.md` | 5.50 | Engineering-heavy framework with strong results but criticized for limited novelty. EmbodiedMAE has clearer architectural novelty and more comprehensive evaluation. Above. |
+| PointWorld | `XZ0pRezf4O.md` | 4.00 | Good dataset but lack of baselines and unclear motivation. EmbodiedMAE is clearly stronger in both methodology and evaluation. Above. |
+| VER | `aoorNQFpM6.md` | 5.50 | Vision expert distillation with dynamic routing. EmbodiedMAE has a broader evaluation scope and a clear dataset contribution. Above. |
+| Nostra | `OKGcbsGMqc.md` | 5.50 | Multi-modal latent imagination for BC. Similar multi-modal focus but narrower evaluation. EmbodiedMAE is more comprehensive. Above. |
+| VAT | `TalHOvvLZu.md` | 2.00 | ViT feature hierarchy for action generation. Much narrower scope and weaker results. EmbodiedMAE is substantially stronger. |
 
-EmbodiedMAE has real contributions — the DROID-3D dataset fills a gap, the multi-modal MAE framework is conceptually clean, and the evaluation breadth is commendable. However, two issues prevent a higher score: (1) the domain-data confound means we cannot tell whether the architecture or simply the data drives the gains, and (2) the scaling claim is not supported by the evidence presented (models are distilled, not independently trained). These are not fatal — the paper is not invalid — but they significantly weaken the central methodological claims. With additional controlled experiments (especially an RGB-only baseline pre-trained on DROID-3D), this could be a strong paper. In its current form, it sits at the borderline, comparable to papers like Nostra (5.50) and 3D-aware Disentangled (5.33).
+The paper sits comfortably above the 5.5 band (D2E, VER, Nostra) due to its genuine dataset contribution, architectural novelty, and comprehensive evaluation. It is comparable to FALCON (6.5) in scope and novelty, but the scaling claim issue (Major) and missing variance/architectural ablations bring it slightly below. The paper would be in the 6.5–7.0 range with these issues addressed.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

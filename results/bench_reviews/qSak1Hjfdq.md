@@ -1,28 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compile the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper formalizes All-Day Multi-Scenes Lifelong VLN (AML-VLN), where an agent must continually learn to navigate across diverse scenes and illumination conditions (normal, low-light, overexposure, scattering) without catastrophic forgetting. The core contribution is Tucker Adaptation (TuKA), which lifts parameter-efficient adaptation into a high-order tensor space via Tucker decomposition — decoupling knowledge into shared subspaces (core tensor, encoder, decoder) and task-specific experts (scene, environment). A decoupled knowledge incremental learning (DKIL) strategy consolidates shared components via elastic weight consolidation and constrains experts via orthogonality. The AlldayWalker agent achieves 65% average SR over 24 sequential tasks, substantially outperforming the best baseline SD-LoRA (56%).
-
----
+This paper formalizes the All-Day Multi-Scenes Lifelong VLN (AML-VLN) problem, where an embodied agent must continually adapt to a sequence of navigation scenarios spanning multiple scenes and illumination conditions (normal, low-light, overexposure, scattering) without catastrophic forgetting. The core contribution is Tucker Adaptation (TuKA), which lifts parameter-efficient adaptation from 2D matrix space into a high-order tensor and uses Tucker decomposition to decouple shared navigation knowledge from scene-specific and environment-specific expert knowledge. A Decoupled Knowledge Incremental Learning (DKIL) strategy consolidates shared subspaces via EWC while constraining experts through consistency and orthogonality losses. The resulting agent, AlldayWalker, is evaluated on a custom 24-task benchmark built on an extended Habitat simulator.
 
 ## Strengths
 
-- **Strong empirical results with clear margins.** AlldayWalker achieves 65% average SR across 24 tasks vs. 56% for best competitor SD-LoRA, with the lowest forgetting rate (11% F-SR vs. 18%). The gaps are substantial and consistent across all metrics (SR, SPL, OSR; Tables 1–2, Figure 7, Appendix K).
+- **Genuinely novel architectural contribution**: The use of Tucker decomposition to factorize multi-hierarchical navigation knowledge (shared core × scene experts × environment experts) within a high-order tensor, and the tensor-to-matrix alignment in Eq. 3, is a creative and technically sound extension beyond the LoRA / MoE-LoRA family. The ABC-LoRA ablation (Appendix I, Table 15) is particularly convincing: a hierarchical matrix baseline using the same DKIL losses achieves only 55% SR vs. TuKA's 65% SR, isolating the tensor representation as the differentiating factor.
 
-- **Genuinely novel method.** Using Tucker decomposition to represent multi-hierarchical navigation knowledge in a higher-order tensor, with explicit decoupling of scene and environment experts, is a creative idea not present in prior LoRA-variant literature. The tensor-to-matrix alignment via expert row selection (Eq. 3) is a clean solution to the dimensional mismatch problem.
+- **Strong empirical results with large margins**: On the 24-task AML-VLN benchmark, AlldayWalker achieves 65% average SR vs. 56% for the best baseline (SD-LoRA) and reduces forgetting (F-SR) from 18% to 11% (Tables 1–2). These margins are substantial and consistent across all six reported metrics (SR, SPL, OSR and their forgetting rates). The method also generalizes to unseen scene-environment combinations (Table 5: 55% SR vs. 39–40% for baselines).
 
-- **Convincing ablation on the core architectural claim.** The fourth-order TuKA (65% SR) substantially outperforms both a third-order tensor variant (54% SR, Table 14/Appendix H) and a hierarchical matrix-based ABC-LoRA (55% SR, Table 15/Appendix I). These 10–11 point gaps directly validate the thesis that high-order tensor decoupling is more powerful than 2D matrix adaptation for multi-hierarchical knowledge.
+- **Thorough ablation design**: The paper includes meaningful ablations that test core claims: third-order vs. fourth-order tensor (SR 54% vs. 65%), shared component removal (Table 3), rank scaling (Appendix G), and scalability to 30 tasks (Table 4). The ABC-LoRA comparison (Appendix I) directly tests whether the tensor decomposition provides gains beyond a matrix-based hierarchy, which is the strongest evidence for the paper's central claim.
 
-- **Comprehensive experimental design.** Twelve baselines spanning sequential fine-tuning, regularization-based, MoE-LoRA, orthogonal, and TTA methods. Multiple metrics (SR, SPL, OSR with forgetting variants). Ablations on shared components (Table 3), task scaling (Table 4, 24→30 tasks), rank scaling (Appendix G), and fifth-order extension (Appendix J). Generalization to six unseen scenario–environment pairs (Table 5, 55% SR vs. 39–40%).
-
-- **Real-world validation.** Deployment on a quadruped robot with real hardware in two real-world scenes under normal and low-light conditions (T21–T24), bridging simulation and reality.
-
-- **Parameter efficiency.** 15.64M trainable parameters, comparable to baselines (Table 17).
-
----
+- **Well-constructed benchmark with physically grounded degradation**: The Allday-Habitat platform extends Habitat with three imaging degradation models (atmospheric scattering, low-light with noise, overexposure with saturation) based on realistic physical models (§4, Appendix E). This provides a principled testbed for all-day navigation that goes beyond simple brightness adjustments.
 
 ## Weaknesses
 
@@ -32,89 +24,70 @@ None.
 
 ### Major
 
-- **Expert retrieval mechanism is unvalidated.** Task-agnostic inference (Section 3.4) relies on CLIP feature matching to select the correct scene and environment experts at test time, when the task-id is unknown. No analysis of retrieval accuracy is provided — the paper never reports what fraction of episodes the correct experts are selected, nor does it compare against an oracle that always picks the right experts. This matters because: (a) the entire task-agnostic deployment claim depends on this mechanism; (b) in degraded conditions (low-light, scattering, overexposure), CLIP features may be less discriminative; (c) a mismatch could cascade into navigation failures that the shared core cannot compensate for. The strong overall SR results and generalization performance (Table 5) indirectly suggest the retrieval works reasonably well, but without direct evidence, the practicality of task-agnostic inference remains incompletely established.
+None that threaten the core claims.
 
 ### Minor
 
-- **Unconventional forgetting metric produces negative values that are not discussed.** The forgetting rate F-SR (Eq. 13) is defined relative to joint training on tasks 1…t, not relative to post-training performance. While this definition is clearly stated, it deviates from standard CL practice. AlldayWalker produces negative F-SR values at T14 (−3) and T20 (−4), meaning sequential learning outperforms joint training. SD-LoRA also shows −2 at T14, so this is not unique to TuKA. The paper never explains why this occurs — it could reflect beneficial forward transfer or regularization, but leaving it unaddressed weakens the clarity of the continual learning story.
+- **Single task-ordering run without statistical characterization**: The entire evaluation uses one randomized task order with no repetition across different random seeds. While this is common practice in lifelong VLN benchmarks (the comparable Uni-Walker paper accepted at ICLR with avg score 6.0 also uses single-run evaluation), and while the large performance margins (9 percentage points SR, 7 points F-SR) reduce the likelihood that the result is an artifact of ordering, reporting variance across at least 3 random task orders would strengthen confidence in the results. Given the computational cost of 24-task runs on 7B-parameter models, this is a minor limitation rather than a fatal flaw.
 
-- **Real-world validation covers only two environment types.** The hardware experiments (T21–T24) evaluate normal and low-light conditions but omit scattering and overexposure. Given the paper's "all-day" motivation, demonstrating the full environmental range on real hardware would strengthen the practical claim. The simulation results for scattering/overexposure are strong, and real-world deployment in those conditions is genuinely difficult, so this is a scope limitation rather than a fundamental flaw.
-
-- **No sensitivity analysis on degradation severity.** The imaging model parameters (Appendix E, Table 8) are fixed. How results change under milder or more extreme scattering (varying β), overexposure (varying exposure multiplier), or low-light (varying brightness) is not explored. This limits understanding of robustness boundaries.
+- **Slight overstatement of real-world validation**: The abstract claims "additional real-world deployments also validate the superiority of our AlldayWalker." The main paper does include quantitative results on real-world scenes (T21–T24 in Table 1), but these are captured real scenes rendered within Habitat, not physical robot deployments. The appendix describes a robotic platform (Figure 9) but provides no quantitative physical-world navigation results. The claim in the abstract should be softened to match what was actually evaluated, or the physical robot results should be included.
 
 ### Trivial
 
-- The number of CLIP features stored per scene/environment is not specified (Section 3.4), and whether matching is performed per episode or per step is not explicitly stated (Algorithm 2 suggests per-step matching).
-
-- The scaling analysis (Appendix G) shows that increasing expert ranks (r₃, r₄) yields larger gains than increasing shared ranks (r₁, r₂), potentially indicating that the shared component is underutilized — this is not discussed.
-
----
+- The expert retrieval mechanism (§3.4) selects scene and environment experts independently via CLIP feature matching. While the generalization results in Table 5 show this works well empirically, a brief analysis of retrieval accuracy (e.g., what fraction of episodes selects the correct expert) would be informative but is not essential to validating the core contribution.
 
 ## Nice-to-Haves
 
-- An oracle comparison for expert retrieval (always selecting the correct experts) to establish an upper bound and quantify the gap between the current CLIP-based approach and perfect selection.
-- Sensitivity analysis varying degradation parameters to characterize robustness boundaries.
-- Ablation on retrieval frequency (per-step vs. per-episode).
-- A brief discussion explaining why negative forgetting values occur (e.g., the incremental consolidation may act as a beneficial regularizer compared to joint training).
-
----
+- Sensitivity analysis of the DKIL loss weights (λ₁, λ₂, λ₃) to clarify whether all three terms are necessary and whether they interact in conflicting ways.
+- Trajectory visualizations comparing AlldayWalker with SD-LoRA on the same episodes to qualitatively illustrate where knowledge retention makes a difference.
+- Analysis of retrieval accuracy for scene/environment expert matching during inference.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+These points are flagged to be removed; treat them with caution.
 
-1. **"The core tensor is shared across all tasks, which may limit model's ability to capture scene–environment interactions beyond what a product of vectors can express"** — This is a speculative architectural concern not backed by empirical evidence. The results show the fourth-order tensor works well in practice.
+- **"No statistical significance or multiple runs are reported" as a fatal issue**: While the paper does use a single task order, this is standard practice in lifelong VLN research. The comparable accepted paper Uni-Walker (avg 6.0) was not criticized for this. The large performance margins and the fact that all baselines share the same ordering further mitigate this concern. Kept as a minor weakness rather than a fatal one.
 
-2. **"The orthogonality constraint is applied to entire expert matrices but the paper does not clarify whether enforced only among active experts"** — The paper does specify this. Lines 346–353 show that Les is applied to previous experts (indices i ≠ s for scenes, j ≠ e for environments) against the current expert, which is the natural interpretation.
+- **"No quantitative real-world navigation results in the main paper"**: Factually incorrect. Table 1 includes tasks T21–T24 (real-world 1 and 2) with quantitative SR results. The real concern is about physical robot deployment vs. simulated real-world scenes, which is addressed in the Minor weaknesses section.
 
-3. **"No ablation on whether a rank-1 core would suffice"** — The rank scaling study in Appendix G systematically varies all ranks. The concern is already partially addressed.
+- **"Tables are hard to parse because of OCR artifacts and missing formatting"**: These are parser artifacts from PDF extraction. The original submission does not have these issues (Hard Rule).
 
-4. **"Degradation model parameters (Appendix E) not accompanied by justification"** — The parameters are tabulated with references to the imaging models from prior literature (Narasimhan & Nayar, Healey & Kondepudy, etc.). Justification is implicit via those references.
+- **"The claim that matrix-based representation is inherently limited... is stronger than the experiments can fully substantiate"**: The ABC-LoRA ablation (Appendix I, Table 15) directly tests this: a hierarchical matrix baseline with identical DKIL losses achieves 55% SR vs. TuKA's 65% SR, providing strong evidence for the tensor representation claim.
 
----
+- **"Task-id agnostic claim contradicted by expert retrieval"**: The paper explicitly states that task-id is not given during testing but the agent infers scene/environment via CLIP-based retrieval (§3.4). This is a reasonable design, not a contradiction.
+
+- **Strength Finder's generic strengths**: Removed generic claims about "addressing an important problem" that lacked specific citations or concrete evidence.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The paper itself contributes the insight that multi-hierarchical navigation knowledge (scene × environment) can be effectively represented through Tucker decomposition of a high-order tensor, and that decoupling shared vs. specific knowledge in this tensor space yields stronger continual learning than matrix-based adapters. Both the harsh critic and strength finder essentially restate this contribution rather than adding genuinely independent insight.
-
----
+The paper's most novel insight is that Tucker decomposition can serve as a principled bridge between high-order tensor representations (which naturally capture multi-hierarchical knowledge like scene × environment interactions) and the 2D matrix backbone of LLM adapters. The tensor-matrix alignment in Eq. 3 — extracting specific expert rows and contracting with the core tensor and encoder/decoder factors to produce a standard 2D weight update — is elegant. The ABC-LoRA experiment demonstrates that this is not merely an architectural curiosity: the tensor core enables parameter sharing across joint scene–environment combinations that a hierarchical matrix factorization cannot capture, yielding a ~10 percentage point SR improvement under identical continual learning constraints.
 
 ## Suggestions
 
-1. **Add an expert retrieval accuracy analysis.** Report, for T1–T24 and generalization tasks G1–G6, what fraction of episodes the CLIP-based matching selects the correct scene expert and environment expert. Include an oracle baseline (always correct expert) to quantify the performance ceiling. This would decisively address the main evidential gap.
-
-2. **Explain the negative forgetting phenomenon.** Briefly discuss why sequential learning can outperform joint training — e.g., the DKIL constraints may provide beneficial regularization, or the inheritance mechanism may enable forward transfer that joint training does not exploit. Even a paragraph of informed speculation would help.
-
-3. **Acknowledge the real-world environment limitation explicitly.** State that hardware experiments currently cover normal and low-light, and that scattering/overexposure on real hardware is deferred to future work. This is more honest than implying full coverage.
+- Soften the abstract's "real-world deployments" claim to "real-world scenes" or include quantitative results from the physical robot platform described in the appendix.
+- If computationally feasible, add a note about variance observed across a small number of additional runs (even 2–3 task orders for the main result) to address the single-run concern, or explicitly discuss why single-run evaluation is standard and sufficient in this setting.
+- Add a brief discussion of retrieval accuracy for the scene/environment expert matching in §3.4.
 
 ---
 
-## Score and Decision
+**Calibration anchors used:**
 
-### Anchor Comparison
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/PaYo96rjij.md` | 6.00 | Uni-Walker: most directly comparable (lifelong VLN, LoRA-based, 18 tasks). AlldayWalker is methodologically more novel (Tucker decomposition vs. DE-LoRA), has a larger benchmark (24 tasks), and more thorough ablations. Comparable or stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/pFh5ygjN3V.md` | 4.50 | M³E: continual VLN with MoE, smaller evaluation scope, less novel method. AlldayWalker is clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/pZj2DhfaVD.md` | 6.00 | EWC-LoRA: revisits weight regularization for LoRA CL. Different problem (class-incremental vs. lifelong VLN). AlldayWalker has greater novelty and scope. |
+| `/home/wg25r/review_agent/human_reviews_2026/Wm1SjTIjvA.md` | 3.00 | PS-LoRA: rejected for incremental contribution. AlldayWalker is substantially stronger on all dimensions. |
+| `/home/wg25r/review_agent/human_reviews_2026/0za6569Jqd.md` | 2.00 | CoRe: rejected as too incremental. Not comparable — AlldayWalker is far stronger. |
 
-| Anchor | Avg Score | Comparison to current paper |
-|--------|-----------|-----------------------------|
-| PaYo96rjij (Lifelong Embodied Navigation Learning) | 6.00 | Most directly comparable — also formalizes a lifelong VLN problem with LoRA-based expert decomposition. Current paper has a more novel method (tensor decomposition vs. DE-LoRA), more comprehensive experiments (24 tasks across 4 environments vs. 18 tasks), and real-world validation. Stronger. |
-| pFh5ygjN3V (M³E: Continual VLN via Mixture of Macro and Micro Experts) | 4.50 | Also continual VLN with MoE. Simulation-only, weaker ablations, reviewers questioned component contributions. Current paper is clearly stronger. |
-| Wm1SjTIjvA (Stability Matters) | 3.00 | Rejected — core insight questioned, limited theoretical justification. Current paper is in a different tier entirely. |
-| T3Vc5fkTzV (KeepLoRA) | 5.50 | Continual learning with LoRA for vision-language, but not navigation. Current paper is more application-specific with stronger benchmark construction. |
-| HB6KvsqcAn (Physically Executable 3D Gaussian for Navigation) | 7.00 | High-scoring navigation paper with strong physical grounding. Current paper has less novelty in the problem space but more comprehensive CL experiments. Weaker than this anchor. |
-| kkBOIsrCXh (Embodied Navigation Foundation Model) | 8.00 | Very high-scoring, large-scale foundation model for navigation. Current paper is narrower in scope but deeper in the continual learning aspect. Weaker than this anchor. |
+The paper compares favorably to Uni-Walker (6.00), which was accepted as a poster with unanimous 6s and addresses a similar lifelong VLN problem. AlldayWalker's Tucker decomposition is more novel than Uni-Walker's DE-LoRA, its benchmark is larger, its ablations are more rigorous (especially the ABC-LoRA comparison), and its results show comparable or larger margins over baselines. The only real weakness relative to Uni-Walker is the single-run evaluation, which Uni-Walker also shares and was not criticized for.
 
-The paper is stronger than the most directly comparable anchor (PaYo96rij, 6.0) due to the more novel tensor-based method, more comprehensive experiments, and real-world validation. However, the unvalidated expert retrieval mechanism prevents it from reaching the confidence level of the 7.0+ papers. The paper is substantially above the 4.0–5.0 range where papers are typically rejected.
+**Originality**: High — Tucker decomposition applied to multi-hierarchical knowledge in lifelong VLN is genuinely novel.
+**Importance**: High — all-day, multi-scene navigation is a practical challenge for real-world deployment.
+**Claims supported**: Well supported by comprehensive experiments and ablations.
+**Soundness**: Sound methodology; single-run evaluation is a minor limitation given community norms.
+**Clarity**: Well-structured paper with clear motivation and method description.
+**Value to community**: The benchmark and TuKA method provide a strong foundation for future work in lifelong VLN.
 
-**Originality:** High. The Tucker decomposition approach for multi-hierarchical adaptation in VLN is genuinely novel in the PEFT/continual learning space.
-
-**Importance:** Moderate-to-high. Lifelong VLN across diverse conditions is a practical problem for real-world deployment.
-
-**Claims supported:** Mostly well-supported, with one significant gap (retrieval validation).
-
-**Soundness:** Good experimental design with 12 baselines and thorough ablations; the method is clearly described.
-
-**Clarity:** Good structure, though the forgetting metric discussion is incomplete.
-
-**Value to community:** The AML-VLN benchmark and the tensor adaptation approach are valuable contributions.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

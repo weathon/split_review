@@ -1,93 +1,90 @@
-Now I have all the information I need. Let me write the comprehensive review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ---
 
 ## Summary
 
-VIBEFACE introduces a dataset of 2,250 images and 1,550 videos from 50 subjects, specifically designed to include realistic eKYC (electronic Know Your Client) video scenarios such as head rotations, blinking, expression changes, and facial touching. The dataset is deliberately balanced across gender, four racial groups, and age ranges, collected under five lighting conditions with/without glasses, and ethically compliant with GDPR and AI Act. The paper benchmarks three face detectors and two face verification models across conditions and demographic subgroups. The eKYC video scenarios (scenarios 12–18) are a genuinely novel contribution not present in any prior public dataset.
+VIBEFACE introduces a novel face biometric dataset designed for electronic Know Your Client (eKYC) scenarios, comprising 2,250 images and 1,550 short videos from 50 demographically balanced subjects. The dataset uniquely includes eKYC-style action sequences (head rotation, blinking, expression changes, face-covering, landmark-touching) captured across five sessions varying lighting and eyeglass conditions. It is ethically collected under GDPR with informed consent and controlled access. The paper evaluates the dataset through face detection and face verification benchmarks, aiming to demonstrate its utility for studying robustness and fairness in biometric systems.
 
 ## Strengths
 
-- **Genuinely novel eKYC video scenarios**: Scenarios 12–18 explicitly capture real-world eKYC interaction dynamics (circular head rotation, directional tilts, blinking, expression changes, mouth opening, hand occlusion, sequential face touching — Section 3.2, Figure 3). Table 1 confirms that no prior public dataset includes such eKYC-style video protocols. This fills a documented gap for research on verification systems deployed in financial and regulatory compliance settings.
+- **First public dataset with dedicated eKYC verification video scenarios.** The dataset includes seven eKYC-style video scenarios (12–18: circular head rotation, head tilts, blinking, expression change, mouth opening, face covering, landmark touching) that mimic real-world identity verification workflows. Table 1 confirms no prior public dataset provides eKYC recordings, and Figure 3 shows extracted frames from these sequences (Section 3.2).
 
-- **Deliberate demographic balance and metadata**: The dataset achieves a 50:50 gender split (25F/25M), balances four racial groups (13 African, 13 Caucasian, 12 East Asian, 12 South Asian — Figure 1b), and spans ages 18–69 conforming to ISO biometric testing standards (Section 3.1). Rich metadata (gender, age, race, facial hair, hair color, piercings, glasses) is provided for each subject, enabling covariate analysis.
+- **Deliberate demographic balance across gender, race, and age.** The dataset achieves a 50:50 male/female split, approximately balanced representation across African (13), Caucasian (13), East Asian (12), and South Asian (12) participants, with an age range of 18–69 following ISO 19795-2 guidelines. Figure 1 visualizes this balance, and Table 1 contrasts it with existing datasets that lack comparable demographic equilibrium (Section 3.1). This design enables fairness evaluations unavailable in many prior benchmarks.
 
-- **Ethical and legal rigor**: Data collection followed GDPR and EU AI Act compliance with informed consent from all participants, controlled-access licensing, anonymized identifiers, and explicit prohibition of commercial use and re-identification (Sections 3.4, 3.5). This sets a strong example for responsible biometric dataset release.
+- **Ethical and legally compliant collection framework.** All data was collected with informed consent under GDPR and AI Act compliance. No personally identifiable information is stored; files are anonymized with randomized identifiers. The dataset is released under a controlled-access, non-commercial license with a signed data agreement (Section 3.4, 3.5). This addresses the growing problem of withdrawn, unconsented web-scraped face datasets.
 
-- **Multi-session environmental diversity**: Five distinct acquisition sessions vary lighting (artificial, flash, natural daylight, weak natural light) and the presence/absence of eyeglasses (Section 3.3, Table 2). These are ecologically relevant factors known to affect verification performance, and the glasses session is particularly underexplored in prior work.
-
-- **Comprehensive model coverage for a dataset paper**: The benchmark evaluates five off-the-shelf models (MTCNN, RetinaFace, MediaPipe for detection; ArcFace, MagFace for verification) across scenarios, sessions, and demographic subgroups (Tables 3–4), providing a broad initial characterization of dataset difficulty.
+- **Multimodal, multi-session design capturing real-world nuisance variation.** Five sessions systematically vary lighting (artificial, flash, natural, weak natural) and eyeglass presence across multiple consumer smartphones (Xiaomi, iPhone, Samsung). Still images include both standardized operator-taken photos and participant selfies from varied angles. Table 2 maps session-to-scenario coverage, providing a structured resource for robustness evaluation (Section 3.3).
 
 ## Weaknesses
 
 ### Fatal
 
-None.
+None. The dataset itself exists, fills a genuine gap, and has clear value — the core contribution is not invalidated.
 
 ### Major
 
-- **Face verification protocol does not follow biometric evaluation standards**: The verification benchmark (Section 4.2) uses a single fixed similarity threshold of 0.5 with no analysis of the genuine/impostor score distribution, no ROC curve, no Equal Error Rate (EER), and no verification rate at a controlled false accept rate. The origin and justification of the 0.5 threshold are unexplained. The reported metric — "percentage of frames correctly authenticated" — is uncalibrated: without impostor pair testing, the reader cannot determine whether the system is secure or trivial. This substantially weakens the paper's claim that the dataset supports meaningful verification benchmarking. The verification results in Table 4 are, as presented, scientifically uninterpretable.
-
-- **Demographic fairness claims lack statistical support**: The paper draws conclusions about subgroup disparities (e.g., "both models performed slightly worse on the Caucasian subgroup," "female participants consistently achieved slightly higher verification rates than males") from samples of only 12–13 subjects per racial group and 25 per gender, without any confidence intervals, error bars, or significance tests. Given the small per-group N, observed differences could easily be sampling noise. The fairness benchmarking claim requires at minimum an acknowledgment of these statistical limitations, and ideally proper quantification of uncertainty.
-
-- **Overclaiming relative to dataset scale for fairness evaluation**: While 50 subjects is comparable to related specialized benchmarks (Table 1 shows similar datasets at 40–72 IDs), the paper frames VIBEFACE as "establishing a new benchmark for evaluating the robustness and fairness of biometric verification systems." With 12–13 subjects per racial group, the dataset lacks the statistical power to serve as a fairness benchmark. The eKYC contribution is real and valuable, but the fairness-benchmark framing is disproportionate to the dataset's capacity to support such analysis.
+- **The verification benchmark uses only a single uncalibrated threshold with no impostor evaluation, rendering its conclusions about model superiority and fairness unsupported.** The paper's central claim is that VIBEFACE "establishes a new benchmark for evaluating the robustness and fairness of biometric verification systems." However, Section 4.2 reports only a "percentage of frames correctly authenticated" at a fixed similarity threshold of 0.5, using a single reference image (flash frontal photo) per subject. No false accept rate, false reject rate, equal error rate, ROC curve, or threshold-independent metric (e.g., AUC) is reported. No impostor (non-mated) pairs are constructed or evaluated. A higher "authentication rate" at threshold 0.5 could simply reflect that one model's score distribution is shifted upward — the metric does not isolate genuine discriminability from calibration. The demographic and environmental robustness comparisons (e.g., "ArcFace consistently outperformed MagFace," "female participants consistently achieved slightly higher verification rates than males") are drawn from this single-threshold metric and cannot be interpreted as verification accuracy differences without knowing the security tradeoff. This is a substantive gap: the benchmark does not meet the minimum standard for a biometric verification evaluation. The data could support a proper evaluation (genuine and impostor score distributions can be constructed from the existing data), and this can be addressed with additional analysis in a revision.
 
 ### Minor
 
-- **Face detection benchmark partially saturated**: RetinaFace achieves 1.000 detection rates across most conditions (Table 3), and MediaPipe is near-ceiling in many cells. While the dataset does expose meaningful variation for MTCNN and in challenging scenarios (sessions C and E, scenarios 12–13), the detection task provides limited discrimination among strong detectors. This is not a fatal issue — the detection benchmark primarily serves to validate basic dataset usability — but limits its value as a detection challenge.
+- **Face detection benchmark is somewhat superficial and omits the most challenging scenarios.** The detection evaluation uses a simple binary "face detected / not detected" metric with no bounding-box accuracy, precision/recall, or false-positive analysis. Scenarios 17 and 18 (hand occlusion and face touching) are explicitly excluded because they "involve occlusions that significantly reduce facial visibility" — but these are precisely the challenging cases where the dataset could provide novel insight. Additionally, RetinaFace and MediaPipe achieve near-perfect scores (e.g., 1.000 on frontal views / session D) suggesting the task is saturated for stronger detectors, limiting discriminative power (Section 4.1, Table 3).
 
-- **Limited differentiation from existing benchmarks in scale/scope discussion**: The paper's Table 1 provides a useful feature comparison but does not explicitly argue why the 50-subject scale is sufficient for the claimed benchmarking goals, given that related datasets like MOBIO (150 IDs) exist. A brief power analysis or discussion of minimum sample size for fairness testing would strengthen the contribution framing.
+- **Incomplete documentation of benchmark model details.** The paper uses ArcFace, MagFace, MTCNN, RetinaFace, and MediaPipe but does not specify which pre-trained weights, model versions, training datasets, or face alignment/cropping preprocessing were used. For a benchmark intended for reproducibility, this information should be provided.
+
+- **No statistical confidence for demographic subgroup comparisons.** The demographic breakdowns report performance differences across groups with only 12–13 subjects per racial category. Reporting differences without confidence intervals or statistical tests makes the fairness conclusions tentative at best. Given the small per-group sample sizes, observed differences may not be reliable.
 
 ### Trivial
 
-- The Related Work section adequately surveys prior datasets but does not discuss how VIBEFACE's scale compares to evaluation standards in biometrics (e.g., how many subjects are needed to detect a given effect size in verification performance).
+- Video durations and per-scenario frame counts are not explicitly stated, making it difficult to assess data volume per condition. The per-subject totals (45 images, 31 videos) are given, but frame counts after 6 fps sampling depend on video length, which varies by scenario.
 
 ## Nice-to-Haves
 
-- A proper verification protocol with defined genuine/impostor pairings, ROC curves, and EER reporting would transform the benchmark from illustrative to scientifically useful.
-- Bootstrap confidence intervals or standard errors for all subgroup breakdowns would clarify which observed differences are statistically meaningful.
-- A cross-dataset evaluation showing that VIBEFACE's eKYC conditions expose failure modes that larger but less realistic datasets miss would help justify the 50-subject scale.
-- Score distribution histograms (genuine vs. impostor similarity) per session would immediately convey whether the dataset presents a challenging verification problem.
+- A proper verification protocol defining enrollment and probe splits, with both genuine and impostor pair construction, would strengthen the benchmark into a genuinely usable resource.
+- Including scenarios 17 and 18 in detection and verification evaluation would better demonstrate the dataset's ability to stress-test algorithms under occlusion.
+- Evaluation with additional face matchers beyond the two tested would broaden the baseline picture.
+- Qualitative analysis of failure cases (e.g., specific frames where detection/verification fails during rapid head motion or boundary poses) would help illustrate the dataset's diagnostic value.
 
 ## Removed Points
 
-*These points were flagged in the input reviews but are removed from the final assessment for the stated reasons.*
+*These points are flagged to be removed. Treat them with caution.*
 
-- **"Dataset of 50 identities is fundamentally too small to serve as a benchmark" (compared to millions)**: The paper's Table 1 shows comparable specialized benchmarks (Replay-Mobile: 40, OULU-NPU: 55, MobiBits: 53, HQ-WMCA: 51, Soteria: 70 IDs). The criticism conflates training-scale datasets (VGGFace2, WebFace260M) with specialized evaluation benchmarks, which routinely operate at this scale. The size concern is only valid in the specific context of per-group fairness analysis (retained as a major weakness above).
+- **Harsh Critic: "Real-world deployment claims are unsubstantiated"** — REMOVED. The harsh critic references "additional real-world deployments also validate the superiority of our AlldayWalker" as appearing in the paper abstract. This phrase does not exist anywhere in the submitted paper. The paper explicitly states data was "conducted in a controlled studio environment" (Section 3). The critic appears to have confused this paper with a different submission.
 
-- **"Paper fails to engage with the fact that existing benchmarks operate at scales two to three orders of magnitude larger"**: The paper directly engages with scale through Table 1, which lists datasets at comparable sizes (40–150 IDs). The claim that related evaluation benchmarks are orders of magnitude larger is factually incorrect for the relevant comparison class.
+- **Harsh Critic: "The evaluation framework must be fundamentally redesigned. This is not fixable by tweaking the text."** — OVERSTATED. The dataset contains the raw data needed for a proper verification evaluation (different subjects = impostors; all frames = probes). The limitation is in the current benchmark design, not an unfixable property of the dataset. A proper evaluation with genuine/impostor score distributions and standard biometric metrics can be constructed from the existing data.
 
-- **Criticism about missing related works**: Per instructions, not included as we cannot verify external references.
-
-- **Formatting/style nitpicks, typos, parser artifacts**: These are parser issues, not paper problems. Removed per instructions.
+- **Strength Finder: "Rigorous benchmark experiments that reveal real-world bias"** — WEAKENED and partially absorbed. The detection results do reveal some interesting disparities (MTCNN performance drop on African-descent subjects), but calling the experiments "rigorous" overstates the case given the verification benchmark's methodological gaps. The verified observation about MTCNN is noted in the strengths section.
 
 ## Novel Insights
 
-The paper's core insight — that eKYC procedures impose a distinctive set of interaction dynamics (head rotation, blinking, expression change, mouth opening, hand occlusion, sequential face touching) not captured by standard face verification benchmarks — is genuinely novel and practically relevant. Table 1 demonstrates that no prior public dataset includes these protocols. This opens a research direction at the intersection of biometrics and compliance-driven authentication that currently lacks public evaluation resources. The insight that combining these eKYC dynamics with variable lighting and glasses creates a uniquely challenging testbed (evidenced by performance drops in sessions C and E) is valuable even if the current evaluation protocol cannot fully quantify it.
+None beyond the paper's own contributions. The reviews did not surface a novel synthesis that the paper itself does not contain.
 
 ## Suggestions
 
-- **Fix the verification protocol as the highest priority**: Define genuine and impostor pairings, compute and report full ROC curves and EER per condition, and report verification rate at a meaningful fixed false accept rate (e.g., 10⁻² or 10⁻³). Without this, the verification benchmark cannot support any of the paper's claims.
-- **Add uncertainty quantification**: Report bootstrap confidence intervals or standard errors for all subgroup breakdowns. If statistical power is insufficient to detect meaningful demographic effects, acknowledge this explicitly and frame the dataset as a resource for studying eKYC conditions rather than as a fairness benchmark.
-- **Tone down the fairness benchmark framing**: The eKYC contribution is strong enough to stand on its own. Frame VIBEFACE as "a resource for evaluating face verification under realistic eKYC conditions with demographic metadata" rather than "a new benchmark for fairness." The dataset's demographic balance is valuable as a design feature, not as a statistical claim.
-- **Discuss the 0.5 threshold**: Explain its origin. If it was chosen arbitrarily, acknowledge this and demonstrate sensitivity to threshold choice.
+- **Redesign the verification evaluation as a proper biometric benchmark.** At minimum: (1) define an enrollment set and probe set from the dataset, (2) construct genuine pairs (same subject, different sessions/scenarios) and impostor pairs (different subjects from same session), (3) report TAR at fixed FAR thresholds (e.g., FAR=0.01, 0.001) or EER with confidence intervals, (4) report ROC curves and AUC. This can be done entirely with the existing data and would transform Section 4.2 from an interpretability problem into a genuine contribution.
 
-## Score and Decision
+- **Include the occluded scenarios (17, 18) in both detection and verification evaluation.** Even if detection is expected to fail frequently under heavy occlusion, this is valuable information that demonstrates the dataset's ability to surface failure modes.
 
-### Anchor Comparison
+- **Document model versions, pre-trained weights, and preprocessing pipelines.** Specify which ArcFace/MagFace implementations were used (e.g., InsightFace version, backbone architecture, training dataset), and whether face alignment was applied before feature extraction.
 
-| Anchor | Avg Score | Decision | Comparison to VIBEFACE |
-|--------|-----------|----------|------------------------|
-| BANZ-FS (`GMR9BUsPbq`) | 7.00 | Accept (Poster) | Substantially stronger: 35k+ instances, 116 signers, multi-level annotations, comprehensive benchmarks across tasks and domains. VIBEFACE's scale and evaluation depth are far below this standard. |
-| NH-Fair (`GLPmZhhCAE`) | 5.50 | Accept (Poster) | Stronger: 10k+ GPU-hours of systematic hyperparameter optimization, 7 datasets, multiple model families. VIBEFACE's experimental scope is much narrower, though the eKYC novelty is more original than NH-Fair's benchmarking contribution. |
-| FaceMoE (`O4f1NdXtdM`) | 5.00 | Reject | Stronger methodologically: 11 datasets, rigorous ablations, state-of-the-art results. VIBEFACE's contribution is more curatorial but fills a clearer gap. Similar level of evaluation incompleteness. |
-| FaceID-6M (`yTq81RcKaw`) | 3.50 | Reject | Similar genre (dataset paper). FaceID-6M has larger scale but limited novelty (LAION filtering pipeline), weak evaluation, and no ethical framework. VIBEFACE has a more novel angle (eKYC), stronger ethical grounding, and a comparable level of evaluation gaps. VIBEFACE is moderately stronger. |
-| VAD Dimensional Analysis (`I1TBgjF9FU`) | 3.50 | Reject | Weaker: meta-analysis with vague guidelines and limited model coverage. VIBEFACE's concrete dataset contribution with novel eKYC scenarios is more valuable. |
-| Adaptive Calibration (`7iwqu82yOC`) | 2.50 | Reject | Significantly weaker: limited novelty, outdated models, improper evaluation metrics. VIBEFACE has a clearer and more original contribution. |
-
-**Calibrated score: 4.0.** VIBEFACE makes a genuinely novel contribution with its eKYC video scenarios and strong ethical practices. However, the verification evaluation protocol is methodologically insufficient to support the paper's benchmarking claims, and the fairness conclusions are drawn without statistical support from samples too small to sustain them. The paper sits above FaceID-6M (3.50) due to stronger originality and ethical compliance, but below FaceMoE (5.00) due to weaker experimental validation. A substantially revised evaluation with proper biometric metrics and uncertainty quantification could raise this to borderline-acceptable territory.
+- **Add confidence intervals or statistical tests for demographic subgroup comparisons** to avoid over-interpreting small-sample differences.
 
 ---
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+**Calibration anchors used:**
+
+| Anchor | Avg Score | Comparison to VIBEFACE |
+|---|---|---|
+| `/home/wg25r/review_agent/human_reviews_2026/MC5KhOUT7r.md` (MIT) | 2.67 | Similar scale (12 hrs video, small channel diversity), but VIBEFACE has better ethical grounding and demographic design |
+| `/home/wg25r/review_agent/human_reviews_2026/XJ3T70nELl.md` (CrossFaceID) | 2.67 | Both face dataset papers; CrossFaceID had serious ethical/copyright issues absent here |
+| `/home/wg25r/review_agent/human_reviews_2026/dMFKprC7vR.md` (FFHQ-Makeup) | 2.50 | Synthetic dataset, different domain |
+| `/home/wg25r/review_agent/human_reviews_2026/O2Y1laOELd.md` (MVMP-HMR) | 2.50 | Different domain (HMR), small dataset |
+| `/home/wg25r/review_agent/human_reviews_2026/yTq81RcKaw.md` (FaceID-6M) | 3.50 | Face dataset paper. VIBEFACE has far stronger ethical/demographic design; FaceID-6M had better evaluation scale but similar methodological gaps |
+| `/home/wg25r/review_agent/human_reviews_2026/IjqKXnzUXx.md` (Phantom-Data) | 6.00 | Strong dataset paper. Phantom-Data had much more thorough evaluation, stronger experimental demonstration, and larger scale. VIBEFACE has a more targeted niche (eKYC) and stronger ethical collection but weaker benchmark demonstration. |
+| `/home/wg25r/review_agent/human_reviews_2026/kI27Niy4xY.md` (VIST3A) | 8.00 | Not a dataset paper, different category entirely |
+| `/home/wg25r/review_agent/human_reviews_2026/DTQIjngDta.md` (π³) | 8.00 | Not a dataset paper, different category entirely |
+
+VIBEFACE sits above the rejected dataset papers (2.50–3.50) due to its ethical rigor, demographic balance, and genuinely novel eKYC video scenarios. It is clearly weaker than Phantom-Data (6.00) because the benchmark evaluation is incomplete — the verification results as presented do not support the paper's conclusions about model ranking or fairness, which is a significant gap for a paper claiming to establish a verification benchmark. The core dataset contribution has value, but the experimental validation must be substantially improved. The paper is a borderline case with clear strengths but a major methodological gap in its primary benchmark.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

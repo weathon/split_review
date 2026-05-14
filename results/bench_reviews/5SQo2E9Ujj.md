@@ -1,92 +1,93 @@
-Now I have a thorough understanding of the paper and all the reviewer feedback. Let me write the consolidated review.
+Now I have all the information I need. Let me compose the final review.
 
 ---
 
 ## Summary
 
-This paper proposes reframing curriculum learning in goal-conditioned RL as **selective data acquisition** — a mechanism that reshapes the state–goal training distribution toward underachieved goals rather than merely an exploration heuristic. The authors test this perspective in a deterministic GridWorld using Universal Value Function Approximators (UVFAs) with potential-based reward shaping (PBRS), comparing uniform goal sampling against an edge-biased curriculum. They find that the curriculum shifts the training distribution toward harder edge goals, yielding modest success-rate improvements on those goals, with a weighted variant amplifying the effect.
+This paper proposes reframing curriculum learning in goal-conditioned RL as **selective data acquisition** — a structural mechanism that reshapes the state–goal training distribution to improve function approximation in targeted regions. The authors compare uniform goal sampling against edge-biased curriculum sampling in a deterministic GridWorld with potential-based reward shaping, training UVFAs on fixed-size datasets. Results show that curriculum shifts the training distribution toward harder edge goals and yields modest improvements in edge-goal success rates (+0.08 for baseline curriculum, +0.18 for a weighted variant), supporting the view that curricula function as tunable data-acquisition mechanisms rather than mere exploration heuristics.
 
 ## Strengths
 
-- **Clean conceptual reframing**: The paper offers a genuinely interesting lens on curriculum learning — viewing it as a structural mechanism for reshaping training data distributions rather than merely an exploration heuristic. This perspective, articulated in the introduction (lines 46–53), provides a useful organizing principle connecting curriculum design to function approximation.
-- **Intentional experimental design**: The use of PBRS is a deliberate choice to decouple distributional effects from exploration artifacts. By providing dense rewards, PBRS ensures agents can reach goals under both conditions, isolating whether curricula improve performance specifically through distributional shifts rather than through better exploration (Section 2.3). This design choice serves the paper's stated goals.
-- **Tunability demonstration**: The comparison between baseline and weighted curricula (Section 3.2, Fig. 3) shows that more aggressive biasing toward harder goals amplifies edge-goal gains (Δ ≈ +0.18). This supports the interpretation that curricula function as adjustable structural mechanisms rather than binary on/off switches.
-- **Honest limitations**: Section 4.1 candidly acknowledges the small scale, hand-designed curricula, and modest/inconsistent gains. This forthrightness is refreshing.
+- **Conceptually useful reframing.** The perspective that curricula act through distributional effects on training data — shaping what the function approximator sees — is cleanly articulated and provides a productive lens for thinking about curriculum design. The paper frames this as a structural, not incidental, role for curricula (Section 1, lines 46–53).
+
+- **Controlled experimental design.** By using fixed-size datasets per seed and identical UVFA architectures across conditions (Section 2.4–2.5), the paper isolates the effect of curriculum-induced distributional shifts from confounds like total data quantity or model capacity. This is a genuine strength.
+
+- **Graded curriculum effect.** The comparison of uniform, baseline curriculum, and weighted curriculum (Curr-W, Section 3.2, Figure 3) shows that stronger re-weighting toward edge goals amplifies improvements (Δedge ≈ +0.18), providing evidence that curriculum effects are tunable and tied to the magnitude of distributional shift.
+
+- **Honest about limitations.** The discussion (Section 4.1) acknowledges the simplicity of the GridWorld setting, the manual nature of the curriculum, and the modest effect sizes. This intellectual honesty is commendable.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **Data-quantity confound undermines the central claim**: The paper fixes the number of *episodes* (1000 per seed, line 153) rather than the total number of *transitions*. Since edge-goal episodes require more steps to reach distant goals under greedy PBRS action selection, the edge-biased curriculum condition produces strictly more training data (state–action pairs) than the uniform condition. The paper states it collects "fixed-size datasets" (line 137), but "size" refers to episode count, not transition count. As a result, the reported improvements could be entirely explained by having more training data rather than by any distributional property of the curriculum. This confound prevents attribution of the effect to the paper's core hypothesis (selective data acquisition via distributional bias) and must be controlled — e.g., by fixing total transitions or subsampling — for the central claim to be supported.
-
-- **Headline claim about approximation error is never tested**: The abstract (line 16) and introduction (line 63) prominently assert that curricula "reduce approximation error." However, the paper reports zero measurements of value-function approximation quality — no MSE, Bellman error, or any analogous metric on held-out (s,g) pairs. The only evaluation is downstream policy success rate. The paper therefore provides no direct evidence for the very quantity it claims to improve, creating a substantial gap between stated contributions and empirical support.
-
-- **No comparison to any existing curriculum-learning method**: The paper compares only uniform sampling vs. a hand-designed edge bias vs. a weighted edge bias. It does not compare against any established curriculum method — automatic goal generation (Held et al., 2018), teacher–student frameworks (Matiisen et al., 2019), TD-error prioritization, or even simple baselines like training on the hardest goals only. Without such comparisons, it is impossible to assess whether the proposed "selective data acquisition" perspective yields any practical advantage over existing approaches, or whether any non-uniform sampling would produce similar effects.
+None that fundamentally invalidate the core claim. The paper's central demonstration — that biasing goal sampling shifts the training distribution and improves performance in targeted regions — is supported, albeit modestly.
 
 ### Minor
 
-- **Internal numerical inconsistency**: The text reports overall success at H=16 as 0.361 ± 0.060 (NoCurr) and 0.370 ± 0.151 (Curr) on line 180, while Table 1 reports 0.276 ± 0.055 and 0.297 ± 0.056 respectively for the same horizon. These discrepancies are substantial and unexplained — they indicate either different aggregation, an error, or unreported filtering. This undermines confidence in the reported numbers.
+- **Missing direct measurement of function approximation error.** The abstract and introduction claim curricula "reduce approximation error," but the results section reports only policy success rates. The causal chain (curriculum → shifted training distribution → reduced UVFA prediction error → improved policy) has a missing link: the paper never evaluates the UVFA's value prediction accuracy on a held-out set of (state, goal) pairs. Policy success is a downstream proxy, not a direct measure of approximation quality. This is addressable — the UVFA training objective is MSE regression, so held-out MSE is straightforward to compute.
 
-- **Modest results with large variance and no significance testing**: The reported gains are small (overall Δ = +0.021, edge Δ = +0.083) relative to standard deviations that often exceed the effect size. No statistical significance tests are conducted. While the paper acknowledges "gains were modest and sometimes inconsistent across seeds" (line 285), it still presents results affirmatively without quantifying reliability.
+- **Minimal experimental setting with modest, noisy results.** Experiments use only a deterministic GridWorld with Manhattan-distance PBRS. While the paper acknowledges this limitation (Section 4.1), the scale is very limited: 3 seeds, effect sizes near the noise floor (e.g., edge-goal success: NoCurr 0.183 ± 0.131 vs. Curr 0.217 ± 0.125; error bars substantially overlap), and no statistical tests beyond mean ± std. The high variance relative to effect sizes means the conclusions, while directionally consistent, are not statistically grounded.
 
-- **Very limited scale**: The entire study uses a single deterministic GridWorld, three seeds, 1000 episodes, and a small MLP (64 hidden units). This is acknowledged as a limitation (Section 4.1), but the narrow scope severely limits the generality of any conclusions drawn, particularly the paper's framing as a pathway toward "open-ended learning."
+- **Key experimental details omitted.** The paper never specifies the grid dimensions, the exact proportion of edge goals in the curriculum, or the precise weighting scheme for Curr-W. These omissions hinder reproducibility and make it hard to assess how sensitive results are to these design choices.
+
+- **OEL connection overclaimed relative to evidence.** The abstract claims the work "suggest[s] a pathway toward more persistent and open-ended agents." A deterministic GridWorld with hand-designed edge-biased sampling provides very thin evidence for claims about open-ended learning. The paper would be stronger if it restricted its claims to what the experiments actually demonstrate.
 
 ### Trivial
 
-- Table 1 caption is truncated ("Table 1: Pc").
-- The metric for "training distribution" in Fig. 2 is undefined — it is unclear whether bars represent fraction of episodes, fraction of transitions, or something else.
+- The reference list contains a placeholder entry ("First Wang and Others. Title placeholder for wang et al. 2024") that should be resolved or removed. Several other references (Campero et al., Colas et al., Forestier et al., Chevalier-Boisvert 2018/2019, Lomonaco et al., Wei et al., Ouyang et al., Racanière et al., Graves et al., Team 2021) do not appear to be cited in the body text.
 
 ## Nice-to-Haves
 
-- It would strengthen the paper to visualize learned value maps for interior vs. edge goals across conditions, showing concretely how (or whether) the curriculum changes the structure of the UVFA's approximations.
-- A sparse-reward baseline (without PBRS) would help assess whether the distributional effects of curricula generalize beyond the dense-reward setting used here.
-- Reporting training dynamics (success over episodes) for both conditions would reveal when and how the curriculum diverges from uniform sampling.
+- Comparing against an established curriculum method (e.g., reverse curriculum generation, teacher-student) would contextualize the effect sizes and strengthen the empirical case that the framing generalizes beyond this specific curriculum design.
+- An adaptive curriculum variant (e.g., threshold-based: increase sampling of goals where success rate < τ) would connect the paper's framing to the "zone of proximal development" concept it invokes and move beyond a fixed edge bias.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution.*
+*These points were flagged for removal. Treat them with caution.*
 
-- **"PBRS makes environment too benign"** (harsh critic): The paper *intentionally* uses PBRS to decouple distributional effects from exploration. This is a deliberate experimental design choice, not a flaw. The harsh critic's objection that "the environment is so benign that even uniform sampling yields partial success" misunderstands the purpose — the paper is not studying exploration difficulty, it is studying data distribution effects. The criticsm that PBRS "largely solves the exploration and credit-assignment difficulty" is true, and that is precisely the point of using it.
+1. **"Experimental design does not support the central claim — practice effect confound" (Harsh Critic Point 1).** The critic argued that the observed improvement is "trivially explained" as more practice attempting edge goals rather than a structural distribution-shaping mechanism. **Removal justification:** The paper's central claim IS that curricula work by selectively acquiring more data on harder goals, which improves function approximation. The "practice effect" the critic identifies IS the selective data acquisition mechanism the paper describes. The critic demands the paper demonstrate a mechanism other than the one it explicitly claims. However, the valid sub-point — that the paper never directly measures function approximation error — is retained above as a minor weakness.
 
-- **"Open-ended learning connection is unsupported"** (harsh critic): The paper frames OEL as motivation and future direction, not as a demonstrated contribution. Section 5 states "the integration of curricula with UVFAs offers a promising pathway toward more persistent and open-ended agents" — this is clearly forward-looking, not a claim of having achieved open-ended learning. The harsh critic's demand that the paper demonstrate OEL is scope creep.
+2. **"Missing baseline that controls for total number of attempts on edge goals" (Harsh Critic Point 3, part).** The critic demanded a condition where edge goals receive the same total attempts as in the curriculum condition but without the curriculum's distributional structure. **Removal justification:** This is incoherent — the curriculum IS the distribution. You cannot give edge goals the same number of attempts without having the same distributional bias. The paper's comparison (same total episodes, different goal distributions) is the correct control for its claim.
 
-- **"Reframing is not novel"** (harsh critic): The paper acknowledges existing literature (Graves et al., 2017; Portelas et al., 2020) that discusses sampling distributions. The paper's contribution is the empirical study of this perspective in GCRL with UVFAs, not claiming the reframing itself is entirely novel. Per instructions, we do not adjudicate novelty claims based on external knowledge gaps.
+3. **Multiple formatting/style nitpicks about typos, spelling, grammar (Harsh Critic, general).** **Removal justification:** These are parser artifacts per the instructions. The original submission does not have these issues.
 
-- **"Bridging to open-ended learning" as a strength** (strength finder): This is merely a citation and aspirational framing, not a demonstrated contribution. Removed as a substantive strength.
+4. **"Trivial task setting cannot support any claims" — overstatement (Harsh Critic Point 2, partially).** The critic claimed the GridWorld setting is so trivial it "cannot answer the question the paper poses." **Removal justification:** The paper's question is whether curricula reshape training distributions and improve targeted performance. A GridWorld can and does answer this — the setting's simplicity enables clean isolation of the distributional variable. The valid concern about overclaiming to OEL is retained as a minor weakness.
 
-- **"Decoupling approximation quality from exploration" as a strength** (strength finder): While PBRS does decouple distributional effects from exploration, the paper never actually measures approximation quality — only success rates. The claimed decoupling is methodological rather than demonstrated, so this point is weakened significantly.
+5. **"Missing appendix" (Harsh Critic).** **Removal justification:** Per instructions, the parser strips appendix sections. The original submission may have appendix content.
 
-- **Missing comparisons to specific named methods** (harsh critic's "Obvious Next Steps"): The harsh critic demands comparison to "SPDR, goal GAN, or naive prioritization by TD-error." Per instructions, we do not flag missing comparisons to methods whose existence we cannot independently verify. The general point that no external curriculum baseline is included is retained as a major weakness, but specific method names are removed.
+6. **"References are never cited" — all uncited references (Harsh Critic).** **Removal justification:** Some of these may be cited in the stripped appendix. Only the placeholder reference is clearly a problem and is kept as a trivial weakness.
+
+7. **Strength Finder's generic strength about "important problem / interesting question."** **Removal justification:** No such generic strength was present in the Strength Finder output. All three strength finder points were specific and evidence-backed — they are retained.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reframing of curriculum as selective data acquisition is the paper's core idea, and the reviews do not surface additional novel observations beyond evaluating its execution.
+The reframing of curriculum learning as selective data acquisition — emphasizing its role in shaping the training distribution for function approximation rather than merely guiding exploration — is a genuinely useful conceptual lens. The paper makes explicit a perspective that has been implicit in much curriculum work: that curricula are fundamentally about what data the learner sees, not just what tasks it attempts. The graded curriculum experiment (Curr vs. Curr-W) provides preliminary evidence that this framing supports thinking about curricula as tunable distributional mechanisms, where stronger re-weighting amplifies effects in targeted regions.
 
 ## Suggestions
 
-- **Control for data quantity**: The most urgent fix is to hold total transitions constant across conditions (e.g., by fixing total environment steps rather than episode count, or by subsampling the larger dataset). Without this, the central claim cannot be evaluated.
-- **Measure approximation error directly**: Report MSE or Bellman error on a held-out set of (s, g) pairs, broken down by goal difficulty (interior vs. edge). This would directly test the headline claim in the abstract.
-- **Add a curriculum baseline**: Even a simple non-uniform sampling baseline (e.g., TD-error prioritization, or sampling inversely proportional to success rate) would contextualize whether the proposed edge-biased distribution provides benefits beyond generic non-uniformity.
-- **Clarify the data**: Resolve the numerical inconsistency between the text (line 180) and Table 1, and define the metric used in Fig. 2's training distribution bars.
+- **Add direct approximation error evaluation.** Compute held-out MSE of UVFA predictions against PBRS targets, broken down by goal type (interior vs. edge), and report alongside success rates. This would close the gap between the claimed mechanism and the measured outcome.
+- **Specify all experimental parameters.** Grid dimensions, exact proportion of edge goals, and the precise weighting formula for Curr-W are essential for reproducibility and should be stated explicitly.
+- **Run more seeds or report confidence intervals.** With n=3 and overlapping error bars, the current results are suggestive but not statistically compelling. Either increasing seeds to 5–10 or reporting bootstrap confidence intervals would substantially strengthen the evidence.
+- **Tone down OEL claims.** Reserve the open-ended learning connection for the discussion/future work section, and remove "suggesting a pathway toward more persistent and open-ended agents" from the abstract unless stronger evidence is provided.
 
 ---
 
-## Calibration Against Human-Reviewed Anchors
+**Anchor comparison for score calibration:**
 
-| Anchor Paper | Path | Avg Score | Comparison |
-|---|---|---|---|
-| Demystifying Emergent Exploration in GCRL | mwgYORsqtv.md | 6.00 | Combines theory with controlled experiments; clearly stronger in rigor, novelty, and breadth. |
-| Dual Goal Representations | aMKFTidLSM.md | 5.50 | Novel representation method with strong OGBench results; substantially more mature contribution. |
-| Scaling GCRL with Multistep Quasimetric Distances | UElh7vzgKX.md | 5.20 | Strong empirical results across many benchmarks including real-world; far more thorough. |
-| Test-Time Graph Search for GCRL | PDG8COkj7t.md | 3.00 | Novelty concerns but well-designed experiments on standard benchmarks. Our paper has a more novel framing but substantially weaker experimental validation — roughly comparable overall. |
-| Hierarchical Contrastive RL | rTCSFOzVcK.md | 3.00 | Incremental method, missing critical experiments, clarity issues. Our paper is cleaner but similarly limited in experimental scope. Comparable tier. |
-| Boosting RL via Human-Informed Curriculum | G1xlmY69pG.md | 2.50 | Marginal novelty in a well-known domain. Our paper has a more interesting conceptual framing but similarly limited validation. Slightly stronger. |
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| Human-informed curriculum for 3D visuospatial | G1xlmY69pG | 2.50 | Weaker than our paper: less clear contribution, weaker experimental design, single task. |
+| CURATE (auto curriculum) | 7wdCgG6K7i | 2.80 | Comparable in scale but our paper has clearer conceptual framing and cleaner experiments. |
+| HCRL (hierarchical contrastive GCRL) | rTCSFOzVcK | 3.00 | Similar tier: incremental contribution with experimental gaps. Our paper is better presented but has less experimental breadth. |
+| SIERL (search-inspired exploration) | Rqs5MbvQ3m | 3.50 | Slightly stronger: novel method with experiments in multiple environments. Our paper has a clearer conceptual contribution but less empirical scale. |
+| CL4AD (curriculum for autonomous driving) | ZMDoV1RaXC | 5.00 | Clearly stronger: large-scale experiments with practical impact. Our paper's conceptual reframing is interesting but the experimental evidence is far smaller. |
+| Dual Goal Representations | aMKFTidLSM | 5.50 | Much stronger: theory + diverse experiments on standard benchmarks. |
+| Demystifying SGCRL | mwgYORsqtv | 6.00 | Much stronger: theory + controlled experiments in multiple settings including continuous control. |
+| World models with non-curated data | oBXfPyi47m | 8.00 | Far stronger: comprehensive experiments across 72 tasks, 6 embodiments. |
 
-The paper under review sits clearly in the reject tier. It has an interesting conceptual perspective but the execution — a single tiny GridWorld, a data-quantity confound, unsupported headline claims about approximation error, and no comparison to any existing curriculum method — places it below the acceptance threshold. It is comparable to the 3.0-rated papers in the anchor set but does not surpass them.
+The paper under review presents a conceptually interesting reframing with clean but minimal experiments. It sits above the 2.5–3.0 tier (which had unclear contributions or major presentation issues) but clearly below the 5.0+ tier (which had substantial experimental scale or theoretical depth). The modest, noisy results in a single simple environment place it at the borderline-reject level.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

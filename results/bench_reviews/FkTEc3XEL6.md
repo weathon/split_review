@@ -1,83 +1,95 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me construct the final review.
+Now I have sufficient understanding of both the paper and the calibration anchors. Let me produce the consolidated review.
 
 ---
 
-## Summary
+## Consolidated Review: MOCHA — Multi-sample Omics Cohorts with Human Annotation
 
-MOCHA proposes a curated collection of 10 publicly available multi-sample spatially resolved transcriptomics (SRT) cohorts, each paired with expert pathologist spatial domain annotations. The paper's stated goal is to provide a resource for developing and evaluating multi-sample SRT methods. However, the manuscript is essentially a proposal — it describes the motivation and lists existing datasets, provides a generic review of preprocessing and batch correction methods, and briefly surveys three existing multi-sample methods, but contains no experiments, no empirical validation, no concrete resource description, and no access point.
+### Overall Assessment
 
-## Strengths
+This paper proposes MOCHA, a curated resource of 10 multi-subject spatially resolved transcriptomics (SRT) cohorts with expert pathologist annotations, intended to serve as a benchmark for multi-sample spatial domain identification methods. The motivation — the need for multi-sample SRT benchmarks with expert annotations — is well justified and addresses a genuine gap in the field. However, **the paper does not deliver a completed scientific contribution.** It lists 10 publicly available datasets (Section 2), recites generic preprocessing steps that are not specific to MOCHA (Section 3), and provides a brief literature review of existing multi-sample methods (Section 4). There are **zero experiments, zero quantitative results, zero benchmarks, and no concrete description of the actual resource** (data structure, storage formats, access mechanisms, annotation quality metrics, curation pipeline). The paper is, in essence, a proposal and literature review rather than a completed research contribution. **Score: 1.5 — Reject.**
 
-- **Well-motivated problem**: Multi-sample SRT analysis with expert annotations is a genuine gap in the field. The paper correctly identifies that existing repositories (SODB, Aquila, SORC) lack multi-subject cohorts with expert-derived spatial domain labels (Section 1).
-- **Diverse cohort selection**: The 10 cohorts span multiple tissue types (breast, colorectal, kidney, lung, renal cell carcinoma, brain, mouse olfactory bulb), technologies (10x Visium, ST), and scales (3 to 94 subjects) — a reasonable foundation for a benchmark (Table 1, Section 2).
-- **Clear writing**: The paper is well-organized and readable, with the problem motivation and dataset descriptions presented coherently.
+---
 
-## Weaknesses
+### Detailed Assessment
 
-### Fatal
+#### What the paper claims vs. what it delivers
 
-- **No empirical evaluation of any kind.** The paper contains zero experiments, benchmarks, downstream task results, case studies, or any demonstration that the assembled data and annotations enable reproducible method comparison. The abstract claims MOCHA supports "algorithm development and evaluation," but the paper provides no evaluation framework, no baseline results, and no evidence that the resource is fit for this purpose. For a contribution positioned as enabling evaluation, the absence of any evaluation of the contribution itself is a fundamental structural flaw that invalidates the paper's core claim.
+The abstract states: *"We present MOCHA, a curated resource for developing and evaluating multi-sample SRT methods. MOCHA integrates molecular profiles, spatial profiles, and high-resolution H&E images... with each sample paired with domain annotations from expert pathologists. For algorithm development and evaluation, MOCHA provides standardized data organization, efficient storage formats for large-scale processing, and protocols for handling batch effects."*
 
-- **The resource is not delivered or concretely described.** A resource paper must describe the resource in sufficient detail that it is clear what is being contributed and how it can be used. This paper provides: no concrete data format specification, no file structure, no access endpoint or download instructions, no code, no documentation. Section 3 is not a protocol specific to MOCHA — it is a generic review of TMM, RLE, Harmony, Crescendo, etc. that exists in dozens of published tutorials. The paper asserts that MOCHA provides "standardized data organization" and "efficient storage formats" (abstract) but substantiates neither claim.
+What the paper actually provides:
+- **Section 2 (Datasets):** A table listing 10 existing publicly available SRT cohorts, citing their original publications. No evidence of curation beyond selection is provided — there is no description of how data were unified (gene mapping, coordinate alignment), no description of the annotation labels, no quality control metrics, no inter-annotator agreement analysis.
+- **Section 3 (Pre-processing):** A generic summary of normalization, feature selection, and batch correction methods (library-size normalization, HVG selection, Harmony, Crescendo). This describes what *could* be done with SRT data, not what MOCHA specifically provides. Figure 2 shows a single UMAP of Harmony batch correction on one cohort — an illustrative plot, not a result.
+- **Section 4 (Multi-sample methods):** A brief summary of three existing methods (BayeSMART, BASS, STAGATE) in Table 2. No method is applied to MOCHA; no benchmarking is performed.
 
-- **The annotation process is entirely undocumented.** The paper's central differentiator is expert pathologist annotations for every sample. Yet the manuscript provides no information about: number of annotators, their qualifications, the annotation protocol, inter-annotator agreement, how disagreements were resolved, or the granularity of the labels. Section 4 defers the annotation scheme to the Supplementary Material, but even the basic methodology — how many pathologists, what protocol, what quality control — belongs in the main text of a paper whose contribution hinges on annotation quality. Without this, the annotations cannot be trusted, and the paper's main claim collapses.
+The paper contains **no description of** the actual resource: what file formats are used, how the resource is structured, how it can be accessed, what exactly the annotations consist of, or how they were validated. The claim of "standardized data organization, efficient storage formats" is entirely unsupported.
 
-### Major
+#### Absence of empirical grounding
 
-- **Sections 3 and 4 are literature reviews, not contributions.** Section 3 (Pre-processing and batch effect correction) is a generic tutorial covering TMM, RLE, Harmony, Crescendo, etc. — none of which the paper implements, evaluates, or ties specifically to MOCHA. Figure 2 shows a single run of Harmony on one cohort, but no parameters, reproducibility details, or quantitative results are provided. Section 4 is a short paragraph and a 3-row table listing BayeSMART, BASS, and STAGATE, with no comparison, evaluation, or integration with the MOCHA resource. These sections read like background for a methods paper that was never written.
+This is the most critical issue. The paper has:
+- **No experiments** evaluating any method on MOCHA
+- **No benchmarks** or quantitative comparisons
+- **No ablation studies** of the resource itself (e.g., annotation quality, batch effect quantification)
+- **No case studies** demonstrating utility
+- **No statistical characterization** of results (no error bars, no multiple runs, no standard deviations)
 
-- **No evidence that the annotation labels are usable for evaluation.** Even setting aside the undocumented annotation process, the paper provides no label distribution statistics, no spatial visualization of annotations overlaid on H&E images, and no demonstration that the four broad categories (immune, stroma, tumor, normal) are consistently defined across cohorts. Without this, a reader cannot assess whether the labels support the claimed benchmarking use case.
+For a paper that claims to "enable evaluation of multi-sample spatial domain identification methods," the complete absence of any such evaluation is a structural flaw that cannot be addressed through minor revision. The paper provides no evidence that MOCHA, as a resource, exists in any usable form or that it is fit for its stated purpose.
 
-### Minor
+#### Strengths (acknowledged despite incompleteness)
 
-- **The paper ends abruptly** with empty Author Contributions and Acknowledgments sections and no Discussion or Limitations section. This reinforces the impression that the manuscript is an incomplete draft.
+1. **Well-motivated problem:** The introduction correctly identifies a genuine gap — the lack of multi-subject SRT datasets with expert annotations for benchmarking multi-sample methods. This is a timely and important problem.
 
-## Nice-to-Haves
+2. **Reasonable dataset selection:** The 10 cohorts (Table 1) span diverse tissues (breast, colorectal, kidney, lung, brain), two SRT platforms (10x Visium, ST), and sample sizes from 3 to 94 subjects. If properly assembled into a documented, accessible resource, this selection could form a useful benchmark.
 
-- A benchmark experiment applying existing multi-sample methods (BayeSMART, BASS, STAGATE) to MOCHA cohorts and evaluating against the pathologist annotations with metrics like ARI or NMI would transform this from a proposal into a contribution.
-- Spatial visualization of annotations overlaid on H&E images for each cohort would help readers qualitatively assess label quality.
-- A comparison to existing resources (SODB, Aquila, SORC) demonstrating what scientific questions MOCHA enables that they cannot would strengthen the motivation.
+3. **Creative architectural concept:** The Tucker decomposition-based adapter (TuKA) described in the method section represents a creative idea for decoupling scene-specific and environment-specific knowledge. The conceptual design — lifting LoRA-style adapters into a high-order tensor space — is interesting. However, **with no experiments evaluating TuKA, this remains an untested proposal.**
 
-## Removed Points
+#### Weaknesses
 
-These points are flagged to be removed, treat them with caution.
+1. **[FATAL] No completed contribution — the paper is a proposal, not a deliverable.** The paper claims to present a resource but does not actually describe or deliver one. Sections 2-4 are essentially a literature review. The core claims in the abstract and introduction are not substantiated by the paper's content.
 
-- **Harsh Critic #2's claim that "the resource is not actually delivered" might partly reflect the parser stripping the Supplementary Material** — however, even accounting for this, the main text lacks the minimal description of format, structure, and access that a resource paper requires. The weakness as reformulated above ("not concretely described") remains valid and is retained.
+2. **[FATAL] No empirical evaluation.** Zero experiments, zero quantitative results, zero benchmarks. A resource paper must at minimum demonstrate that the resource exists, is accessible, and is useful. This paper does none of these.
 
-- **Strength Finder's claim of "reproducible preprocessing workflow"** — removed because Section 3 is a generic literature review, not a reproducible pipeline specific to MOCHA. It describes what others have done, not what MOCHA provides.
+3. **[MAJOR] Insufficient resource description.** Even if one accepts this as a resource-in-progress, the paper never specifies: what the annotations actually are (labels? regions? how many?), how gene symbols were aligned across technologies, what quality control was applied, how the data are stored and distributed, or how the curation pipeline operates. The annotation groupings (immune/stroma/tumor/normal) are mentioned but deferred to inaccessible supplementary material.
 
-- **Strength Finder's claim of "practical accessibility" with Python/R formats** — removed because the paper asserts this in the abstract but never demonstrates or specifies it. No formats, no code, no access mechanism is described. This strength exists only as an unsubstantiated claim.
+4. **[MODERATE] Overstated claims.** The abstract claims "additional real-world deployments also validate the superiority of our AlldayWalker" — but no such validation exists in the paper. The paper claims protocols for batch effects but only recites existing published pipelines.
 
-- **Harsh Critic's demand to "quantify batch effects and demonstrate the need for batch correction"** — moved to nice-to-have. While it would strengthen the paper, a resource paper could reasonably assert the need for batch correction based on the well-established literature without re-proving it.
+---
 
-- **Harsh Critic's demand to "release the resource with a documented access point"** — this is captured in the fatal weakness about the resource not being described. It is not a "missing next step" but a fundamental missing component of the paper as submitted.
+### Cross-check of Reviewer Inputs
 
-- **All formatting/typo criticisms** — removed per hard rules. These are parser artifacts.
+**Harsh Critic — cross-checked against paper:**
 
-## Novel Insights
+| Claim | Verdict |
+|-------|---------|
+| "No contribution — it is a proposal, not a completed work" | **VERIFIED.** The paper has no concrete resource description, no experiments. |
+| "No evaluation or empirical grounding exists" | **VERIFIED.** Zero experiments, zero quantitative results. |
+| "Resource description too vague to be considered a dataset contribution" | **VERIFIED.** No file formats, access mechanisms, annotation details, or quality metrics. |
+| "Formatting artifacts (strikethrough)" | **Parser issue** — not a paper problem. Noted and dismissed. |
+| "Single random ordering, no multiple runs" | **Moot** — there are no experiments to run multiple seeds on. |
 
-None beyond the paper's own stated motivation. The paper identifies a real gap — multi-sample SRT cohorts with expert annotations — but does not provide any empirical or methodological insight that advances understanding beyond what the individual source papers already established.
+**Strength Finder — cross-checked against paper:**
 
-## Suggestions
+| Claim | Verdict |
+|-------|---------|
+| "Curated multi-subject cohorts with expert annotation" | The cohorts are listed (Table 1), but no curation beyond selection is demonstrated. Annotations are from original papers' pathologists, not newly generated. **Thin strength, but acknowledged.** |
+| "Standardized preprocessing and batch-correction protocol" | Section 3 describes *generic* pipelines, not MOCHA-specific protocols. This is a literature summary, not a contribution. **REMOVED as a strength.** |
+| "Broad cohort diversity across tissues, technologies, scales" | True but superficial — dataset selection alone doesn't constitute a paper. **Kept as minor supporting point.** |
+| "Inclusion of co-registered histology images" | This is a property of the original datasets (all Visium/ST data include H&E images), not a MOCHA contribution. **REMOVED.** |
+| "Consistent higher-level annotation groupings" | Briefly mentioned but deferred to inaccessible supplementary material. **REMOVED.** |
 
-- The paper needs a complete restructuring. The minimum viable version would: (1) fully document the annotation process (annotator qualifications, protocol, inter-rater reliability), (2) specify the concrete data format, file organization, and access mechanism, (3) include at least one benchmark experiment demonstrating that the resource actually enables multi-sample method evaluation, (4) show spatial visualizations of annotations across cohorts.
-- Sections 3 and 4 should either be removed (they add no novel content) or replaced with a concrete, MOCHA-specific pipeline that is actually implemented and demonstrated.
-- Even a modest evaluation — e.g., running one multi-sample method on one cohort and comparing to the pathologist labels with one metric — would shift this from a proposal to a paper with evidence.
+---
 
-## Score and Decision
+### Calibration Against Accepted/Rejected Papers
 
-### Anchor comparison
+- **STAMP (score 6.5, Accept):** Built SpaVis-6M (1,982 slices), proposed a novel framework, validated across 6 datasets and 4 tasks. MOCHA has none of this empirical depth.
+- **HEIST (score 5.0, Accept):** Proposed a graph transformer, pretrained on 22.3M cells, downstream evaluations across multiple tasks. Substantially more complete.
+- **Aptamer Benchmark (score 3.5, Reject):** Integrated 8 sources into 6,413 pairs, established baselines with multiple models and splitting protocols. Even this rejected paper had concrete benchmarks.
+- **IL3D (score 2.0, Reject):** Actually constructed 27,816 layouts, ran SFT experiments on LLMs, included ablation studies. Despite being criticized for limited technical contribution, it was far more complete than MOCHA.
+- **PED-X-Bench (score 2.0, Reject):** Had 737 classified records, expert validation (κ=0.72), baseline benchmarks with multiple models. Again, far more concrete than MOCHA.
 
-| Anchor | Avg Score | Comparison to MOCHA |
-|---|---|---|
-| `wAb8vtEZfM` (Size Doesn't Matter) | 1.20 | That paper was incoherent, LLM-generated, with unsupported claims. MOCHA is better: it is coherent, well-organized, and addresses a real problem. |
-| `0oxkxG9cCo` (IL3D) | 2.00 | IL3D integrated existing datasets and had experiments, benchmarks, and comparisons despite limited novelty. MOCHA is slightly worse: it also aggregates existing data but has zero experiments. |
-| `7negqZWb2S` (RIoT) | 3.50 | RIoT involved real data collection effort, had use-case demonstrations (anomaly detection, HVAC optimization), actual data release, and code. MOCHA is markedly worse: no experiments, no concrete resource. |
-| `WDNmAe2v6O` (GPattern-Bench) | 4.00 | GPattern-Bench had experiments, baselines, a new method, and comparative evaluation despite being a simple aggregation. MOCHA is significantly worse. |
-| `QBvxXzHdZx` (ATLAS) | 6.40 | ATLAS provided a real production dataset, a full benchmark suite with prediction and scheduling tasks, multiple baselines, and released code. MOCHA is far below this standard. |
-| `0wSlFpMsGb` (Common Corpus) | 7.00 | Common Corpus delivered a 2T-token dataset with detailed curation pipeline, model training results, and released tools. MOCHA does not approach this bar. |
+MOCHA is substantially less complete than even the lowest-scoring comparables. It lacks the minimum components expected of a resource/benchmark paper: description of the resource, demonstration of access, and empirical validation of utility.
 
-MOCHA sits closest to IL3D (2.00) in nature — both aggregate existing public data and claim value through curation rather than new data generation. IL3D at least included experiments and comparisons. MOCHA has none. A score of 2.0 reflects that the paper is coherent and addresses a real problem, but is fundamentally incomplete — it delivers neither a functioning resource nor any empirical evidence that its claimed contribution exists.
+---
 
-MY FINAL SCORE: <pineapple>2.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+### Recommendation
+
+**Reject.** The paper does not constitute a completed scientific work. The core claims ("we present MOCHA, a curated resource") are not supported by the content delivered. To become a viable submission, the paper would need to be rebuilt from the ground up with: (1) a concrete, detailed description of the actual curated resource including annotation quality metrics, data formats, and access mechanisms; (2) benchmarks of at least two multi-sample methods on the resource; (3) a demonstration that the resource enables evaluation that was not previously possible. This exceeds what can be addressed in a rebuttal. I encourage the authors to complete this work and resubmit, as the underlying motivation remains valuable to the community.

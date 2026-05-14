@@ -1,89 +1,86 @@
-Now I have thoroughly read the paper. Let me synthesize the final review.
-
----
+Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
 
 ## Summary
 
-This paper introduces Spherical Watermark, an encryption-free watermarking framework for diffusion models that converts binary watermark bits into Gaussian-like noise via a binary embedding matrix and a spherical mapping (projection onto the unit sphere, orthogonal rotation, and chi-square radius scaling). The method requires no per-image key storage, achieves extraction speeds roughly four orders of magnitude faster than PRC Watermark, and empirically matches unwatermarked image quality (FID) while maintaining robust watermark extraction under diverse post-processing and adversarial attacks.
+Spherical Watermark introduces an encryption-free, lossless watermarking framework for diffusion models. The core idea is a three-stage pipeline — binary embedding (mixing watermark bits with random padding for 3-wise independence), spherical mapping (projecting onto the unit sphere via a spherical 3-design, applying orthogonal rotation, and scaling by chi-square radius), and diffusion integration — that maps binary watermarks into Gaussian-like noise without modifying the pretrained model. The method eliminates the per-image key storage burden of Gaussian Shading and the heavy cryptographic decoding of PRC Watermark, achieving orders-of-magnitude faster extraction while preserving visual fidelity and robustness under diverse attacks.
 
 ## Strengths
 
-- **Novel algorithmic contribution.** The use of a spherical 3-design — constructed from a 3-wise independent binary code projected onto the unit sphere — as the core mechanism for lossless-to-the-eye watermarking is genuinely clever and well-motivated. The three-stage pipeline (binary embedding → spherical mapping → diffusion integration) is clean and principled (Section 3.2).
+- **Clean, well-motivated design with theoretical grounding**: The binary embedding → spherical mapping → orthogonal rotation pipeline is elegant. Theorem 3.1 (3-wise independence), Theorem 3.2 (spherical 3-design), and the supporting lemmas form a coherent theoretical chain that explains why the watermarked noise approximates a standard Gaussian — up to third-order moments, as the paper honestly states in the abstract. The connection to spherical designs is a genuinely novel bridge between coding theory and lossless watermarking.
 
-- **Dramatic computational efficiency gain.** Extraction is approximately four orders of magnitude faster than PRC Watermark (Figure 4), enabled by the encryption-free design that replaces belief-propagation decoding with simple matrix inversion, rounding, and majority voting. This is a concrete, well-measured practical advantage.
+- **Convincing empirical undetectability**: FID scores match unwatermarked generations across SD v1.5/v2.1 and two prompt datasets (Table 1), while both MLP (latent-level) and ResNet-18 (image-level) classifiers fail to distinguish watermarked samples (Figure 2, ~50% accuracy). This is strong evidence that the watermarked noise passes standard distributional tests.
 
-- **Strong and broad empirical evaluation.** The paper evaluates on two Stable Diffusion versions, two prompt datasets (COCO, SDP), and multiple distortion types (JPEG, Gaussian blur, brightness, Gaussian noise, drop, resize, adversarial WEvade attacks). FID scores are essentially identical to the unwatermarked baseline (Table 1: e.g., 48.12 vs. 48.13), classifiers achieve near-chance accuracy (Figure 2), and tracing accuracy exceeds 95% under post-processing (Table 2). Generalization is shown across SD v3, FLUX.1-DEV, pixel-space G-Diffusion, and Glow (Appendix F.1).
+- **Strong adversarial robustness**: Under WEvade white-box/black-box attacks, the method retains bit accuracy >98% and TPR@1%FPR >99% (Table 2), whereas lossy baselines collapse. The theoretical justification in Appendix E (showing losslessness forces adversarial gradients to zero) is compelling and well-integrated with the empirical results.
 
-- **Honest limitations section.** Section 5 explicitly acknowledges that "higher-order moments may deviate from the true prior" and that the Gaussian guarantee depends on the spherical 3-design definition. This honest self-assessment strengthens the paper's credibility.
+- **Dramatic efficiency gains**: Extraction is approximately four orders of magnitude faster than PRC Watermark (Figure 4), confirming that eliminating belief-propagation decoding yields genuine practical benefits. This is not a minor speedup — it changes the deployability of lossless watermarking at scale.
 
-- **Well-executed ablation studies.** Removing the binary embedding module makes the latent trivially distinguishable; removing spherical mapping degrades robustness under brightness adjustment (Figures 6b, 6c). Parameter sweeps over sparsity _s_ and repetition _N_ (Tables 15–17) clearly show the robustness–undetectability trade-off.
+- **Thorough ablation studies**: The modular ablations (Figure 6b,c) cleanly isolate the contributions of binary embedding (for undetectability) and spherical mapping (for robustness). Parameter sensitivity analysis (Figure 6d, Table 3) and ODE solver / timestep ablations (Tables 4-5) demonstrate that the method is not brittle to implementation choices.
+
+- **Generalizability**: The method is validated beyond Stable Diffusion on SD v3, FLUX.1-DEV, pixel-space G-Diffusion, and Glow (Appendix F.1), confirming applicability to any generative model with a Gaussian prior and approximate inverse mapping.
 
 ## Weaknesses
 
 ### Major
 
-- **Theoretical overstatement of "provable indistinguishability."** The conclusion states that watermarked latents are "provably and empirically indistinguishable from a standard Gaussian prior." The theory proves: (i) z^(1) is 2-wise and 3-wise independent (Theorem 3.1); (ii) z^(2) is a spherical 3-design (Theorem 3.2); (iii) marginals of z^(3) converge to N(0, 1/lx) as lx→∞ (Lemma 3.3); (iv) if u is uniformly distributed on the sphere, then r·u ∼ N(0,I) (Lemma 3.4). However, the crucial logical link is missing: z^(3) is a spherical 3-design, **not** uniformly distributed on the sphere, so the converse of Lemma 3.4 does not apply to the actual construction. A 3-design matches the uniform distribution only up to polynomial degree 3 — this does not imply full distributional equivalence or computational indistinguishability. The paper acknowledges this honestly in Section 5 ("higher-order moments may deviate from the true prior"), but the abstract and conclusion overstate what was proved. The paper should either (a) provide a bound on the KL divergence or total variation distance between the actual distribution and N(0,I) as a function of lx, or (b) reframe the claim as "provably matches the Gaussian prior up to third-order moments" rather than full indistinguishability. In its current form, this is a genuine gap between the headline claim and the supporting mathematics.
+- **Overstated undetectability claims in the introduction and conclusion**: The theoretical analysis proves that the watermarked noise matches the standard Gaussian only up to third-order moments (Theorems 3.1-3.2, Lemmas 3.3-3.4). Lemma 3.4 requires the direction to be *uniformly* distributed on the sphere for exact multivariate normality, but z^(3) is only a spherical 3-design — not uniform. The abstract correctly qualifies this ("up to third-order moments"), but the introduction (line 80: "statistically indistinguishable from standard Gaussian noise") and conclusion (line 1225: "provably and empirically indistinguishable") drop this qualification. The Discussion (§5) appropriately acknowledges that "higher-order moments may deviate from the true prior." The empirical evidence (FID, classifiers) is strong but does not rule out a polynomial-time adversary exploiting higher-order structure. The paper should consistently qualify the theoretical claim throughout and avoid the word "provably" in contexts that suggest full distributional equivalence. This is a real gap between what is proved and what is claimed, and it affects a central selling point of the paper. The practical results remain valuable regardless.
 
 ### Minor
 
-- **PRC Watermark comparison uses default parameters only.** The paper attributes PRC Watermark's lower accuracy and higher latency to inherent limitations (code-rate tuning, error floor), and all experiments use default PRC settings. While using defaults is standard practice and the efficiency comparison is clearly unfair in the opposite direction (favoring PRC, not the authors), it would strengthen the paper to discuss whether PRC's performance could be improved with tuned parameters or to justify why the default configuration is representative. As it stands, the robustness comparison overstates the authors' advantage slightly.
+- **AWGN optimality analysis is disconnected from the evaluated attacks**: Appendix D proves that the proposed rotation is optimal under an additive white Gaussian noise channel, but the attacks evaluated in §4.2 (JPEG, brightness, blur, resize, median filtering) are structured distortions, not AWGN. The ablation study (Figure 6c) empirically demonstrates the rotation helps, but the AWGN theory does not explain *why* it helps under these specific distortions. The paper would benefit from either (a) closing this gap analytically for a representative non-AWGN attack, or (b) framing the AWGN result as a motivating special case rather than a general optimality claim.
+
+- **Undetectability evaluation uses only basic classifiers**: The latent-level MLP and image-level ResNet-18 are reasonable starting points, but a more sensitive detector — e.g., a likelihood-ratio test exploiting knowledge of the spherical 3-design construction — would provide stronger evidence that no polynomial-time adversary can distinguish the watermarked noise. Without this, the undetectability claim rests more on FID and simple classifiers than on a principled empirical stress test.
 
 ### Trivial
 
-- The term "encryption-free" is slightly imprecise since the scheme does rely on a fixed secret key (T, C) whose confidentiality is essential. The intended contrast (no stream cipher, no PRC, no cryptographic primitives) is clear from context, but a more precise term like "cryptography-free" or "non-cryptographic" would avoid confusion.
+- The QR decomposition to obtain **C** yields a Haar-uniform orthogonal matrix when the initial matrix has i.i.d. Gaussian entries (Mezzadri 2006). The paper should cite or briefly note this property since Lemma 3.3 relies on properties of typical entries of such matrices. This is a one-sentence clarification.
+
+- In Lemma 3.3's use of Stein's method, the dependency graph degree *D* should be explicitly computed or bounded for the default parameters to confirm the asymptotic argument applies at practical dimensions.
 
 ## Nice-to-Haves
 
-- A bound on the total variation or KL divergence between the actual watermarked distribution and N(0,I) as a function of lx would significantly strengthen the theoretical contribution and close the gap between the 3-design guarantee and the losslessness claim.
+- **Evaluate the original (lossless) Gaussian Shading with per-image keys** on the same undetectability metrics. The current comparison uses fixed-key Gaussian Shading (which the paper correctly notes no longer achieves losslessness). Showing that Spherical Watermark matches or exceeds the original per-image-key variant on FID and classifier accuracy would strengthen the claim that the spherical mapping achieves comparable undetectability without the key-management burden, isolating the contribution of the spherical design from the penalty of fixed keys.
 
-- A kernel two-sample test (e.g., MMD) on watermarked vs. clean latent vectors would complement the classifier-based undetectability evaluation. While the classifier tests and FID are standard in this literature, an MMD test would provide a more rigorous statistical complement, particularly given the paper's emphasis on distributional indistinguishability.
+- **Characterize the residual distributional gap** caused by using a spherical 3-design rather than a uniform direction (e.g., bound the KL divergence or total variation distance), allowing a quantitative assessment of what "up to third-order moments" means for practical indistinguishability.
 
-- A discussion of the security implications of key compromise (T, C) would strengthen the practical analysis, as the fixed-key design means that key exposure would allow an adversary to both forge and remove watermarks for all past and future images.
+- **Test a stronger detector** (e.g., a likelihood-ratio test based on the known spherical design) to probe whether the watermarked latent truly resists polynomial-time adversaries.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed, treat them with caution.
 
-- **"FID error bars are large and all methods overlap, so FID provides no evidence of undetectability"** — This misreads the data. The means show clear separation: the proposed method (48.12) and PRC (48.13) sit at the original (48.13), while Gaussian Shading with fixed keys (50.70) and Tree-Ring (49.33) are 0.5–2.5 points higher. This is strong supporting evidence.
+- **"Comparison with Gaussian Shading is unfair to the original scheme"** — The harsh critic argued that comparing against fixed-key Gaussian Shading is unfair because the original scheme uses per-image nonces to preserve distributional indistinguishability. However, the paper explicitly notes this limitation (line 441: "Note that with fixed keys, Gaussian Shading no longer achieves true losslessness") and the comparison is practically motivated: per-image key storage is exactly the impracticality the paper aims to solve. Evaluating the degraded fixed-key variant is a fair comparison against what a practitioner would actually deploy. I have moved the suggestion to also evaluate the original per-image-key variant to "Nice-to-Haves."
 
-- **"The claim that Spherical Watermark 'delivers superior robustness' is not fully substantiated because PRC was not tuned"** — The comparison asymmetry favors PRC (the baseline), not the authors' method. Using default settings for a published method is standard practice. This is downgraded to a Minor weakness above.
+- **Strength Finder's generic strengths** — The Strength Finder included some generic claims (e.g., "the paper addressed an important problem") without specific citations. These have been omitted or merged into specific, evidence-backed strengths above.
 
-- **"Encryption-free is misleading — it's a symmetric-key scheme"** — The term "encryption-free" refers to the absence of cryptographic primitives (stream cipher, PRC, belief-propagation decoding), not the absence of any secret. The intent is clear. Downgraded to Trivial.
-
-- **Strength Finder claim about "rigorous theoretical guarantee of distributional indistinguishability"** — This is the same overstatement flagged in the Major weakness. The theory proves moment-matching up to degree 3, not full distributional equivalence.
-
-- **Strength Finder claim that "the paper addressed an important problem" or "targeted an interesting question"** — Generic, superficial strength removed.
-
-- **Demand for MMD tests and higher-order cumulant analysis as essential for acceptance** — While useful, these are not standard requirements in the diffusion watermarking literature (Gaussian Shading and PRC Watermark also do not provide them). Moved to Nice-to-Haves.
+- **Human finder's similar weaknesses from other papers** — Not applicable; no unrelated weaknesses from other papers were raised in the inputs.
 
 ## Novel Insights
 
-The paper's most interesting insight — not fully developed but substantial — is that a spherical 3-design, constructed from a simple 3-wise independent binary code, is sufficient in practice to produce watermarked latent codes that are undetectable by standard classifiers and preserve FID. This suggests that full distributional equivalence may be unnecessary for practical lossless watermarking, and that moment-matching up to low orders captures what matters for perceptual quality and detection resistance. The proof in Appendix D that the orthogonal rotation is provably optimal among binary mappings under AWGN (maximizing symbol separation) is also a clean, self-contained contribution.
+The wedding of spherical *t*-designs (a concept from algebraic combinatorics) with lossless watermarking is the paper's most original intellectual move. Prior lossless methods (Gaussian Shading, PRC) relied on cryptographic primitives (stream ciphers, pseudorandom codes) to achieve distributional indistinguishability. This paper shows that a purely combinatorial construction — binary embedding for 3-wise independence, projection to a spherical 3-design, orthogonal rotation — can achieve comparable empirical undetectability without any encryption. The insight that third-order moment matching is sufficient to fool standard distributional tests (FID, trained classifiers) under practical settings is valuable even though it falls short of full computational indistinguishability. The complementary theoretical result (Appendix E) that losslessness itself forces adversarial gradient energy to zero is also a crisp, general insight that transcends this specific construction.
 
 ## Suggestions
 
-1. **Soften the theoretical claim in the abstract and conclusion.** Replace "provably and empirically indistinguishable" with "provably matches the Gaussian prior up to third-order moments and is empirically indistinguishable." This is accurate, still strong, and removes the gap between claim and proof.
+- Recalibrate the undetectability language in the introduction and conclusion. Replace "statistically indistinguishable" and "provably indistinguishable" with precise statements like "matches the target Gaussian up to third-order moments, and empirically passes standard distributional tests." The Discussion already contains the right language — propagate it forward.
 
-2. **Add a bound on the distributional distance.** Even a simple analysis of the 4th-order moment mismatch as a function of lx would help readers understand how quickly the approximation improves with dimension and would partially close the theoretical gap.
+- Add a brief computation showing that the dependency graph degree *D* in Lemma 3.3 is constant (or at least grows sub-linearly) under the default parameter settings, making the Stein's method argument transparent.
 
-3. **Clarify the "encryption-free" terminology.** Either define it precisely (e.g., "requiring no cryptographic operations beyond a fixed matrix multiplication") or replace it with a more precise term.
+- Either connect the AWGN optimality analysis (Appendix D) to a representative non-AWGN attack, or reframe it explicitly as a tractable special case that motivates but does not fully explain the empirical robustness gains.
 
-4. **Discuss PRC parameter tuning.** A brief paragraph acknowledging whether PRC's default parameters are representative or whether tuning could close the robustness gap would preempt reader concerns.
-
----
+## Score and Decision
 
 **Anchor comparison:**
 
-| Anchor Paper | Path | Avg Score | Comparison |
-|---|---|---|---|
-| Hiding in the Phase (PQIM) | `oTGJZtrprx.md` | 5.00 (Reject) | PQIM had contradictory results, missing formal guarantees, and presentation problems. Spherical Watermark has cleaner methodology, stronger efficiency gains, and better empirical support. |
-| Guidance Watermarking | `5ifzhjMCKq.md` | 5.00 (Accept) | Guidance Watermarking requires a pretrained decoder and has significant computational overhead. Spherical Watermark is training-free and far more efficient. |
-| SERUM | `AiBUm6iKBf.md` | 5.00 (Accept) | SERUM adds watermark noise and trains a detector. Spherical Watermark's spherical-design approach is more principled and achieves lossless embedding without training. |
-| Watermarking Diffusion LMs | `3aBWTYGcaT.md` | 5.00 (Accept) | Different domain (language models), comparable contribution level. Spherical Watermark has stronger efficiency results. |
-| Dataset Watermarking Benchmark | `rjhF7b7n6g.md` | 3.00 (Reject) | That paper had factual errors, questionable results, and missing baselines. Spherical Watermark is clearly far stronger. |
-| DMark (dLLMs) | `VCYDbyV5WY.md` | 3.00 (Reject) | Different domain, weaker contribution. Spherical Watermark is substantially stronger. |
+- **`/home/wg25r/review_agent/human_reviews_2026/5ifzhjMCKq.md`** (Guidance Watermarking, avg 5.0, Accept Poster): Proposes guiding diffusion with gradients from pretrained watermark decoders. Novel but relies on existing decoders, adds hyperparameters, and is not lossless. Spherical Watermark is more self-contained, theoretically grounded, and lossless. **This paper is stronger.**
 
-The paper is clearly above the 5.0-band anchors in methodological novelty, empirical thoroughness, and practical impact. The theoretical overstatement in the conclusion is the main weakness but does not undermine the core contribution, and the paper honestly acknowledges the limitation in Section 5. I assign a score of **6.0**.
+- **`/home/wg25r/review_agent/human_reviews_2026/oTGJZtrprx.md`** (PQIM, avg 5.0, Reject): Phase-based watermarking with provable robustness claims that were challenged as overclaimed. Similar pattern of theoretical claims not fully matching empirical breadth. Spherical Watermark has more comprehensive experiments and clearer methodology. **This paper is stronger.**
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+- **`/home/wg25r/review_agent/human_reviews_2026/3aBWTYGcaT.md`** (Watermarking Diffusion LMs, avg 5.0, Accept Poster): First watermark for diffusion language models; novel domain but more niche. **Comparable novelty, but Spherical Watermark has broader applicability.**
+
+- **`/home/wg25r/review_agent/human_reviews_2026/cNEshxVcWg.md`** (NullGuard, avg 3.0, Withdrawn/Reject): Major writing quality issues, insufficient ablation. **This paper is significantly stronger.**
+
+- **`/home/wg25r/review_agent/human_reviews_2026/8F9aMllvWm.md`** (DGS, avg 2.67, Withdrawn/Reject): Incremental extension of Gaussian Shading with limited novelty. **This paper is much stronger.**
+
+Spherical Watermark is clearly above the 5.0-tier papers. It has a clean, novel methodology, comprehensive experiments, and genuine practical advantages (encryption-free, fast extraction). The one substantive weakness — overclaimed undetectability relative to what is proved — is real but confined to phrasing choices in the intro/conclusion and is fixable without changing the method or results. The paper's theoretical framework (spherical 3-design) and empirical results are solid. This places it in the 6.0-7.0 range. Given the strength of the practical results, the thorough ablations, and the genuine novelty of the spherical-design approach to lossless watermarking, I assign 6.5.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

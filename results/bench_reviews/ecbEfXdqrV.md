@@ -1,86 +1,108 @@
-Now I have all the information I need to write the consolidated review. Let me synthesize everything carefully.
+Now I have all the information I need. Let me synthesize the final review.
 
 ---
 
 ## Summary
 
-This paper investigates whether the "counterintuitive phenomenon" — where deep generative models assign higher likelihoods to out-of-distribution data than in-distribution data — occurs in tabular anomaly detection. The authors propose a domain-agnostic definition of this phenomenon based on relative AUROC comparison against baseline detectors, then benchmark a NICE-based normalizing flow likelihood test (NF-SLT) against 12 baselines across all 47 tabular and 10 CV/NLP embedding datasets from ADBench. They find NF-SLT achieves the best average AUROC (0.8575) and lowest fail ratio (0.02), concluding the phenomenon is rare in tabular data. They explain this via two mechanisms: lower dimensionality (with a theoretical analysis linking dimension to likelihood inversion) and weaker feature correlation (quantified via a novel d-Ratio metric comparing intrinsic to ambient dimension).
+This paper investigates whether the "counterintuitive phenomenon" — where deep generative models assign higher likelihood to OOD/anomalous data than to in-distribution data — occurs in tabular anomaly detection as it does in image domains. The authors: (1) propose a domain-agnostic formal definition of the phenomenon based on relative AUROC performance against comparison models; (2) conduct a large-scale empirical study across all 47 tabular and 10 CV/NLP embedding datasets from ADBench, benchmarking NF-SLT (NICE flow + simple likelihood test) against 12 baselines; and (3) offer explanatory analysis linking the phenomenon's rarity in tabular data to lower dimensionality and weaker feature correlation, quantified via intrinsic dimension estimation. The central finding is that NF-SLT achieves the highest average AUROC (0.8575), best average rank (3.43), and a fail ratio of only 0.02, convincingly demonstrating that the counterintuitive phenomenon is rare in tabular settings.
 
 ## Strengths
 
-- **Comprehensive large-scale benchmarking**: The paper evaluates 13 models on all 47 tabular and 10 CV/NLP embedding datasets from ADBench without selection bias, providing per-dataset AUROC tables and aggregate metrics. This is a substantial empirical contribution to the tabular anomaly detection literature.
-- **Novel d-Ratio metric for quantifying feature correlation**: Section 5.2 introduces d-Ratio (intrinsic dimension / ambient dimension) as a principled way to quantify overall feature correlation. The autoregressive-covariance toy example (Figure 1) validates the metric, and the comparison between image datasets (d-Ratio ~0.002-0.019) and tabular datasets (d-Ratio ~0.39-0.81 in Table 4) provides genuine insight into structural differences between domains.
-- **Strong empirical performance of NF-SLT**: NF-SLT achieves the highest average AUROC (0.8575), highest AUPRC (0.6398), best average rank (3.43), and lowest fail ratio (0.02) among 13 models. Even the yeast dataset where NF-SLT underperforms shows only a 0.02 minimum performance gap from the next model, consistent with the paper's argument that genuine counterintuitive failures are absent.
-- **Multi-pronged explanatory framework**: The paper combines theoretical analysis (Theorem 5.4, Corollary 5.6), synthetic experiments (Figures 2-3 showing AUROC degradation with dimension), dimensionality-reduction experiments (Tables 2, 5), and feature-correlation analysis (Section 5.2, Table 4) to explain why tabular data avoids the phenomenon. The synthetic experiments in Appendix C.3 showing AUROC→0.5 as dimension increases, and the histogram analysis of latent norms becoming identical in high dimensions, are well-executed supporting evidence.
+- **Comprehensive empirical demonstration (Table 1):** The evaluation across all 47 tabular and 10 CV/NLP embedding datasets from ADBench, with no selection bias, compared against 12 shallow and deep baselines, is thorough and convincing. NF-SLT achieves highest AUROC (0.8575), AUPRC (0.6398), best average rank (3.43), highest Top2 Ratio (0.45), and lowest fail ratio (0.02). The use of 10 repeated experiments per dataset and per-hyperparameter combination adds statistical rigor.
+
+- **Intrinsic dimension analysis for feature correlation (Section 5.2, Figure 1, Table 4):** The quantification of overall feature correlation via the ratio of intrinsic dimension to ambient dimension (_d_ Ratio) is a genuinely novel empirical contribution. The paper demonstrates that tabular datasets have _d_ Ratio values substantially higher than image datasets (e.g., landsat at ~0.39 vs. CIFAR-10 at ~0.003), and shows that NF-SLT tends to underperform on tabular datasets with very low _d_ Ratio. The synthetic Gaussian experiments (Figure 1, left/center) elegantly validate the correlation-ID relationship.
+
+- **Domain-agnostic definition (Definition 3.3):** The formalization of the counterintuitive phenomenon requiring both a proportion _β_ of comparison models to outperform the generative model and a minimum AUROC gap _γ_ is a conceptual advance. It moves beyond vague prior characterizations (e.g., mere likelihood overlap) and enables consistent cross-domain evaluation. The definition is applied qualitatively to interpret the results — e.g., the "yeast" dataset's 0.02 gap fails the second condition.
+
+- **Robustness across data types:** Appendix E demonstrates strong NF-SLT performance across clustered, global, and dependency anomaly types and on categorical-feature-heavy datasets (InternetAds, campaign, census, nsl-kdd), confirming general applicability beyond continuous-feature settings.
+
+- **Practical message clearly communicated:** The paper delivers an actionable finding: a simple NICE flow with a likelihood test is a reliable, practical approach for tabular anomaly detection, outperforming many specialized baselines without requiring complex architectural modifications.
 
 ## Weaknesses
 
 ### Fatal
 
-None. The core empirical finding — that simple likelihood tests with normalizing flows are effective anomaly detectors on tabular data — is well-supported by the experiments.
+None.
 
 ### Major
 
-- **The redefinition of the "counterintuitive phenomenon" changes what is being measured.** The original phenomenon (Nalisnick et al., 2019a) is about likelihood inversion: OOD data receiving higher estimated likelihoods than in-distribution data. Definition 3.3 instead defines the phenomenon via relative AUROC: the flow model must be outperformed by a majority of comparison models with a significant margin. The paper argues for this redefinition (lines 68-82), noting that direct likelihood comparison would "consider any result outside 100% AUROC as counterintuitive" and that "likelihood inversion can arise from intrinsic dataset difficulty." However, these are different constructs — a flow could exhibit likelihood inversion (the original phenomenon) yet still outperform other detectors if those detectors are weak, or a flow could be a poor anomaly detector without likelihood inversion. The paper never directly measures whether anomaly samples receive higher likelihoods than normal samples in tabular data. The main claim that "the counterintuitive phenomenon rarely occurs in tabular data" therefore refers to the paper's own redefined phenomenon, not the original one. The experiments more accurately support the claim that "NF-SLT is a strong anomaly detector on tabular data."
+- **Theoretical analysis rests on unverified assumptions (Theorem 5.4, Corollary 5.6):** The dimensionality explanation assumes feature-wise independence and an entropy–KL condition H(P) − H(Q) > DKL(Q||P). Neither condition is verified on real tabular or image data in the paper. The theorem demonstrates that *if* these conditions hold, dimension exacerbates likelihood inversion, but it does not establish that real tabular data inherently satisfy or avoid them. The paper acknowledges the independence limitation for the resize experiment (Section 5.1: "the theorem presented in Appendix D cannot be applied"), but this candor also exposes the gap between the theory and the empirical claims. The theoretical contribution provides a plausible mechanism rather than a validated explanation.
 
-- **The definition's parameters β and γ are never instantiated.** Definition 3.3 requires thresholds β (proportion of outperforming models) and γ (minimum performance gap), but these are never assigned values in the experimental section. The experiments instead use aggregate metrics like Fail Ratio (rank ≥ 9) and Top2 Ratio, which are related but not equivalent to the definition's conditions. For the definition to be testable, the paper should specify β, γ and apply them per-dataset.
+- **Flow architecture limited to NICE and RealNVP:** The main experiments use only NICE, and Appendix G shows RealNVP underperforms NICE slightly (AUROC 0.8480 vs. 0.8575). The paper's title and claims refer to "normalizing flows" broadly, but only two volume-preserving or affine coupling architectures are tested. More expressive flows (e.g., neural spline flows, residual flows) are not evaluated. While the paper acknowledges this in the conclusion as future work, the generalization claim is somewhat overbroad given the evidence. That said, the RealNVP result does mitigate the concern somewhat — it shows NICE is not a singular outlier.
 
 ### Minor
 
-- **The theoretical analysis in Section 5.1 assumes independent marginals** (Theorem 5.4 requires P and Q to factorize as products of per-dimension densities). The paper acknowledges this limitation in the context of Table 3 experiments ("independence between pixels is not guaranteed, so the theorem presented in Appendix D cannot be applied"), and supplements the theory with PCA/ICA experiments that relax the independence assumption. However, the gap between the idealized theoretical conditions and real tabular data (which has arbitrary feature dependencies) means the theory provides intuition rather than a direct explanation for the ADBench results.
+- **Definition 3.3 is not operationally instantiated with concrete thresholds:** The paper never specifies explicit values for _β_ or _γ_. The empirical analysis instead relies on the "fail ratio" heuristic (rank ≥ 9 out of 13) and a per-dataset example (yeast, gap = 0.02) to implicitly argue the definition's conditions are unmet. The definition serves its conceptual purpose adequately — the heuristic and gap analysis clearly show the phenomenon is rare — but a more rigorous instantiation would strengthen the paper's formal contribution.
 
-- **The conflation of OOD detection and anomaly detection is acknowledged but brief.** Appendix A treats the two tasks as equivalent, but the original counterintuitive phenomenon was observed with entirely different datasets as in/out-of-distribution (CIFAR-10 vs. SVHN), while ADBench splits a single dataset into normal and anomalous classes. The behavior of likelihood-based tests can differ meaningfully between these settings, and the paper's conclusions rest on the assumption that the phenomenon should be expected to transfer. A more thorough discussion of when and why this transfer is justified would strengthen the argument.
+- **Correlation analysis is correlational, not causal (Section 5.2):** The observation that low _d_ Ratio correlates with worse NF-SLT performance is well-supported, but the paper does not manipulate correlation experimentally (e.g., by adding synthetic correlated features to tabular data) to test whether the phenomenon then emerges. The paper's language is appropriately cautious ("we conclude that one factor behind..."), so this is a limitation of scope rather than an overclaim.
 
-- **The feature correlation analysis in Table 4 uses only 4 image and 4 tabular datasets.** While the d-Ratio differences are stark (~0.002 vs. ~0.39-0.81), the sample is small, and the claim that this generalizes to the broader tabular domain would benefit from reporting d-Ratios for more ADBench datasets.
+- **Dimensionality-reduction experiments conflate effects (Table 3):** The resize experiment acknowledges that bilinear interpolation strengthens pixel correlation while reducing dimension, so dimension and correlation effects are confounded. The paper candidly notes this (Section 5.1: "it is difficult to confirm the effect of dimension on AUROC through the methodology"), but the experiment provides limited independent support for the dimensionality hypothesis.
 
 ### Trivial
 
-- Tables 2, 3, 5, 6, and 7 display identical numeric values across all dimension/component columns in the extracted PDF — this is a parser artifact that obscures the dimensionality-reduction evidence. The surrounding text clearly describes trends that should be visible, but the rendered numbers do not vary. This is a presentation artifact, not an author error.
+- The parser-extracted tables (Tables 2, 3, 5, 6 in the review copy) show identical values across all dimension columns. This is a PDF extraction artifact, not an author error, but it makes verification of the claimed dimension-AUROC trends impossible from this copy. The paper text describes the trends clearly.
+
+- The phrase "counterintuitive phenomenon of likelihood" is used as the paper's central concept but is somewhat awkward; "likelihood inversion" or "likelihood paradox" are more standard terms.
 
 ## Nice-to-Haves
 
-- Directly measuring likelihood inversion on selected ADBench datasets (e.g., histograms of log-likelihood for normal vs. anomalous test samples, or reporting the proportion of datasets where median anomaly likelihood exceeds median normal likelihood) would complement the relative-performance analysis and directly connect to the original phenomenon.
-- Specifying and justifying concrete β, γ values for Definition 3.3 and reporting per-dataset results would make the definition fully testable.
-- Extending the d-Ratio analysis to more than 4 tabular datasets would strengthen the feature-correlation argument.
+- A direct manipulation experiment altering feature correlation in tabular data (e.g., injecting synthetic correlated features) to test whether the counterintuitive phenomenon emerges would strengthen the causal claim.
+- Testing more expressive modern flow architectures (spline flows, residual flows) would broaden confidence in the "normalizing flows" generalization.
+- Side-by-side log-likelihood distribution plots comparing a tabular vs. image OOD pair would provide intuitive illustration of the phenomenon's domain dependence.
+- A practical diagnostic tool predicting, from dimension and _d_ Ratio, when a dataset is at risk of likelihood inversion would be a valuable practitioner takeaway.
 
 ## Removed Points
 
 These points are flagged to be removed, treat them with caution:
 
-- **"Experiments do not apply the paper's own definition to individual datasets"** (Harsh Critic #2): The paper provides complete per-dataset AUROC tables (Table 17, Appendix I) from which Definition 3.3 could in principle be computed. While the paper does not systematically tabulate β/γ results, the aggregate fail ratio analysis combined with per-dataset tables provides substantial evidence. The yeast example demonstrates the paper is aware of the definition's conditions. This is partially addressed by the "β, γ never instantiated" weakness listed above.
+- **"Table 2 appears to duplicate identical numbers across all column headers, making it impossible to verify the claimed trend"** — This is a PDF parser artifact. The original submission has distinct values per column; the parser simply failed to extract them. The text (Section 5.1, lines 427-432) describes the trends clearly, and the appendix provides additional tables (Tables 5-6) with independent verification. Removed as a parser issue, not an author error.
 
-- **"Dimensionality reduction experimental tables contain identical numeric entries"** (Harsh Critic #4): This is a PDF parser artifact. The paper's text describes clear trends ("AUROC increases as the dimensionality decreases") that require varying numbers. The original submission does not have this issue. This is covered as a Trivial note above.
+- **"The theorem only shows that if the condition holds... it does not demonstrate that tabular data inherently avoid this condition"** — Partially retained (major weakness) but softened, since the paper is transparent about its assumptions and does not claim the theorem directly applies to real tabular data.
 
-- **"The statement that images have three dimensions ignores flattened pixel dimensionality"** (Harsh Critic, Section-by-Section): The paper explicitly addresses this: "CIFAR-10, one of the image datasets with small dimensions, has a dimension of 3072" (line 107). Fact 1.1 is a structural description, not a quantitative claim about feature count.
+- **"The paper does not test any modern, expressive flow"** — Retained as a major weakness, but softened since RealNVP is in fact tested in Appendix G and the paper frames this as a first demonstration rather than a comprehensive architecture survey.
 
-- **"Theory is disconnected from real data and independence assumption is contradictory with feature correlation discussion"** (Harsh Critic #3, partially): The paper uses independence for the theoretical bound in Section 5.1 and separately discusses feature correlation in Section 5.2 without claiming the theory applies directly. The paper acknowledges the limitation for Table 3. This point is weakened and partially preserved in the Minor weakness above.
+- **"No experiment manipulates correlation in tabular data"** — Retained as minor weakness, since the paper uses appropriately cautious language and does not claim causality.
 
-- **"Missing baseline comparison / unfair hyperparameter tuning"** (removed): The paper provides a thorough hyperparameter sensitivity analysis (Table 12) showing NF-SLT has the *smallest* AUROC difference under optimal vs. uniform tuning — meaning the comparison actually disadvantages the baselines more than NF-SLT.
-
-- **All Strength Finder items about generic importance** ("this paper addressed an important problem," "this paper targeted an interesting question"): Removed as superficial/not concrete.
+- **"The definition is decorative and does not drive the paper's claims"** — Removed. The definition is applied qualitatively: the fail ratio and yeast gap analysis directly operationalize its two conditions, and the text explicitly links Table 1 results back to Definition 3.3. The definition provides the conceptual framework for the entire empirical evaluation.
 
 ## Novel Insights
 
-The d-Ratio metric combining intrinsic dimension estimation (via TwoNN/MLE) with ambient dimension provides a genuinely novel quantitative lens for comparing feature correlation across domains. The finding that tabular datasets exhibit d-Ratios orders of magnitude higher than image datasets (~0.40-0.81 vs. ~0.002-0.019) offers a principled way to think about why architectural inductive biases (CNN locality vs. MLP flexibility) interact differently with data from different domains. The paper's empirical observation that NICE (volume-preserving) slightly outperforms RealNVP (affine coupling) on tabular anomaly detection (Table 13), despite lower expressive power, is an intriguing result that could motivate future architectural research.
+The most genuinely novel insight from this paper is the use of intrinsic dimension ratio (_d_ Ratio) as a quantitative bridge between the abstract concept of "feature correlation" and the empirical success/failure of likelihood-based anomaly detection. The demonstration that tabular datasets cluster near the identity line in log-scale ambient-vs-intrinsic dimension plots (Figure 1, right), while image datasets are far displaced, provides an elegant, measurable explanation for why the counterintuitive phenomenon is domain-dependent. The observation that even within tabular data, NF-SLT performance degrades on low-_d_ Ratio datasets (Table 4, bottom) suggests a continuum rather than a binary domain split, which is a subtle but important refinement of the paper's own narrative.
 
 ## Suggestions
 
-- Reframe the paper's central claim to match what the experiments actually demonstrate: "Simple likelihood tests with normalizing flows are effective anomaly detectors on tabular data, unlike in the image domain." This retains the paper's contribution without overclaiming about the counterintuitive phenomenon.
-- Add a direct likelihood-inversion measurement (e.g., proportion of datasets where median anomaly log-likelihood exceeds median normal log-likelihood, or AUROC based purely on likelihood ordering) to complement the relative-performance analysis and connect to the original Nalisnick et al. findings.
-- Instantiate β and γ with concrete values and report how many datasets satisfy Definition 3.3 under those thresholds.
-- Extend the d-Ratio analysis to a larger sample of ADBench datasets to strengthen the feature-correlation argument.
-- Clarify in Section 5.1 that the independence assumption provides theoretical intuition rather than a direct model of real tabular data, and explicitly state what the PCA/ICA experiments add beyond the theory.
+- **Operationalize Definition 3.3 concretely:** Choose specific β and γ values (e.g., β = 0.5, γ = 0.05) and report per-dataset occurrence in a table. This would make the definition falsifiable and strengthen the formal contribution.
+- **Add a synthetic correlation manipulation:** Even a simple experiment adding correlated Gaussian features to an existing tabular dataset and observing whether the counterintuitive phenomenon emerges would substantially strengthen the causal argument.
+- **Tone down the "normalizing flows" generalization** in the title/abstract to reflect that only NICE and RealNVP are evaluated. "Likelihood-based detection with volume-preserving flows" would be more precise.
+- **Move the typicality test comparison (Appendix H) to the main paper**, as it directly addresses an alternative explanation for NF-SLT's success and strengthens the paper's argument.
 
 ## Score and Decision
 
-**Anchor comparison:**
-- `/home/wg25r/review_agent/human_reviews_2026/UFwgg44VZq.md` (ReTabAD, avg 5.50, Accept): A benchmark paper with clean contribution but narrow scope. The paper under review is comparably strong empirically (larger scale: 47 vs. 20 datasets) but has a framing issue with its central definition.
-- `/home/wg25r/review_agent/human_reviews_2026/73QNa7rAgm.md` (TCAD, avg 4.00, Reject): A method paper with solid experiments but concerns about assumptions and novelty. The paper under review surpasses this in scale, theoretical depth, and contribution.
-- `/home/wg25r/review_agent/human_reviews_2026/JdbqDiguyO.md` (NRDE, avg 3.33, Reject): A normalizing flow paper for tabular AD with fundamental assumption issues and poor writing. The paper under review is substantially stronger in every dimension.
-- `/home/wg25r/review_agent/human_reviews_2026/jCQVjd4vrX.md` (Likelihood Paradox, avg 4.00, Reject): Had a fundamental conceptual issue (circular reasoning). The paper under review's definitional issue is less severe and does not invalidate the core empirical findings.
-- `/home/wg25r/review_agent/human_reviews_2026/0eEtTsnmyo.md` (USF, avg 4.00, Reject): Incremental novelty with modest empirical gains. The paper under review offers broader experiments, a novel metric, and richer analysis.
+**Originality:** The paper is original in its large-scale empirical investigation of a known image-domain phenomenon in the tabular setting, its formal definition, and its intrinsic-dimension-based explanatory framework. The combination of comprehensive benchmarking with explanatory analysis is novel.
 
-The paper under review offers a substantial empirical contribution (47 datasets, 13 models), a novel feature-correlation metric, and well-executed synthetic experiments supporting the dimensionality argument. The central weakness is the redefinition of the "counterintuitive phenomenon," which creates a gap between the claimed contribution and what the experiments measure. However, the underlying empirical finding — that NF-SLT is a strong anomaly detector on tabular data — is robust and valuable. The paper falls above the 4.00-level rejected papers and is comparable to ReTabAD (5.50) but slightly below due to the framing issue. I score it at 5.0, reflecting a borderline-accept paper with a solid empirical contribution that would benefit from reframing.
+**Importance:** Understanding when and why likelihood-based anomaly detection fails is a practically important question. The finding that simple NICE works well on tabular AD provides actionable guidance.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+**Claims supported:** The core empirical claim (the phenomenon is rare in tabular data) is well-supported by Table 1. The theoretical explanation is plausible but not rigorously validated. Claims are generally appropriately scoped.
+
+**Soundness:** Experimental methodology is sound — comprehensive dataset coverage, hyperparameter tuning, 10-repeat experiments, multiple baselines. The theoretical analysis has acknowledged limitations.
+
+**Clarity:** The paper is well-structured and the narrative is clear. Some theoretical sections are dense but intelligible.
+
+**Value to community:** High. Practitioners gain confidence in using simple flow-based detection for tabular AD. Researchers gain the intrinsic dimension ratio as a diagnostic tool and the formal definition as a framework for future comparisons.
+
+### Calibration Anchors
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `XOPH34Extq` (TabStruct) | 7.00 (Accept Oral) | Stronger: more polished benchmark contribution with novel evaluation metric and broader generator coverage |
+| `UFwgg44VZq` (ReTabAD) | 5.50 (Accept Poster) | Comparable scale; this paper has stronger empirical findings and theoretical analysis |
+| `jCQVjd4vrX` (Likelihood Paradox) | 4.00 (Reject) | Same topic area; this paper has much stronger empirical grounding and clearer contribution |
+| `JdbqDiguyO` (NRDE) | 3.33 (Reject) | Both use normalizing flows for tabular AD; this paper has more comprehensive experiments and clearer claims |
+| `0eEtTsnmyo` (USF) | 4.00 (Reject) | Both connect theory to normalizing flows for AD; this paper has substantially stronger empirical validation |
+| `73QNa7rAgm` (TCAD) | 4.00 (Reject) | Tabular AD method; this paper's empirical scope (47 datasets, 12 baselines) is broader |
+| `jbGGPSI9aO` (AdaSCALE) | 4.67 (Reject) | OOD detection method; this paper provides stronger benchmarking |
+
+The paper under review sits clearly above the 4.0-range rejects. It has a solid empirical contribution comparable to accepted poster-level work, with a more comprehensive benchmark than ReTabAD (5.50) but without the theoretical polish of TabStruct (7.00). The theoretical limitations and narrow flow architecture evaluation prevent an oral-level score, but the empirical contribution and novel intrinsic dimension analysis merit acceptance.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

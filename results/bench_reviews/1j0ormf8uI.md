@@ -1,89 +1,85 @@
-Now let me write the final consolidated review:
+Now I have a thorough understanding of the paper, the harsh critic's points, the strength finder's input, and the calibration anchors. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a conformal prediction framework for constructing lower prediction bounds (LPBs) on counterfactual survival times under general right-censoring. The key idea is to transform the coverage probability into a weighted conformal inference problem via an upper-bound inequality (Lemma A.1) that relates the censored calibration distribution to the target marginal distribution. The method achieves a distribution-free finite-sample coverage bound (Theorem 4.1) and claims a doubly robust property (Theorem 4.2). Empirical validation on six synthetic settings and a lung cancer clinical dataset demonstrates near-nominal coverage with more informative LPBs than PAC-type baselines.
+This paper introduces a conformal prediction procedure for counterfactual survival outcomes under general right-censoring. The key contribution is a reweighting scheme that transforms the counterfactual coverage problem into a weighted conformal inference task, yielding exact finite-sample marginal coverage guarantees (not just PAC-type). The method is accompanied by non-asymptotic bounds on coverage loss due to weight estimation error and a doubly robust asymptotic property. Synthetic experiments across six configurations validate coverage and informativeness advantages over PAC-type baselines; a real NSCLC clinical dataset illustrates the method's applicability.
 
 ## Strengths
 
-- **Non-trivial technical adaptation to survival counterfactuals.** Lemma A.1 derives an inequality relating censored-to-uncensored probabilities under the ignorability assumption, which is then used to transform the problem into a weighted conformal prediction task (Equation 1). This is a genuine technical contribution that extends weighted CP (Lei & Candès, 2021) to the survival counterfactual setting with general right-censoring.
+- **Exact coverage guarantee for counterfactual survival prediction:** The paper is the first to provide exact (not PAC-type) marginal coverage for LPBs of counterfactual survival times under general right-censoring. The derivation transforms the coverage probability into a weighted expectation (Section 4.1, equation 1), enabling a weighted conformal calibration procedure. Synthetic experiments (Figure 1) confirm coverage rates near the nominal 90% across all six settings.
 
-- **Comprehensive experimental design across six synthetic settings.** The paper evaluates performance under varying censoring mechanisms, covariate dimensions, and treatment/censoring ratios. The outlier experiment (Figure 3) shows that the proposed method maintains coverage when PAC-type baselines degrade, providing empirical evidence for the claimed advantage.
+- **Doubly robust theoretical property:** Theorem 4.2 proves that asymptotic coverage holds if either the weight function or the counterfactual quantile regression model is consistently estimated. This is an unusual and valuable result in the conformal prediction literature, adding theoretical depth beyond standard coverage guarantees. Sensitivity experiments in Appendices E.4 and E.5 support this property by showing maintained coverage under different regressors and weight estimators.
 
-- **Clear algorithm and reproducibility.** Algorithm 1 concisely outlines the procedure, and the paper provides code. Sensitivity analyses in the appendix (sample size effects in E.1, weight function choice in E.5, regression algorithm choice in E.4) address reasonable concerns about method robustness.
+- **Superior empirical informativeness and robustness on synthetic data:** Across six synthetic configurations with varying censoring and treatment rates, the proposed LPB is consistently less conservative than naive, focused, and fused baselines while staying close to target coverage (Figure 1). In outlier-contaminated scenarios, the method uniquely retains valid coverage while PAC-type baselines fail (Figure 3), validating the practical value of exact over PAC guarantees.
 
-- **Clinically grounded real-data analysis.** The lung cancer application (Section 5.2) demonstrates that the LPBs vary sensibly across radiochemotherapy regimens and correlate with known prognostic factors (stage, KPS, tumor volume), showing practical applicability.
+- **Clinically meaningful adaptiveness:** The LPB varies coherently with known prognostic factors (stage, KPS, tumor size) on the real NSCLC dataset (Figure 5), demonstrating that the bounds are informative for personalized treatment assessment, not merely vacuous guarantees.
+
+- **LPB optimization:** The procedure for selecting τ to maximize LPB while preserving coverage (Section 4.1, Table 1) yields tangible gains in bound tightness without sacrificing validity.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **"Exact guarantee" framing is oversold.** The abstract claims "an exact miscoverage guarantee" and the introduction claims "exact marginally valid LPB." Theorem 4.1 actually establishes a lower bound: P(coverage) ≥ 1 − α − (1/2) E[|ω̂(X) − ω(X)|]. This contains an error term from weight estimation that vanishes only asymptotically with perfect weight estimation. The paper is aware of this (the contributions list says "quantify the error from weight estimation"), and the bound is genuinely different from PAC guarantees (no "probably" qualifier), but calling it "exact" without qualification in the abstract and introduction is misleading about the nature of the guarantee. This affects the paper's central narrative of providing "exact" rather than "PAC-type" guarantees.
-
-- **The doubly robust claim in Theorem 4.2 is stronger than what the conditions support.** The paper presents Theorem 4.2 as "coverage holds if either weights or quantiles are well-estimated." However, condition A2 requires the coupling condition lim E[E_N(X)/γ̂_N(X)] / E[1/γ̂_N(X)] → E[E_N(X)/γ(X)] / E[1/γ(X)], where E_N is the quantile estimation error. This couples weight and quantile estimation — it is not implied by accurate quantile estimation alone. The quantile-only case still requires regularity on the weight function. The "one model correct" narrative oversimplifies. Additionally, the A1 case (weight estimation converges) is already covered by Theorem 4.1, so the doubly robust contribution hinges on A2.
+- **Real-data evaluation implicitly overstates what can be validated:** The coverage rates on the clinical dataset (Section 5.2) can only be assessed for the treatment each patient *actually* received — counterfactual outcomes are, by definition, unobserved. While the synthetic experiments do validate counterfactual coverage, the real-data results are presented in a way that could mislead readers into thinking counterfactual coverage has been empirically verified on clinical data. The cross-treatment LPB comparisons (e.g., VMAT vs. IMRT) are interpreted as treatment effect evidence (lines 845–852) but rely entirely on untestable ignorability assumptions. The paper would be substantially stronger if it explicitly separated (a) what the real-data analysis validates (factual survival prediction under a chosen treatment) from (b) what it merely illustrates under strong assumptions (counterfactual comparisons). The discussion (lines 890–893) acknowledges the difficulty of satisfying assumptions in practice but does not engage with the specific confounding structure of the lung cancer cohort or clearly delineate these limits for readers.
 
 ### Minor
 
-- **No direct test of the advantage over PAC methods in tail coverage.** The experiments report average coverage across trials, which does not distinguish the proposed method's "exact" (non-PAC) guarantee from PAC baselines. To demonstrate the claimed advantage, reporting the distribution of coverage rates across trials (e.g., worst-trial coverage, quantiles of the coverage distribution) would be more informative. The outlier experiment partially addresses this but is limited to one setting.
+- **No sensitivity analysis for ignorability violations:** While the Discussion (line 891) acknowledges that Assumption 3.1 is hard to guarantee in practice, there is no empirical exploration — even in the synthetic setup — of how violations of ignorability (e.g., unmeasured confounding or informative censoring) degrade coverage. The synthetic experiments could easily be extended to introduce such violations, which would give readers a more honest picture of the method's reliability under realistic conditions. This matters because the method's practical utility in clinical settings depends crucially on this assumption.
 
-- **Coverage in Setting 6 falls below the nominal 0.90 level** (acknowledged by the authors as "slightly falls below"). This deserves discussion: does it indicate a substantial weight estimation error, a violation of assumptions, or finite-sample noise? Without this analysis, the claim that the method "consistently achieves" desired coverage is overstated.
+- **Cross-treatment comparisons on real data lack caveats:** The real-data results (lines 847–852) compare LPBs across treatments and interpret higher LPBs as evidence of treatment superiority, citing external clinical literature for validation. While the correlations with clinical findings are noted as "consistent with," the text does not sufficiently caution that these comparisons assume full ignorability and could reflect confounding rather than genuine treatment effects. A sentence or two explicitly flagging this would improve scientific rigor.
 
-- **τ optimization procedure lacks discussion of its effect on coverage.** Section 4.1 selects τ*(x) by maximizing the LPB per test point. Since the theoretical guarantee is for a fixed τ, selecting the best τ across a grid introduces a selection effect not accounted for in the theory. The paper notes that τ* and τ=α give similar LPBs (Table 1, Figure 11), suggesting the optimization is not critical in practice, but the theoretical caveat should be discussed.
+### Trivial
 
-- **Limited characterization of when the Lemma A.1 bound is loose.** The method's conservatism depends on the inequality P(T < C | T < L̂) ≥ P(T < C) derived in Lemma A.1. The gap between the two sides is not characterized, and the empirical conservatism of the LPBs (coverage sometimes well above nominal) is not decomposed into sources (weight error vs. Lemma A.1 inequality vs. quantile regression error).
+- The caption for Figure 4 (lines 812–817) appears misplaced in the parsed text, preceding rather than following the figure it describes, making it hard to parse which results belong to which section. This is likely a parser artifact but worth checking in the original submission.
 
 ## Nice-to-Haves
 
-- A coverage-vs-LPB tradeoff curve (varying τ for fixed α) would reveal whether the method's higher coverage under adverse conditions comes at the cost of wider LPBs.
-- Case studies on the clinical data where the proposed LPB meaningfully differs from PAC-method LPBs would strengthen the practical narrative.
-- A finite-sample rate on E[|ω̂ − ω|] (e.g., using random forest convergence rates) would make Theorem 4.1's bound more concrete.
+- Extending the synthetic setup to introduce unmeasured confounding or informative censoring would allow readers to assess how the method degrades under assumption violations — a valuable addition for a method targeting clinical applications.
+- Extension to multiple treatments beyond binary with a unified calibration procedure would broaden practical relevance, as the authors note in the discussion.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
+These points are flagged to be removed, treat them with caution:
 
-- **Harsh critic's claim that the inequality in step (iv) of Equation (1) is "a structural assumption that is not discussed as a limitation."** This is incorrect — the inequality is derived (not assumed) in Lemma A.1 using the ignorability assumption. The proof is mathematically valid. However, the tightness of this inequality is indeed not characterized, which is captured as a minor weakness above.
+- **Harsh Critic's "missing experiments" on weight function quality and sensitivity analysis:** The paper already contains sensitivity analyses for different regressors (Appendix E.4) and weight functions (Appendix E.5), as stated in lines 821–822. While the appendix was stripped by the parser, the paper clearly references these experiments. The critic likely missed these references.
 
-- **Harsh critic's claim that "the coverage guarantee in Theorem 4.1 is upper-bounded, not exact — and this is not the same guarantee the paper claims."** Partially removed — the paper does quantify the error term in its contributions and the theorem statement. The "exact" language is oversold (captured as a major weakness), but the harsh critic's characterization that it's "the same sense that PAC guarantees are approximate" is incorrect: weighted CP bounds lack the "probable" component of PAC bounds. The distinction is real but needs more precise language.
+- **Strength Finder's "Practical real-world validation" (supporting strength #3):** "On 541 NSCLC patients... the method produces treatment-specific LPBs that align with established clinical findings." This framing as "validation" is misleading because counterfactual outcomes cannot be validated on observational data. The real data serves as an illustration of the method's applicability, not as validation of its counterfactual guarantees. Kept the adaptiveness pattern as a genuine strength but removed the stronger "validation" framing.
 
-- **Harsh critic's demand for ablation on reweighting vs. quantile regression quality.** The paper does report results at both τ* and τ=α (Table 1) showing they are similar, which is itself an informative comparison. The harsh critic interprets this as undermining the method, but the paper uses it to demonstrate that the quantile model is well-trained — a reasonable interpretation.
+- **Harsh Critic's claim that "The paper's conclusions about clinical decision-making overreach the evidence":** The paper consistently uses hedging language — "indicates the potential" (abstract), "the potential in supporting personalized clinical decision-making" (line 881), "valuable insights into personalized treatment strategies" (lines 84–85). These are measured claims, not overreach. The concern about disentangling factual from counterfactual evaluation remains valid (kept as a major weakness), but the harsh critic's characterization of the paper's conclusions as overreaching is itself overstated.
 
-- **Strength Finder claim about "exact marginal coverage guarantee."** This strength inherits the same overclaim issue. It is recast above with appropriate qualification.
-
-- **Strength Finder claim about "doubly robust property" without qualification.** Similarly recast.
-
-- **Harsh critic's point about "no comparison with split conformal approaches that use covariate-dependent censoring modeling."** The paper compares against the most relevant baselines (focused and fused from Davidov et al., 2025). This is a nice-to-have, not a weakness.
-
-- **Harsh critic's formatting/style nitpicks about figure scaling, error bar descriptions, etc.** These are parser/minor presentation issues removed per instructions.
-
-- **Harsh critic's point about "the lung cancer dataset is collected over 8 years — treatment protocols and patient populations may shift over time, violating exchangeability."** This is speculative scope creep — the paper explicitly relies on i.i.d. assumptions, and there is no evidence presented that these are violated.
-
-- **Strength Finder: generic statements about problem importance, "clear algorithmic description," "practical LPB optimization."** The concrete ones are kept; purely generic ones are removed.
+- **Strength Finder's "LPB optimization for informativeness" as a standalone supporting strength:** While the optimization procedure works, it is a natural extension of the core method (choose τ that maximizes LPB), not a novel contribution in itself. The optimization results are folded into the main experimental validation.
 
 ## Novel Insights
 
-The paper's Lemma A.1 provides an elegant connection between the censoring mechanism and weighted conformal prediction: under ignorability (T ⊥ C | X, W), the probability of being uncensored is not lower among patients with shorter survival times, enabling an upper bound that transforms the target coverage probability into a quantity identifiable from uncensored calibration data. This is a clean insight that may be useful beyond the current setting for other problems involving partially observed outcomes with a similar monotonicity structure.
+The pairing of weighted conformal prediction with the potential outcomes framework for survival analysis reveals a clean structural insight: the counterfactual coverage probability, under ignorability, can be bounded above by an expectation over the observed (uncensored, treated) distribution with a Radon-Nikodym derivative serving as the weight. This transforms a problem that prior work handled only approximately (via PAC bounds) into one solvable with exact finite-sample guarantees — the key move is recognizing that one can work with an upper bound that is itself identifiable and calibratable, rather than attempting direct estimation of the target quantity.
 
 ## Suggestions
 
-- Revise the abstract and introduction to replace "exact guarantee" with precise language matching Theorem 4.1, e.g., "distribution-free finite-sample bound with weight-estimation error term." This alone would address the paper's most significant framing issue.
-- Clarify in Theorem 4.2 and its surrounding discussion that A2 requires a coupling condition between weight and quantile estimation, and explicitly discuss what this means for the "doubly robust" interpretation.
-- Add a table or figure showing the distribution of coverage rates across the 50 trials (e.g., box plots or empirical CDFs) to provide evidence that the method's advantage over PAC approaches manifests in tail behavior, not just averages.
-- Discuss why coverage in Setting 6 falls below 0.90 and what this implies about the finite-sample behavior of the bound.
+- Add a paragraph to Section 5.2 explicitly stating: "Coverage on real data is evaluated only for the factual treatment each patient received; cross-treatment LPB comparisons rely on Assumption 3.1 and should be interpreted as illustrative rather than as empirically validated counterfactual evidence." This would resolve the major weakness without requiring new experiments.
+- In the synthetic experiments, add one configuration with a moderate violation of ignorability (e.g., an unobserved confounder affecting both treatment assignment and survival) to give readers a sense of how the coverage degrades under assumption violations.
+- Explicitly discuss the specific confounding risks in the lung cancer cohort (e.g., whether VMAT patients differ systematically from IMRT patients on unmeasured characteristics) to contextualize the real-data results.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration anchors:**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| aMXVp1QK2Q | 2.50 | This paper has substantially more technical novelty (Lemma A.1, weighted CP integration) and better experimental validation. |
-| teFnaEdG2j | 3.33 | This paper is more grounded in a concrete application with clearer theoretical contributions. |
-| OPZ2f3MnrQ | 4.50 | Similar in having a weighted CP contribution with theoretical bounds, but the current paper's theory is more sound (fewer unrealistic assumptions), though its framing issues are comparable. |
-| YM6KIpl6aR | 5.00 | Comparable level of theoretical development. Both have overclaim issues; the current paper has more practical empirical validation but a more significant framing problem in the abstract. |
-| EkTm1JCUEH | 5.00 | The current paper addresses a more focused technical problem with similar overall quality. |
-| ztEKLEUNKS | 6.00 | The current paper is weaker — less rigorous theoretical development and more oversold claims. |
-| UkDte1jM2Q | 6.00 | The current paper is weaker — less rigorous non-asymptotic analysis and framing problems that paper does not have. |
+| Path | Avg Score | Decision | Comparison |
+|------|-----------|----------|------------|
+| aMXVp1QK2Q | 2.50 | Reject | Conformal survival LPB paper with fundamental methodological flaws and limited novelty. Our paper is far stronger — novel exact coverage guarantee, correct methodology, strong synthetic validation. |
+| wYYOdt3f3L | 3.00 | Reject | Counterfactual prediction paper with novel assumption but weak theory and overclaiming. Our paper has much stronger theoretical backing and empirical support. |
+| haU96a8YO5 | 3.50 | Reject | Conformal regression with flow matching — novel but had significant issues. Our paper's theoretical depth and empirical coverage results are stronger. |
+| mhJ9jO7ue8 | 4.00 | Reject | Double/debiased ML for survival under poor overlap. Solid methodology but narrower scope. Our paper has broader contribution (exact coverage + counterfactual). |
+| qG6O3jMkCj | 4.80 | Accept (Poster) | HTE survival benchmark — valuable but a benchmarking paper. Our paper has stronger methodological novelty. |
+| aTxnsFFO7t | 5.33 | Accept (Poster) | Federated causal survival with double robustness. Comparable theoretical depth but our paper's exact finite-sample guarantee is a more novel result for conformal prediction. |
+| frv3s3AtUD | 6.00 | Accept (Poster) | Survival calibration via ALD with extensive empirical evaluation and theoretical backing. Our paper has weaker real-data validation but stronger theoretical novelty (first exact counterfactual coverage guarantee). |
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper under review makes a genuine and novel methodological contribution — the first exact marginal coverage guarantee for counterfactual survival prediction. The theoretical development is rigorous and the synthetic validation is convincing. The main weakness is that the real-data presentation does not sufficiently disentangle what it can validate (factual survival prediction) from what it merely illustrates under strong assumptions (counterfactual comparisons). This is addressable with textual revisions and does not undermine the core contribution. Compared against the anchors, the paper is clearly above the rejected borderline papers (2.5–4.0) and sits comfortably in the Accept range, though somewhat below the strongest accepted papers (6.0+) due to the real-data overstatement issue. It is comparable to aTxnsFFO7t (5.33) in having strong theory with minor real-data caveats, but with a more novel conformal prediction result.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

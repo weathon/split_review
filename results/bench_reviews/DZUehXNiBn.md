@@ -1,92 +1,112 @@
+Now I have all the information needed. Let me write the final consolidated review.
+
+---
+
 ## Summary
 
-This paper proposes VISTA, a modular framework for causal structure learning that decomposes the global DAG learning problem into per-node Markov Blanket subgraphs, runs arbitrary base learners on each subgraph, aggregates edge-direction evidence via an exponential-decay weighted voting scheme, and enforces acyclicity through a greedy Feedback Arc Set heuristic. The framework is model-agnostic, parallelizable, and operates purely at the edge level. The authors provide finite-sample error bounds and an asymptotic consistency result for the weighted voting aggregation, and demonstrate consistent improvements in FDR (50–80% reduction) and runtime across six base learners, multiple graph families, and scales up to 300 nodes.
+VISTA is a modular, model-agnostic framework for large-scale causal discovery that decomposes the global DAG learning problem into node-centered Markov Blanket subgraphs, aggregates local predictions via a weighted voting scheme with exponential decay, and enforces acyclicity through a lightweight Greedy Feedback Arc Set heuristic. The framework is fully plug-and-play with respect to both the MB identification method and the base causal discovery learner. The authors provide finite-sample error bounds and an asymptotic consistency guarantee, and evaluate VISTA across 6 diverse base learners, multiple graph families (ER, SF), and various graph sizes (30–300 nodes), demonstrating consistent FDR reduction (50–80%) and significant runtime improvements.
 
 ## Strengths
 
-- **Model-agnostic modular design with broad empirical validation**: VISTA operates purely on edge-level outputs and imposes no assumptions on base-learner inductive biases. It is demonstrated plug-and-play with NOTEARS, GOLEM, DAG-GNN, GraN-DAG, SCORE, and CAM across linear and nonlinear data (Table 1, Table 2, Appendix F.4). The coverage guarantee of Proposition 3.1 ensures no true edge is lost in the decomposition.
+- **Demonstrated model-agnostic improvements across diverse base learners.** VISTA-WV consistently reduces FDR by 50–80% versus standalone baselines (e.g., NOTEARS FDR drops from 0.21 to 0.08 in ER5, n=100; GOLEM from 0.61 to 0.23) while maintaining reasonable TPR. This pattern holds across 6 base learners spanning continuous optimization (NOTEARS, GOLEM, DAG-GNN, GraN-DAG), ordering-based (SCORE), and combinatorial (CAM) methods, and across both linear and nonlinear SEMs (Tables 1–2, 9–14). This breadth strongly supports the model-agnostic claim (Section 4.1).
 
-- **Substantial empirical accuracy and runtime gains**: Across all tested base learners, graph types (ER, SF), and scales (n=30–300), VISTA-WV reduces FDR by 50–80% relative to standalone baselines while keeping TPR ≥ 0.70 (Table 1). Parallel subgraph processing yields significant runtime reductions (Table 3; e.g., NOTEARS from 1473s to 1097s at n=100, GOLEM from 109s to 26s).
+- **Significant runtime reductions through parallelizable divide-and-conquer.** Table 3 shows NOTEARS runtime drops from ~1474s to ~97s at n=100 (ER3), with similar ~10x speedups for DAG-GNN and GraN-DAG. These gains are a direct consequence of the modular, parallel-friendly architecture and convincingly demonstrate practical scalability (Section 4.1).
 
-- **Retraining-free hyperparameter sweeps**: Because λ appears only in the final aggregation, the precision–recall trade-off can be explored by simply recomputing scores from cached votes without retraining any base learner. The paper uses a single fixed operating point (λ=0.5, t=0.7) across all experiments, avoiding per-dataset tuning, and reports full sweep curves for transparency (Figure 4).
+- **Lightweight, principled acyclicity via GreedyFAS.** Rather than ILP-based reconciliation, VISTA uses a cheap Feedback Arc Set heuristic on weighted edges (Algorithm 2), operating in O(n²) post-aggregation with no solver overhead. The design choice to apply FAS before threshold filtering (not after) is well-motivated as it prevents cycle removal from destroying high-confidence edges (Section 3.1).
 
-- **Clear ablation via naive voting baseline**: The naive voting (NV) variant quantifies the recall boost from overlapping Markov Blankets alone, while the weighted voting (WV) adds calibrated filtering. The enormous gap between NV (FDR~0.85) and WV (FDR~0.08–0.35, Table 1) convincingly isolates the contribution of the exponential weighting.
+- **Finite-sample error analysis with interpretable guidance.** The error bound analysis (Section 3.2, Theorem 3.4) derives a feasible interval for the weighting parameter λ (Eq. 5) that makes the precision–recall trade-off explicit: smaller λ suppresses false positives, larger λ preserves recall. The sensitivity study (Figure 4) empirically validates this trade-off, and the paper uses a single fixed operating point (λ=0.5, t=0.7) across all experiments, avoiding per-dataset cherry-picking.
 
-- **Modest but positive real-data signal**: On the Sachs protein-signaling network (11 nodes), VISTA reduces SHD and SID relative to baseline solvers (Table 4), providing some evidence of real-world applicability despite the small scale.
+- **Controlled comparison against a recent divide-and-conquer baseline (DCILP).** Table 5 shows VISTA-WV consistently outperforms DCILP under matched DAGMA base learner, with FDR dropping from 0.74→0.09 (ER5, n=30) and F1 improving from 0.35→0.82. This validates that the weighted voting + GreedyFAS strategy is both more accurate and computationally lighter than ILP-based reconciliation (Appendix F.2).
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Theoretical analysis rests on an independence assumption that does not hold for the actual method**: All probabilistic bounds (Theorems 3.2, 3.4, 3.5; Lemma E.1) treat votes from different local subgraphs as independent binomial trials. In practice, subgraphs are learned from the same dataset with heavily overlapping variable sets, so directional decisions are strongly dependent. The paper acknowledges this (lines 405–409: "the bound should be interpreted as a qualitative guide") but continues to present the bounds as formal guarantees and advertises them as a key contribution. The asymptotic consistency result (Theorem 3.5), which is the paper's central theoretical claim, rests entirely on this same independence model. No analysis is provided for how dependence affects the error bounds, nor is there empirical investigation of vote correlations. This substantially weakens the theoretical contribution.
+- **Sample size not reported for synthetic experiments.** Section 4.1 describes graph structures (ER/SF, n=30–300, h=3,5) and base learners in detail, but the number of data samples generated per synthetic dataset is never stated. Causal discovery performance is sample-size-dependent, and while within-study comparisons remain valid (all methods evaluated on identical data), the omission prevents readers from assessing whether the reported absolute FDR/TPR values are in a regime of practical interest and hinders independent reproduction. This should be corrected.
 
-- **Asymptotic consistency condition is inconsistent with the framework's structural properties**: Theorem 3.5 requires m (subgraphs per candidate edge) to grow as C log n. However, the paper's own structural analysis (Appendix E.2) shows that for Erdős–Rényi graphs, m_ij concentrates around 2 with occasional Poisson increments that vanish as n grows. The Markov-blanket decomposition proposed by VISTA does not produce m growing logarithmically with graph size. The asymptotic guarantee therefore does not describe the behavior of VISTA as implemented, and the claim that "the required number of independent subgraphs per edge grows only logarithmically with the graph size" (line 474–475) is misleading when applied to the proposed method.
+- **Tension between asymptotic consistency theorem and concrete graph analysis.** Theorem 3.5 requires the number of local subgraphs per candidate edge to be m = C log n for global error to vanish as n → ∞. However, the ER analysis in Appendix E.2 (Theorem E.4) shows that for sparse ER graphs with constant expected degree h, Pr(m_ij = 2) = 1 − O(θ²) — i.e., the overwhelming majority of edges appear in exactly two subgraphs, constant with n. The scale-free analysis (Theorem E.5) is similar. The paper addresses this by providing separate non-asymptotic bounds (Theorems E.4, E.5) that do handle the m=2 regime, but the asymptotic consistency theorem is presented as a headline result whose conditions do not hold in the very graph families the paper empirically evaluates. The disconnect between the asymptotic claim and the concrete analysis weakens the theoretical narrative.
+
+- **MB identification algorithm unspecified for main experiments.** The framework's performance critically depends on accurate Markov Blanket estimation — errors in the decomposition stage propagate to all downstream stages. Yet the paper never states which MB algorithm was used in the main synthetic experiments. The paper claims full agnosticism to the MB method (Section 3, "any method suitable for the data distribution can be plugged in"), but specifying the actual estimator used and providing a brief ablation or sensitivity analysis would substantially strengthen transparency and help readers understand whether observed gains are attributable to the voting mechanism or to the decomposition quality. For the DCILP comparison, the authors do mention implementing "the MB solver used in that work" (line 502).
 
 ### Minor
 
-- **λ choice does not clearly satisfy the theoretical interval**: The paper claims λ=0.5 lies within the feasible interval from Theorem 3.4 (Equation 5). For edges with the typical support count m=2 identified in Appendix E.2, the lower bound is λ > 0.60 (at t=0.7), which λ=0.5 does not satisfy. The paper does not specify which value of m was used to verify the claim. Since the theory is already acknowledged as a qualitative guide, this inconsistency is not fatal but it erodes precision in connecting theory to practice.
+- **Independence assumption in theoretical analysis.** Lemma E.1 explicitly assumes votes across local subgraphs are independent, and Theorem 3.5 inherits this through the lemma. The paper honestly acknowledges this for Theorem 3.2 ("the bound should be interpreted as a qualitative guide," lines 405–409) but does not restate the caveat in the context of Theorem 3.5, which could mislead a reader who skips the appendix. Extending the theory to weakly dependent votes is noted as future work.
 
-- **Markov Blanket identification method is not specified**: The entire divide step depends on accurate MB detection, and while the framework is agnostic to the choice of MB estimator, the experiments must have used a specific one. The omission obscures the sensitivity of VISTA to MB errors and limits reproducibility. The discussion of MB stability (Figure 1) is described as an empirical observation but the actual identification algorithm is unnamed.
+- **Real data results are mixed.** On the Sachs protein-signaling network (Table 4), VISTA reduces FDR (GOLEM: 0.80→0.57; SCORE: 0.81→0.60) but TPR also decreases (GOLEM: 0.26→0.18; SCORE: 0.18→0.12). The paper's claim of "general robustness" (Section 5, "typically increasing precision without sacrificing recall") is not strongly supported by this single real-data experiment. A more nuanced discussion of the precision–recall trade-off on real data would be appropriate.
 
-- **No comparison to simpler confidence-weighting baselines**: The paper compares only against naive (unweighted) voting. A natural control—thresholding on raw proportion A/m with a minimum-count rule, or a linear penalty on m—would isolate whether the specific exponential form 1−e^(−λm) provides benefit beyond a more conventional confidence-based pruning. Without this, the exponential design choice is justified only by the theoretical derivation (which is under an independence assumption) and the Bayesian prior interpretation (Appendix D.1), not by comparative evidence.
-
-- **Real-data evaluation is limited**: The Sachs network experiment (Table 4) uses only 2 base learners and 11 nodes. TPR drops for both baselines when VISTA is applied, and the SHD/SID improvements are modest (SHD: 16→16 and 18→15). Claims of consistently improving structural accuracy across arbitrary algorithms are not convincingly supported from this single small-scale network.
+- **Per-edge effective threshold variation not analyzed.** The weighted voting score uses an effective threshold r_λ(m) = t/(1 − e^(−λm)) that varies with m. Edges appearing in few subgraphs (small m) face a higher effective bar and may be discarded even with unanimous local support if m is too small. The paper does not quantify how many true edges fall below this bar under the fixed λ=0.5, t=0.7 setting, which would clarify the recall cost of the weighting scheme.
 
 ### Trivial
 
-- The presentation of the theoretical bounds in the main paper is notationally dense and could benefit from a clearer separation between results that hold under the independence assumption and practical guidance.
+- The ordering of GreedyFAS before threshold filtering is justified with intuition but no empirical ablation confirms this choice matters in practice.
+- Some garbled text in the parser output (e.g., Section 4.2) makes portions of the real-data experiment description hard to parse.
 
 ## Nice-to-Haves
 
-- An empirical investigation of vote correlations across subgraphs, and a sensitivity study of the error bounds under simulated dependent votes, would substantially strengthen the credibility of the theoretical motivation.
-- An ablation where MB identification is deliberately weakened (e.g., using a noisier estimator) to show how robust VISTA is to MB estimation quality.
-- A visualization of a full-pipeline example on a medium-sized synthetic graph showing the original MB subgraphs, weighted scores, and the final graph after FAS and filtering.
+- Extension to handle undirected edge outputs (CPDAG) from base learners would broaden compatibility, since many standard causal discovery methods output equivalence classes rather than fully directed graphs. The paper currently treats undirected edges as providing no directional vote (Section 3), which is a reasonable but limiting choice.
+- A principled method for selecting λ and t based on the distribution of m and empirical edge support rates, rather than fixing a single operating point, would strengthen the practical guidance.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed from the main review for the stated reasons:
+*These points are flagged to be removed, treat them with caution.*
 
-- **"The theoretical guarantees are founded on an unrealistic independence assumption, rendering the claimed error bounds non-credible"** — The paper explicitly acknowledges this limitation (lines 405–409: "the bound should be interpreted as a qualitative guide") and frames it as future work. The point is retained as a major weakness above but with the acknowledgment noted, and reclassified from "structural/fatal" to "major" because the paper is transparent about the limitation.
+- **"Sample size not reported for any synthetic experiment" — partially removed from "Fatal" tier.** The Harsh Critic argued this makes "none of the empirical comparisons interpretable" and the "empirical evaluation essentially meaningless." This overstates the severity. Within-study comparisons (baseline vs. VISTA variants) are still interpretable since all methods are evaluated on identical data. The omission is a transparency/reproducibility issue, not one that invalidates the relative comparisons. Moved from fatal to major.
 
-- **"The naive voting variant produces catastrophically high FDR"** — This is presented as a finding of the paper itself, not as a hidden flaw. The paper correctly uses NV to demonstrate why weighted voting is necessary. Not a weakness.
+- **"Theorem 3.5 proof assumes independence, contradicted by shared data" — already acknowledged by paper.** The paper explicitly states (lines 405–409): "Notably, Theorem 3.2 is stated under an idealized assumption that the votes from different local subgraphs are independent... the bound should be interpreted as a qualitative guide." This is not hidden — it is called out in the main text.
 
-- **"GreedyFAS errors are not accounted for in global error bounds"** — The paper acknowledges this in the conclusion (lines 829–831): "the FAS projection guarantees acyclicity, it may also prune edges that are weakly supported yet correct." The limitation is disclosed. Moved from a major criticism to a noted limitation.
+- **"No argument that m grows with n in typical graph families" — partially removed.** The Harsh Critic claims the paper makes "no argument" for m growth. In fact, Appendix E.2 does analyze m for ER and SF graphs explicitly, concluding that m=2 for most edges and providing separate bounds for that regime. The real issue is the tension between the asymptotic theorem (which assumes m growth) and the concrete analysis (which shows m is constant), not the absence of analysis. Retained as a major weakness but reframed accurately.
 
-- **"Comparison with DCILP" / "missing baseline comparisons"** — The paper does compare with DCILP (Table 5 in Appendix F.2). 
+- **Strength Finder's "Rigorous theoretical justification" — weakened.** The theoretical contribution has acknowledged limitations (independence assumption, m constant in ER/SF), so calling it "rigorous" overstates.
 
-- **"Undirected edges are partially wasted"** — The paper explicitly addresses this (lines 233–235): "If an undirected adjacency X−Y is returned, it is treated as providing no directional vote in the aggregation." This is by design.
+- **"Model-agnostic property — VISTA does not rely on any inductive bias" — weakened.** The framework is model-agnostic by design, but since the MB algorithm is unspecified, the reader cannot fully evaluate this claim for the experiments.
 
-- **Formatting/style/typo complaints** — These are parser artifacts, not author errors.
+- **Missing comparison with DCILP using same MB estimator** (from Harsh Critic) — the DCILP comparison already uses "the MB solver used in that work" (line 502), so this criticism is partially addressed. For the main experiments the MB algorithm is truly unspecified.
 
-- **"Missing appendix" / "missing proofs"** — The parser strips appendix sections; they exist in the original submission (the paper references Appendices D, E, F extensively).
-
-- **Strength Finder claim about "rigorous theoretical guarantees for aggregation"** — Weakened substantially by the independence assumption caveat. Dropped as a standalone strength.
-
-- **Strength Finder claim that "λ=0.5, t=0.7 lies within (5)"** — Kept as a minor weakness due to the m=2 discrepancy noted above.
+- **"Causal discovery methods output undirected edges" (from Harsh Critic)** — this is a scope limitation acknowledged by the paper (line 233–235), not a hidden flaw. Moved to Nice-to-Haves.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The divide-and-conquer via Markov Blankets with exponential-decay voting is a sensible combination, and the retraining-free λ sweeping from cached votes is a practically useful observation, but neither constitutes a novel insight beyond what the paper itself presents.
+The most interesting insight emerging from the reviews is the structural tension between VISTA's asymptotic theory (which requires m ~ log n subgraph overlaps per edge) and its concrete graph analysis (which shows m ≈ 2 for sparse ER/SF graphs). This gap is actually informative: it reveals that the divide-and-conquer asymptotics of causal discovery behave very differently from classical ensemble theory. In classical ensembles, more independent experts always help; here, the number of subgraphs covering each edge is bounded by local graph topology, not a free parameter. The paper would benefit from explicitly framing this as a finding rather than letting it appear as an inconsistency.
 
 ## Suggestions
 
-- Either replace the current theoretical presentation with an analysis that does not rely on independence (e.g., using dependency-aware concentration inequalities), or explicitly reframe the bounds as idealized illustrations and remove claims of formal error control and asymptotic consistency for the actual method. The current presentation overclaims given the acknowledged caveat.
-- Specify the MB identification algorithm used in experiments and discuss its expected error characteristics. Even a brief note in the experimental setup would substantially improve reproducibility.
-- Add a simple linear or minimum-count baseline (e.g., retain edge if A/m ≥ t' and m ≥ m_min) to isolate the benefit of the exponential form. This is a low-cost addition that would strengthen the empirical argument.
-- Expand the real-data evaluation beyond Sachs, or acknowledge the limited scope of that evaluation more explicitly.
+- Report sample sizes for all synthetic experiments and ideally include an ablation over sample sizes (e.g., n_samples ∈ {500, 2000, 10000}) to characterize the data regime where VISTA's benefits are most pronounced.
+- Specify the MB identification algorithm used in the main experiments and provide a brief sensitivity analysis (e.g., varying MB estimator quality or comparing two different MB algorithms) to disentangle decomposition quality from aggregation quality.
+- Clarify the relationship between Theorem 3.5 (asymptotic, m ~ log n) and Theorems E.4/E.5 (non-asymptotic, m=2) — either frame the asymptotic result as applying to denser graph regimes, or explicitly discuss the gap as a limitation/insight.
+- Add a small illustrative example (e.g., n=10 graph) showing ground truth, base learner output, and VISTA-WV output to help readers build intuition about what kinds of errors the voting mechanism corrects.
+- Discuss the Sachs results more honestly, noting that VISTA primarily improves precision/FDR on this benchmark while recall slightly decreases, and situating this within the precision–recall trade-off governed by λ.
 
-## Score Calibration
+## Score and Decision
 
-Anchor papers compared:
+**Anchor comparisons:**
 
-- **WtbPaWO8lH** (avg 6.00): Voting-theoretic ensemble for causal discovery. Similar theoretical limitations acknowledged; comparable empirical breadth. VISTA has broader base-learner coverage and runtime analysis, but its theory-practice gap (asymptotic condition not met by the method) is more severe. VISTA is slightly below this anchor.
-- **N9RyL52z7y** (avg 4.50): Ensemble CI test, divide-and-aggregate framework with solid experiments but limited novelty. VISTA has broader applicability, more baselines, and more significant empirical gains. VISTA is above this anchor.
-- **3lFAyPa9Fe** (avg 4.00): Agentic divide-conquer framework with multiple experimental and presentation weaknesses. VISTA is clearly above this anchor.
-- **lejOV6j3cj** (avg 5.00): FLOP algorithm with strong empirical results on linear data, some theoretical backing, limited to linear models. VISTA is model-agnostic and has broader applicability but weaker theory. Comparable contribution level.
-- **mA78uXqcnl** (avg 7.00): Strong theoretical contribution with novel identifiability results for Hawkes processes. VISTA is clearly below this anchor.
-- **vSAWV43kvs** (avg 3.00): Severely limited foundation model approach with misleading framing. VISTA is clearly above this anchor.
-- **RCdjovlkbl** (avg 3.50): Theoretical analysis of causal inference in GRL. VISTA is above this anchor.
-- **vaMVik1WmL** (avg 4.80): FastKCI, a scalable kernel-based CI test. Similar divide-and-conquer motivation. VISTA is comparable or slightly above.
+- **WtbPaWO8lH** (avg 6.0, Accept): Voting-based ensemble framework for causal discovery with theoretical guarantees. Very similar in spirit. VISTA has broader empirical coverage (6 vs. 5 base learners, runtime analysis, DCILP comparison) but the voting paper has cleaner theory (independence assumption is more natural for ensembles of different algorithms) and reports all experimental parameters. VISTA is slightly below due to transparency issues.
+
+- **lejOV6j3cj** (avg 5.0, Accept): FLOP — strong empirical method with impressive speedups but no finite-sample theory. VISTA provides theory (with caveats) and has similarly broad empirical validation. Comparable level.
+
+- **N9RyL52z7y** (avg 4.5, Accept): E-CIT — modular divide-and-aggregate framework for CI testing. Similar modular philosophy. VISTA has more novelty in its aggregation mechanism (weighted voting + FAS) and broader empirical scope. VISTA is stronger.
+
+- **V7pT2ZRoTB** (avg 4.5, Accept): Pure theory on random graphs, limited practical relevance. VISTA is substantially more practical with strong empirical backing. VISTA is stronger.
+
+- **3lFAyPa9Fe** (avg 4.0, Reject): CausalSteward — agentic divide-conquer framework. VISTA is more principled with theoretical guarantees and systematic empirical evaluation. VISTA is stronger.
+
+- **bOfiLeoUJf** (avg 4.67, Accept): Query-specific causal graph pruning — narrower scope. VISTA addresses a broader problem. VISTA is comparable to somewhat stronger.
+
+- **aS7EVadvZD** (avg 3.0, Reject): SLCD — weak empirical validation. VISTA is substantially stronger.
+
+- **MHy7PnRcRO** (avg 3.0, Reject): Causal discovery under changing mechanisms. VISTA is substantially stronger with more rigorous evaluation.
+
+- **EzHPHhSQMD** (avg 2.0, Reject): Game-theoretic RL for causal discovery. VISTA is much stronger.
+
+- **vSAWV43kvs** (avg 3.0, Reject): Foundation model for DAG learning. VISTA is stronger.
+
+- **RCdjovlkbl** (avg 3.50, Withdrawn): Causal inference in graph representation learning. Different problem domain; VISTA is stronger.
+
+VISTA sits at the level of solid accept papers in this space — it has real strengths (broad empirical validation, practical runtime gains, lightweight modular design) and real weaknesses (sample size omission, MB algorithm unspecified, theoretical tension). It is comparable to FLOP (5.0) and slightly below the voting ensemble paper (6.0).
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,22 +1,22 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have a thorough understanding of the paper and the calibration anchors. Let me assemble the final review.
 
 ---
 
 ## Summary
 
-This paper proposes Forget-to-Focus (F2F), a two-stage protocol where an LLM first undergoes targeted unlearning on a general-domain "forget set" (with an optional retain set for stability), then fine-tunes on a domain-specific dataset. The central claim is that removing irrelevant pretrained knowledge before fine-tuning reduces negative transfer and improves domain specialization. Experiments span coding (HumanEval, MBPP), medical (PubMedQA, MedMCQA), and math (Hendrycks MATH, GSM8K) benchmarks across models from 0.6B to 72B parameters.
+The paper proposes Forget-to-Focus (F2F), a two-stage protocol that performs targeted unlearning on a general-domain "forget set" (BookCorpus) before fine-tuning on a domain-specific dataset. The central claim is that actively removing irrelevant pre-training knowledge via gradient ascent (stabilized by gradient descent on a retain set) improves domain specialization. Experiments span coding (HumanEval, MBPP), medical (PubMedQA, MedMCQA), and math (MATH, GSM8K) domains across models from 0.6B to 72B parameters. The paper reports consistent gains over standard fine-tuning, DAPT, and LoRA, and supports these with representational analyses (CKA, SVCCA, PCA-shift, Fisher) and calibration improvements.
 
 ## Strengths
 
-- **Consistent empirical gains across domains and scales**: F2F delivers substantial and consistent improvements over standard fine-tuning and several baselines (LoRA, DAPT, CurlLoRA). For example, on HumanEval, F2F boosts Qwen3-0.6B from 19.50 (SFT) to 42.07 pass@1, and LLaMA3.1-8B from 33.54 to 60.37 (Table 1). Similar patterns hold across medical and math domains and multiple model families.
+- **Novel framing of unlearning for domain adaptation**: The paper repurposes machine unlearning from a privacy tool into a deliberate preparatory stage for enhancing fine-tuning. This is a genuinely fresh perspective supported by a clear empirical protocol. The central hypothesis — that suppressing irrelevant priors creates a cleaner optimization landscape for specialization — is articulated well and tested systematically.
 
-- **GA-only experiments partially isolate the forgetting effect**: The paper includes unlearning with σ=0 (gradient ascent only, no retain set). Notably, for Qwen-0.6B, GA-only + SFT achieves 40.02 on HumanEval vs. 31.71 for SFT alone — an 8.3-point gain without any retain set, providing evidence that the forgetting component itself contributes beyond extra domain-data exposure (Table 1).
+- **Comprehensive, multi-domain, multi-scale empirical validation**: F2F is evaluated on 3 domains (coding, medical, math), 5+ model families (Qwen, LLaMA, Gemma), and scales from 0.6B to 72B parameters. Table 1 shows F2F (GA+GD + SFT) achieving HumanEval pass@1 of 42.07 for Qwen-0.6B vs. 31.71 for SFT alone (+10.36 points), and 60.37 for LLaMA-8B vs. 56.71 for SFT. Multi-seed results in Appendix Table 9 confirm robustness: e.g., Qwen 2.5 7B HumanEval: 53.70 ± 0.005 (F2F) vs. 44.35 ± 0.004 (SFT), a +9.4 point gain with tiny standard deviations. The GA-only variant (no retain set, σ=0) also shows consistent gains over SFT across models in Table 1 (e.g., Qwen-0.6B HumanEval: 40.02 GA+SFT vs. 31.71 SFT), providing evidence that the gains are not solely attributable to retain-set warm-start.
 
-- **Forget-set quality analysis demonstrates controllability**: Table 3 shows that curated forget sets (BC-Select, BC-Cosine) consistently outperform mixed sets (BC-Mixed) that contain domain-relevant data. This provides meaningful practical guidance and validates that the protocol's effectiveness depends on the composition of the forget set.
+- **Multi-faceted representational analysis**: The paper goes beyond accuracy to analyze CKA, SVCCA, PCA-shift, and Fisher information. Figure 4 shows F2F causes greater representational drift from the unlearned model than standard tuning. Figure 7 demonstrates F2F redistributes Fisher sensitivity to moderate shallow-layer activity while standard fine-tuning sharply amplifies it. These analyses provide mechanistic evidence connecting unlearning to altered representational geometry.
 
-- **Representational analysis provides mechanistic insight**: CKA (Figure 4), SVCCA (Figure 5), and Fisher information analyses (Figure 7) show that F2F induces larger representational shifts from the base model than standard fine-tuning, and dampens shallow-layer sensitivity. While not fully disentangled from the retain-set effect, these analyses offer converging evidence consistent with the claimed mechanism.
+- **Calibration and reliability improvements on medical QA**: Table 7 shows F2F reduces ECE to 0.050 vs. 0.277 for standard fine-tuning — a practically meaningful improvement for sensitive applications. Figure 8 confirms better-spread confidence distributions. Broad-skill retention is also verified (Table 5), with F2F largely preserving or improving general benchmark performance and Alpaca-Eval win rate.
 
-- **Ambitious experimental scope**: The paper evaluates five model families (Qwen, LLaMA, Gemma) spanning 0.6B to 72B parameters, three domains, and multiple baselines — a scale that exceeds most comparable papers.
+- **Ablation of forget-set quality and unlearning variants**: Table 3 systematically compares BC-Select, BC-Mixed, and BC-Cosine forget sets across three domains, and Figure 3 compares GA+GD, GA, NPO, and GA+KL unlearning algorithms, providing actionable practical guidance.
 
 ## Weaknesses
 
@@ -26,88 +26,83 @@ None.
 
 ### Major
 
-- **Retain-set-only baseline is missing**: The paper does not include a variant where the preparatory stage consists solely of gradient descent on the retain set (no forget set, no gradient ascent). This ablation is needed to determine whether the gradient ascent on the forget set contributes anything beyond additional domain-specific training. The GA-only experiments (σ=0) partially address this by showing that forgetting without a retain set helps — but they don't answer whether *retain-set-only descent* (effectively extra domain fine-tuning) would achieve similar gains. This is a genuine gap in the ablation design.
+- **Retain set drawn from downstream fine-tuning data creates a potential confound**: The paper states (line 331): "The retain set is a small subset of the fine-tuning data, following prior work (Geng et al., 2025)." During the GA+GD unlearning phase, the model performs gradient *descent* on this retain set simultaneously with gradient *ascent* on the forget set (BookCorpus). This means the model receives some exposure to target-domain data before fine-tuning begins. While the retain set is used as a stabilizer (not as pre-training), and while the GA-only variant (σ=0, no retain set) still shows consistent improvements over SFT in Table 1, the paper could more explicitly disentangle how much of the GA+GD gain comes from unlearning vs. from early exposure to the retain set. The DAPT baseline provides partial comparison (DAPT also exposes the model to domain text), but a direct ablation with a non-domain retain set would strengthen the contribution.
 
-- **The retain set provides extra domain-data exposure that is not controlled for**: The retain set is "a small subset of the fine-tuning data" (Section 3.3), meaning F2F performs gradient descent on a portion of the target-domain data *before* the final fine-tuning stage. The standard SFT baseline only sees the domain data during its fine-tuning phase. While the GA-only experiments (no retain set) show gains without this confound, the full F2F (GA+GD) results conflate the benefit of forgetting with the benefit of extra domain-specific training. A compute-matched or step-matched SFT baseline (e.g., SFT with extra epochs on the retain subset) would strengthen the claim that unlearning — not just additional training — drives the improvement.
+- **No compute-equivalent control for the unlearning phase**: F2F adds an unlearning phase (1000 steps, ~0.55 GPU-hours on A100 per Appendix C.1) before fine-tuning. The baselines (SFT, LoRA) do not receive an equivalent amount of additional optimization. DAPT serves as a partial control (it also involves additional pretraining), but a more targeted control — e.g., the same number of gradient steps on random general text with standard gradient descent, followed by fine-tuning — would better isolate whether the gains arise specifically from gradient *ascent* on the forget set or from any additional optimization. The GA-only results and the DAPT comparison mitigate this concern, but it remains a gap.
 
 ### Minor
 
-- **The Gemma-2B collapse-and-recovery pattern is acknowledged but not explained**: For Gemma-2B (Table 1), unlearning alone drops HumanEval to 0.00, yet subsequent fine-tuning reaches 21.30, above the SFT baseline of 16.20. The paper notes this is unusual ("aggressive unlearning may overwhelm models with limited capacity") but does not investigate why a model that has been completely "damaged" can then recover to outperform SFT. This doesn't invalidate the main results but leaves an unexplained phenomenon inconsistent with a straightforward negative-transfer narrative.
+- **Theoretical analysis (Section 2) is disconnected from the empirical work**: The convex, strongly-convex analysis with orthogonal subspace decomposition does not apply to LLM fine-tuning and does not inform the experimental design. The proposition and corollary are stated but never referenced in interpreting results. This section could be shortened or removed without affecting the paper's contribution.
 
-- **Theoretical analysis is limited to a convex surrogate**: The Proposition and Corollary in Section 2 provide intuition in a convex, linear setting with strong assumptions (orthogonal decomposition of feature space, strong convexity of the forget risk). These assumptions do not hold for LLM training, and the analysis does not yield actionable hyperparameter guidance. It serves as motivation more than as a rigorous foundation.
+- **Larger models fine-tuned for only 1 epoch (Section 3.4)**: All models except Qwen-0.6B are fine-tuned for a single epoch "due to their larger parameter sizes and to reduce the risk of overfitting." This means larger models undergo far less adaptation than the 0.6B model (8 epochs). The gains from F2F may partially reflect compensation for an undertuned baseline, particularly for Gemma-2B and LLaMA variants where SFT alone shows regressions on some benchmarks. The paper would benefit from showing that F2F's advantage persists under more comparable fine-tuning budgets.
+
+- **No contamination analysis for code and math datasets**: OpenCoder (fine-tuning data) and HumanEval/MBPP (evaluation) may share overlapping content, as may OpenMathInstruct and MATH/GSM8K. The paper does not analyze or decontaminate. While unlikely to explain the magnitude of observed gains, a brief analysis would address a standard concern in LLM benchmarking.
 
 ### Trivial
 
-- **Retain set size relative to full fine-tuning data is not reported in the main text**: The main paper reports 1000 samples for the retain set but not the total fine-tuning dataset size, making it harder for a reader to assess the scale of extra exposure.
+- The notation in Section 2 is difficult to parse due to rendering issues (though this may be a PDF extraction artifact). For clarity, the key update rule and propositions could be presented more cleanly.
 
 ## Nice-to-Haves
 
-- A compute-matched comparison (equalizing total FLOPs or gradient steps between SFT and F2F) would strengthen the fairness argument, though this is not standard in most LLM fine-tuning papers.
-- Per-example case studies showing where F2F corrects errors that SFT makes, attributed to interference from general knowledge, would make the negative-transfer narrative more tangible.
-- Testing the method with σ=0 (pure forgetting, no retain set) across more model/domain combinations to better characterize when the retain set is needed.
+- An ablation where the retain set is replaced by non-domain general text would directly address the retain-set confound and strengthen the central claim that *unlearning* (rather than early domain exposure) drives the gains.
+
+- A compute-equivalent baseline (e.g., continued pretraining on random BookCorpus with standard GD for the same number of steps, then fine-tuning) would isolate the effect of gradient ascent.
+
+- Perplexity or loss curves during the unlearning phase, showing that the forget-set loss increases while retain-set loss stays stable, would provide direct evidence that targeted forgetting is actually occurring (beyond the SAE-based forgetting probe in Appendix A.3).
+
+- Concrete qualitative examples of negative transfer being alleviated (e.g., cases where standard fine-tuning produces incorrect answers due to general-knowledge interference and F2F corrects them) would ground the abstract motivation in Section 1.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution.
+These points are flagged to be removed; treat them with caution.
 
-- **"Unfair comparison due to extra exposure to domain data during unlearning" (harsh critic #1)**: This concern is real — the retain set does provide extra domain exposure — but I've recast it as a major weakness focusing on the missing retain-set-only baseline and the need for a compute/step-matched SFT control. The harsh critic's framing as a "structural" flaw that invalidates the contribution is too strong, since the GA-only experiments (no retain set) still show gains, providing evidence that forgetting itself contributes.
+1. **"The retain set leaks target-domain knowledge, invalidating the claim" (from Harsh Critic #1)** — Removed as a fatal claim because the paper evaluates GA-only (σ=0, no retain set) and shows it consistently outperforms SFT (e.g., Qwen-0.6B HumanEval: 40.02 GA+SFT vs. 31.71 SFT). The retain set is used for stabilization during gradient ascent, not as pre-training, and the gains persist without it. Retained as a major (not fatal) weakness because the paper could more explicitly disentangle retain-set effects in GA+GD.
 
-- **"Mechanism conflates forgetting with domain-alignment through the retain set" (harsh critic #2)**: Partially addressed by the GA-only experiments. The harsh critic correctly notes the disentanglement is incomplete, but the claim that "improvements are equally consistent with the hypothesis that retain-set gradient descent alone is sufficient" is untested rather than proven — this is why the missing ablation is the real issue. Moved to the retain-set-only baseline weakness above.
+2. **"Forget set construction is heuristic and unvalidated" (from Harsh Critic #4)** — Removed. The paper systematically evaluates three forget-set types (BC-Select, BC-Mixed, BC-Cosine) in Table 3 and analyzes the relationship between forget-set quality and downstream performance. This is a strength of the paper, not a weakness.
 
-- **"Catastrophic failure of unlearning alone followed by recovery challenges the stated mechanism" (harsh critic #3)**: The Gemma-2B pattern is genuinely interesting but is a single-model phenomenon. The paper does note it. Kept as a minor weakness rather than a structural problem.
+3. **"No systematic comparison of GA+KL and NPO in main experiments" (from Harsh Critic, Section-by-Section)** — Removed. Figure 3 explicitly compares GA+GD, GA, NPO, and GA+KL on medical domain for both Qwen-0.6B and LLaMA-8B. The comparison exists in the main paper.
 
-- **"No control for gradient descent on the retain set alone" (harsh critic #4)**: Kept as a major weakness — this is the strongest point from the harsh critic.
+4. **"Theoretical analysis assumes strong convexity; disconnected from empirical work" (from Harsh Critic, Section 2)** — Retained as minor (not major, not fatal) because while the disconnect is real, it does not threaten the empirical contribution.
 
-- **"Incomplete baselines and missing compute-matching" (harsh critic #5)**: The compute-matching demand is uncommon for LLM fine-tuning papers and is moved to Nice-to-Haves. The multi-task training variant suggestion is reasonable but not standard. 
+5. **"Lack of statistical rigor and variance reporting in main results" (from Harsh Critic #3)** — Partially removed. Table 9 in the appendix provides multi-seed results with standard deviations across both coding and medical domains, showing very small variance (±0.001–0.012). While these are in the appendix rather than main text, this is standard practice in LLM benchmarking. The criticism is softened to a minor note.
 
-- **"BC-Select forget set curation is non-reproducible and subjective" (harsh critic, Section-by-Section)**: The paper also provides BC-Cosine, an automated method (cosine similarity to target domain centroid), which performs comparably to BC-Select. This addresses reproducibility concerns.
+6. **"No control for extra training compute" (from Harsh Critic #2)** — Retained as major because DAPT provides only a partial control and a more targeted compute-equivalent baseline would strengthen the contribution. However, this is not fatal because DAPT + the GA-only results together provide evidence that unlearning specifically helps.
 
-- **"Theoretical analysis is of limited relevance" (harsh critic, Section 2 notes)**: Kept as a minor weakness but softened — it provides useful intuition even if not directly applicable.
+7. **"BC-Cosine uses target-domain embeddings — tantamount to target knowledge in forget set" (from Harsh Critic, Section-by-Section)** — Removed. BC-Cosine is designed as a practical automated method for forget-set selection; using target-domain embeddings to identify *non-overlapping* samples is a reasonable approach, not a confound. The embeddings are used to select the forget set (BookCorpus samples far from domain centroid), not to inject domain knowledge.
 
-- **"CKA/SVCCA shifts expected with any additional training stage" (harsh critic, Section 4.5)**: This concern is partially valid but the paper compares against standard fine-tuning, which is the relevant baseline. The representational analysis remains informative.
-
-- **Strength Finder: "principled theoretical justification"**: Softened — the theory is for a convex surrogate and doesn't directly apply to LLMs.
-
-- **Strength Finder: "Demonstrated reliability and calibration gains"**: The calibration gains (Table 7) are in the appendix and span only the medical domain, making this a supporting rather than core strength.
-
-- **Missing related works**: Not included per instructions.
-
-- **Typos/formatting**: Not included per instructions.
-
-- **Missing appendix content**: Per instructions, the parser strips appendix sections.
-
-- **Human finder weaknesses about MUSE, TOFU, etc.**: These are from other unlearning papers and not relevant to this paper.
+8. **Strength Finder items removed**: Generic strengths without specific evidence ("the paper tackles an interesting research question") were dropped.
 
 ## Novel Insights
 
-The key insight is not merely that unlearning can help fine-tuning, but that the quality and composition of the forget set matters: curated forget sets (BC-Select, BC-Cosine) consistently outperform mixed sets that accidentally contain domain-relevant data (Table 3). This provides actionable guidance: when using unlearning for domain adaptation, one should ensure the forget set is genuinely unrelated to the target domain rather than using a generic dataset. The BC-Cosine method offers a practical, automated way to construct such sets via embedding similarity.
+The paper's most valuable insight is the empirical demonstration that gradient ascent on general-domain data systematically reshapes LLM representational geometry in ways that benefit downstream specialization — specifically by dampening shallow-layer Fisher sensitivity (which standard fine-tuning amplifies) and by inducing targeted rather than uniform PCA drift. This suggests that unlearning may work not primarily by "erasing" specific facts but by reallocating parameter sensitivity away from low-level generalist features, creating headroom for domain-specific learning. This connection between unlearning and representational efficiency is more interesting than the raw accuracy numbers alone would suggest, and points toward a mechanistic understanding of why removing "irrelevant" knowledge helps.
 
 ## Suggestions
 
-- Add the retain-set-only baseline (gradient descent on the retain set without any gradient ascent on the forget set, followed by standard fine-tuning). This is the single most important missing experiment and would cleanly separate the contribution of forgetting from extra domain training.
-- Report the total fine-tuning dataset size alongside the retain set size in the main text so readers can assess the scale of extra exposure.
-- For the Gemma-2B collapse-and-recovery, at minimum acknowledge it explicitly as an open question rather than a minor curiosity; ideally, investigate whether it reflects a sharpness-minimization or regularization effect.
-- Consider reporting total FLOPs or GPU-hours for at least one representative experiment to give readers a sense of the additional computational cost of the unlearning stage.
+1. Add an explicit ablation using a non-domain retain set (e.g., random BookCorpus samples with gradient descent, while still performing gradient ascent on the forget set) to cleanly isolate the unlearning effect from the retain-set warm-start in GA+GD.
 
----
+2. Shorten or remove the convex-analysis theory in Section 2, or replace it with a more relevant empirical motivation that directly connects to the LLM setting.
 
-Now let me calibrate against the anchor reviews:
+3. Run a compute-equivalent baseline (standard GD on random BookCorpus for the same number of unlearning steps, followed by fine-tuning) and report it alongside existing baselines.
 
-**Anchor comparisons:**
+4. Provide perplexity trajectories on the forget set during unlearning to demonstrate that gradient ascent is actually increasing loss on BookCorpus, confirming the "forgetting" mechanism.
 
-1. `/home/wg25r/review_agent/human_reviews_2026/XZhDjhVwma.md` (Exclusive Unlearning, avg 3.50, Reject): Similar novelty in repurposing unlearning, but much narrower experiments (2 tasks, limited models) and marginal gains. F2F is substantially stronger in experimental breadth and impact.
+5. Add a brief contamination analysis or discussion of potential overlap between OpenCoder/HumanEval and OpenMathInstruct/MATH.
 
-2. `/home/wg25r/review_agent/human_reviews_2026/jROUUKq51K.md` (MaGA, avg 4.00, Reject): Unlearning method with computational overhead issues, demonstrated only on small vision datasets. F2F has broader domain coverage, larger-scale experiments, and a clearer practical benefit. F2F is stronger.
+## Score and Decision
 
-3. `/home/wg25r/review_agent/human_reviews_2026/qd9fA4LzVN.md` (SGA, avg 4.50, Reject): Related to GA in unlearning, with theory and experiments on standard unlearning benchmarks. F2F has a more novel framing (unlearning for domain adaptation rather than privacy) and broader experiments. F2F is at least as strong.
+### Calibration Anchors
 
-4. `/home/wg25r/review_agent/human_reviews_2026/KBknLdXxTa.md` (CORE-MATH, avg 5.50, Accept Poster): A benchmark paper with thorough evaluation and clear practical value. F2F is a method paper — different type of contribution. CORE-MATH is stronger in terms of rigor and completeness. F2F has more ambitious scope but the methodological gaps (missing retain-only baseline) hold it back relative to CORE-MATH.
+| Path | Avg Score | Decision | Comparison |
+|------|-----------|----------|------------|
+| guUUlHPXRw | 2.00 | Reject | Severely flawed (findings reflect experimental design, not principles); our paper is far more rigorous |
+| XZhDjhVwma | 3.50 | Reject | "Exclusive Unlearning" — marginal gains and destroys general capabilities; our paper shows consistent gains while preserving broad skills |
+| iKqQGEOeej | 5.50 | Reject | "Memorize to Forget" — narrower evaluation, insufficient novelty justification; our paper has broader empirical scope |
+| vcWDDfA4Ev | 6.00 | Accept (Poster) | "ADEPT" — two-stage domain adaptation, evaluated on 2 domains, strong theory; our paper tests 3 domains with more model scales but weaker theory |
+| mvLhN0veUd | 6.00 | Accept (Poster) | "Breaking Barriers" — broad empirical study, sound design; comparable empirical breadth, our paper has stronger methodological contribution |
+| UHyJqF1mqJ | 3.50 | Reject | Domain adaptation benchmark paper; our paper has a more complete experimental contribution |
+| MBJCUQ2Iez | 3.33 | Reject | Evaluation framework paper; not directly comparable |
 
-5. `/home/wg25r/review_agent/human_reviews_2026/guUUlHPXRw.md` (CPT vs SFT, avg 2.00, Reject): Domain adaptation study with fundamental experimental design issues, single model family. F2F is much stronger.
+The paper under review compares favorably with the 6.00-scored anchors (ADEPT and Breaking Barriers) in terms of empirical breadth and significance of findings. It is clearly stronger than the 3.50–5.50 unlearning papers (Exclusive Unlearning, Memorize to Forget) in scope and evidence quality. The retain-set confound and absent compute-equivalent control are real but not fatal — the GA-only results and DAPT comparison provide meaningful mitigation. The theoretical section is weak, but the empirical contribution stands on its own. I assign a score of **6.0**, corresponding to a solid poster acceptance with clear strengths and addressable weaknesses.
 
-6. `/home/wg25r/review_agent/human_reviews_2026/7bW5ECLy8q.md` (DAWI, avg 2.50, Reject): Unlearning method with limited applicability. F2F is substantially stronger.
-
-F2F sits between the SGA paper (4.50) and the CORE-MATH paper (5.50). It has a stronger experimental scope than SGA but lacks the methodological completeness of CORE-MATH. The missing retain-set-only baseline is a genuine gap. I'd place it at 5.0 — a solid contribution with some important methodological gaps that prevent it from being clearly above the accept threshold.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>
