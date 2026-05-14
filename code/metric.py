@@ -220,6 +220,115 @@ def ai_vs_one_vs_rest(df, gt_score_cols, confidence=0.95, n_boot=2000, seed=0):
     }
 
 
+def one_vs_one_baseline(df, gt_score_cols):
+    """Estimate human reliability via all ordered reviewer-vs-reviewer pairs per paper."""
+    a_scores = []
+    b_scores = []
+    paper_decisions = []
+    pairs_by_paper = []
+    n_papers = 0
+
+    for _, row in df.iterrows():
+        human = [float(row[c]) for c in gt_score_cols if pd.notna(row[c])]
+        if len(human) < 2:
+            continue
+        n_papers += 1
+        paper_pairs = []
+        for i, j in combinations(range(len(human)), 2):
+            a_scores.append(human[i])
+            b_scores.append(human[j])
+            paper_decisions.append(row["gt_binary"].strip().lower())
+            paper_pairs.append((human[i], human[j]))
+        pairs_by_paper.append(paper_pairs)
+
+    if len(a_scores) < 2:
+        return None
+
+    a = np.array(a_scores)
+    b = np.array(b_scores)
+    pearson, _ = stats.pearsonr(a, b)
+    spearman, _ = stats.spearmanr(a, b)
+    mae = float(np.mean(np.abs(a - b)))
+
+    return {
+        "n_pairs": len(a_scores),
+        "n_papers": n_papers,
+        "pearson": float(pearson),
+        "spearman": float(spearman),
+        "mae": mae,
+        "a_scores": a_scores,
+        "b_scores": b_scores,
+        "paper_decisions": paper_decisions,
+        "pairs_by_paper": pairs_by_paper,
+    }
+
+
+def ai_vs_one_vs_one(df, gt_score_cols, confidence=0.95, n_boot=2000, seed=0):
+    """Compare AI vs human one-vs-one with paired paper-level bootstrap."""
+    pred = []
+    gt_avg = []
+    pairs_by_paper = []
+
+    for _, row in df.iterrows():
+        human = [float(row[c]) for c in gt_score_cols if pd.notna(row[c])]
+        if len(human) < 2:
+            continue
+        pred.append(float(row["pred_score"]))
+        gt_avg.append(float(row["gt_avg_score"]))
+        paper_pairs = [(human[i], human[j]) for i, j in combinations(range(len(human)), 2)]
+        pairs_by_paper.append(paper_pairs)
+
+    if len(pred) < 2:
+        return None
+
+    pred = np.asarray(pred, dtype=float)
+    gt_avg = np.asarray(gt_avg, dtype=float)
+    flat_pairs = [p for paper in pairs_by_paper for p in paper]
+    a_all = np.asarray([p[0] for p in flat_pairs], dtype=float)
+    b_all = np.asarray([p[1] for p in flat_pairs], dtype=float)
+
+    ai_spearman = float(stats.spearmanr(pred, gt_avg).statistic)
+    human_spearman = float(stats.spearmanr(a_all, b_all).statistic)
+    ai_pearson = float(stats.pearsonr(pred, gt_avg).statistic)
+    human_pearson = float(stats.pearsonr(a_all, b_all).statistic)
+    ai_mae = float(np.mean(np.abs(pred - gt_avg)))
+    human_mae = float(np.mean(np.abs(a_all - b_all)))
+
+    delta_samples = {"spearman": [], "pearson": [], "mae": []}
+    rng = np.random.default_rng(seed)
+
+    for _ in range(n_boot):
+        sample_idx = rng.integers(0, len(pred), len(pred))
+        boot_pred = pred[sample_idx]
+        boot_gt_avg = gt_avg[sample_idx]
+        boot_pairs = [pair for idx in sample_idx for pair in pairs_by_paper[idx]]
+        boot_a = np.asarray([p[0] for p in boot_pairs], dtype=float)
+        boot_b = np.asarray([p[1] for p in boot_pairs], dtype=float)
+
+        delta_samples["spearman"].append(
+            float(stats.spearmanr(boot_pred, boot_gt_avg).statistic - stats.spearmanr(boot_a, boot_b).statistic)
+        )
+        delta_samples["pearson"].append(
+            float(stats.pearsonr(boot_pred, boot_gt_avg).statistic - stats.pearsonr(boot_a, boot_b).statistic)
+        )
+        delta_samples["mae"].append(
+            float(np.mean(np.abs(boot_pred - boot_gt_avg)) - np.mean(np.abs(boot_a - boot_b)))
+        )
+
+    return {
+        "spearman_diff": ai_spearman - human_spearman,
+        "spearman_ci": paired_bootstrap_ci(delta_samples["spearman"], confidence),
+        "spearman_p": paired_bootstrap_pvalue(delta_samples["spearman"]),
+        "pearson_diff": ai_pearson - human_pearson,
+        "pearson_ci": paired_bootstrap_ci(delta_samples["pearson"], confidence),
+        "pearson_p": paired_bootstrap_pvalue(delta_samples["pearson"]),
+        "mae_diff": ai_mae - human_mae,
+        "mae_ci": paired_bootstrap_ci(delta_samples["mae"], confidence),
+        "mae_p": paired_bootstrap_pvalue(delta_samples["mae"]),
+        "n_boot": n_boot,
+    }
+
+
 def split_half_baseline(df, gt_score_cols):
     """Estimate human reliability via all unique split-half partitions per paper."""
     half_a, half_b = [], []
@@ -333,10 +442,14 @@ def analyze_and_plot(path):
     bias_raw = np.mean(pred - gt_avg)
     raw_regression = linear_regression_with_ci(gt_avg, pred)
     one_vs_rest = one_vs_rest_baseline(df, gt_score_cols)
+    one_vs_one = one_vs_one_baseline(df, gt_score_cols)
     split_half = split_half_baseline(df, gt_score_cols)
     ai_vs_human = None
     if one_vs_rest is not None:
         ai_vs_human = ai_vs_one_vs_rest(df, gt_score_cols)
+    ai_vs_human_1v1 = None
+    if one_vs_one is not None:
+        ai_vs_human_1v1 = ai_vs_one_vs_one(df, gt_score_cols)
 
     # Bin-based MAE summaries using GT score bins: [0,2), [2,4), [4,6), [6,8), [8,10]
     bin_edges = [0, 2, 4, 6, 8, 10.01]
@@ -540,6 +653,30 @@ def analyze_and_plot(path):
             f"(95% CI {ai_vs_human['intercept_ci'][0]:+.4f}, {ai_vs_human['intercept_ci'][1]:+.4f}; "
             f"p={ai_vs_human['intercept_p']:.4f})"
         )
+    if one_vs_one is not None:
+        print(f"  {'─'*45}")
+        print(f"  Human reviewer-to-reviewer consistency ({one_vs_one['n_pairs']} reviewer pairs across {one_vs_one['n_papers']} papers):")
+        print(f"    Note:                pairwise-human baseline: one reviewer predicts another reviewer on the same paper (all unordered pairs)")
+        print(f"    Spearman:            {one_vs_one['spearman']:.4f}")
+        print(f"    Pearson:             {one_vs_one['pearson']:.4f}")
+        print(f"    MAE:                 {one_vs_one['mae']:.4f}")
+        if ai_vs_human_1v1 is not None:
+            print(f"    AI vs human 1v1 (paired paper bootstrap, n={ai_vs_human_1v1['n_boot']}):")
+            print(
+                f"      Spearman Δ:        {ai_vs_human_1v1['spearman_diff']:+.4f}  "
+                f"(95% CI {ai_vs_human_1v1['spearman_ci'][0]:+.4f}, {ai_vs_human_1v1['spearman_ci'][1]:+.4f}; "
+                f"p={ai_vs_human_1v1['spearman_p']:.4f})"
+            )
+            print(
+                f"      Pearson Δ:         {ai_vs_human_1v1['pearson_diff']:+.4f}  "
+                f"(95% CI {ai_vs_human_1v1['pearson_ci'][0]:+.4f}, {ai_vs_human_1v1['pearson_ci'][1]:+.4f}; "
+                f"p={ai_vs_human_1v1['pearson_p']:.4f})"
+            )
+            print(
+                f"      MAE Δ:             {ai_vs_human_1v1['mae_diff']:+.4f}  "
+                f"(95% CI {ai_vs_human_1v1['mae_ci'][0]:+.4f}, {ai_vs_human_1v1['mae_ci'][1]:+.4f}; "
+                f"p={ai_vs_human_1v1['mae_p']:.4f})"
+            )
     if split_half is not None:
         print(f"  {'─'*45}")
         print(f"  Human subgroup-to-subgroup consistency ({split_half['n_pairs']} exact split pairs):")
