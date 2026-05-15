@@ -1,78 +1,85 @@
+Now I have a thorough understanding of the paper and the anchor reviews. Let me compose the final consolidated review.
+
+---
+
 ## Summary
-The paper augments the AIDE AI-generated image detector with a "structural semantic" feature extracted via cuboidal partitioning: an image is recursively split along axis-parallel cuts that maximally reduce RGB SSE, and the normalized cumulative-gain curve over N=1024 splits is compressed via FC+GELU to 256 dims, concatenated with AIDE's frozen Patchwise and CLIP-Semantic features, and fed to a retrained MLP head. The method reports a new mean-accuracy SOTA on GenImage (89.56% vs AIDE 86.88%), second-best on AIGCDetect, and second-best on Chameleon.
+
+This paper proposes augmenting the AIDE AI-generated image detector with hierarchical structural features derived from cuboidal partitioning — a recursive, axis-aligned splitting algorithm that partitions an image based on RGB variance reduction (SSE). The cumulative gain curve from this partitioning is compressed via an FC layer and concatenated with AIDE's frozen patchwise and semantic features before the final MLP classifier. The authors report a new SOTA mean accuracy of 89.56% on the GenImage benchmark (+2.68% over AIDE), competitive second-best performance on AIGCDetect (91.85%), and second-best results on the challenging Chameleon dataset.
 
 ## Strengths
-- **GenImage gain is real and non-trivial**: +2.68 mean accuracy over AIDE with top-1 on ADM, GLIDE, VQDM, Wukong (Table 1), and +6.75 on BigGAN where AIDE is weakest.
-- **Cheap, modular integration**: AIDE encoders are frozen; only the structural extractor + MLP head are trained (~15h on one A100 for GenImage; ~3h for AIGCDetect, Sec. 4.3), making the augmentation lightweight and easy to drop into an existing detector.
-- **Honesty about negative results**: Sec. 4.8 explicitly acknowledges that on some subsets the added feature can hurt performance, rather than hiding it.
+
+- **Genuine empirical gains on GenImage, particularly on modern diffusion models**: The method achieves best accuracy on ADM (81.53%), GLIDE (95.18%), VQDM (85.09%), and Wukong (99.40%) — four of the most recent diffusion-based generators in the benchmark (Table 1). This pattern of improvement is consistent and nontrivial.
+- **Modular, lightweight integration**: The AIDE backbone remains frozen; only the structural feature extractor (FC layer + GELU) and the final MLP head are trained (Section 3.3). This demonstrates that the structural features provide complementary information without expensive retraining.
+- **Honest acknowledgment of limitations**: The paper explicitly notes in Section 4.8 that performance degrades on certain subsets and attributes this to mixture-of-experts dynamics where the structural extractor's output can act as noise when structural artifacts are absent. This intellectual honesty strengthens credibility.
+- **Multi-benchmark evaluation**: Evaluation spans GenImage (8 generators, diffusion-focused), AIGCDetect (17 generators, broad coverage including GANs), and Chameleon (human-deceptive, out-of-distribution), providing a reasonably comprehensive picture.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **Mechanism does not match the "structural semantics" framing.** The introduction and motivation (Sec. 1, Fig. 1) repeatedly invoke anatomical implausibilities, physics violations, and compositional inconsistencies (citing Kamali et al. 2024). The actual feature (Eqs. 1–3) is a normalized cumulative reduction of axis-parallel RGB SSE — a low-level color-variance descriptor that has no notion of anatomy, objects, or physics. The Fig. 1 story that partitioning "isolated the ear and hair-like artifact" is post-hoc: cuboidal partitioning chooses cuts that minimize SSE, not cuts that localize artifacts. This is a substantial mismatch between claimed and actual mechanism.
-- **Missing the central ablation: retrain-only baseline.** Sec. 3.3 freezes AIDE's encoders and retrains the MLP discriminator from scratch jointly with the new feature. The "AIDE" baseline rows in Tables 1–3 use AIDE's *originally trained* head. The GenImage gain therefore confounds (a) freshly retrained head and (b) new feature. A control that retrains AIDE's head from scratch on SDv1.4 *without* the structural feature, under the same freezing protocol, is required to attribute the headline gain to the feature itself. This control is absent.
-- **Headline "complementary to AIDE" claim is in tension with Tables 2–3.** On AIGCDetect the proposed method is 91.85 vs AIDE 93.02; on Chameleon (SDv1.4 regime) 61.39 vs AIDE 62.60. So on two of three benchmarks the addition degrades AIDE. The paper acknowledges this in Sec. 4.8 but invokes Hansen & Salamon ensemble theory as a generic explanation without diagnosing it or proposing the "adaptive ensemble" remedy it gestures at. The claim of universal complementarity should be softened, or the proposed adaptive mechanism should actually be tested.
-- **No ablation on the structural feature itself.** No study of N=1024, the M=256 projection, cumulative-gain vs raw gain, or comparison to trivial structural alternatives (quadtree energy curve, wavelet sub-band energies, histogram of local variances). Several of these are plausibly cheaper substitutes that would test whether "structural semantics" is doing real work or whether *any* global low-level statistic helps a retrained head.
+
+- **Overclaimed connection between variance-based partitioning and "anatomical/physics" detection**: The paper states the method is "uniquely suited to address inconsistencies related to anatomical and functional implausibilities as well as violations of physics" (line 88). The actual method computes axis-aligned splits that maximize RGB variance reduction — a low-level intensity-heterogeneity measure. No experiment validates sensitivity to anatomical or physics violations specifically, nor does the feature design encode any anatomical or physical knowledge. This disconnect between framing and mechanism undermines the paper's motivation and could mislead readers about what the features actually capture. The paper would be stronger by describing the features honestly as "hierarchical intensity structure" rather than overpromising "structural semantics."
 
 ### Minor
-- **Single-run results without seed/variance reporting.** Many "second-best" margins on AIGCDetect/Chameleon are under 1 point; without std across seeds, those comparisons are not interpretable.
-- **Sec. 4.4 framing of BigGAN gain.** The 6.75 improvement is real but the absolute number (73.64) is still well below UnivFD (80.30) and GenDet (75.00); the text presents it as success without flagging this.
-- **Qualitative analysis is one-sided.** Fig. 3 shows 13 cases where the new model beats AIDE; given Tables 2–3 imply many cases where AIDE beats the new model, a matched failure-case panel would be more informative.
-- **Reproducibility ambiguities in Sec. 3.2.** Tie-breaking rule, stopping criterion when segments degenerate, and the concrete choice of p_i ("e.g., RGB") are not pinned down — and the entire feature vector depends on them.
+
+- **No capacity-control ablation**: Adding the structural feature extractor introduces a trainable 256-dimensional pathway into the discriminator MLP. Without an ablation that replaces these features with random noise, a constant vector, or a simple dimensionality-matched expansion, we cannot fully rule out that part of the gain comes from increased model capacity rather than the specific structural signal. This is a standard ablation expected for feature-augmentation papers. That said, the fact that performance *degrades* on some subsets (Section 4.8) and that gains are generator-specific (strong on GenImage diffusion models, weaker on GAN-heavy AIGCDetect subsets) provides indirect evidence that the features, not just capacity, drive the improvement.
+
+- **Qualitative results are cherry-picked success cases**: Figure 3 presents 13 examples where the AIDE baseline fails and the proposed model succeeds. While this illustrates the *potential* value of the structural features, it is a selection of favorable cases and cannot substitute for a balanced failure analysis. The quantitative tables already provide systematic evaluation, so this is a presentation issue rather than an evidentiary one, but it merits acknowledgment.
+
+- **Feature representation loses spatial reference**: The cumulative gain curve sorts gains by magnitude (greedy selection of highest-gain split), discarding spatial locality. Figure 1 gives the impression that the method spatially localizes artifacts ("successfully isolated two distinct segments: one around the person's left ear..."), but the actual feature vector fed to the classifier is a sorted cumulative distribution with no spatial coordinates. This disconnect between the illustrative example and the actual feature representation may confuse readers.
 
 ### Trivial
-- None substantive beyond the above.
+
+- **No error bars or confidence intervals**: Mean accuracies are reported without standard deviations across runs. While single-run evaluation is common practice for these large-scale benchmarks, reporting variance (or at minimum noting that variance is negligible at this scale) would improve rigor.
+- **Single-epoch training on AIGCDetect is stated without justification**: The paper notes training for 1 epoch on AIGCDetect. While the authors claim this follows standard methodology, a one-sentence justification would help.
 
 ## Nice-to-Haves
-- Average cumulative-gain curves plotted for real vs fake images, conditioned on content class, to check whether the feature is capturing AIGC artifacts vs content-class confounders.
-- Test the feature under fully end-to-end training (no freezing) to determine whether the freezing protocol itself is responsible for the inconsistent cross-benchmark behavior.
-- Implement the "adaptive ensemble" weighting the conclusion hints at.
+
+- A systematic failure analysis (e.g., on which generator types or image characteristics the structural features hurt performance) would substantially deepen the contribution and help practitioners understand when to use the method.
+- An ablation varying N (number of splits) and testing whether raw vs. cumulative gain vectors matter would clarify what aspect of the structural signal is driving performance.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution.*
 
-- *Harsh critic's "first to apply hierarchical structural analysis is overclaimed (quadtree/wavelet have a long history)":* removed as a missing-related-work judgment I cannot independently verify; the paper does acknowledge quadtrees and hierarchical k-means in Sec. 2.2.
-- *Strength finder's claim that Fig. 1 confirms the new features detect inconsistencies missed by AIDE:* dropped — this conflicts with the verified weakness that the partitioning mechanism does not in fact localize artifacts; one anecdotal qualitative example does not establish the mechanism.
-- *Strength finder's "robust generalization":* downgraded — Tables 2–3 show second-best with the baseline AIDE *ahead*, so "robust generalization" overstates the evidence; kept only the more modest framing that the method remains competitive.
-- *Strength finder's "novel application of cuboidal partitioning":* retained implicitly as an originality note but does not survive as a standalone strength because the headline framing of what the feature captures is not supported by the mechanism.
+These points are flagged to be removed — treat them with caution.
+
+- **"Unfair baseline comparison" claim from Harsh Critic**: The critic argued that comparing against AIDE's published numbers without re-implementing AIDE under the same frozen-backbone protocol invalidates the results. However, the paper's protocol is *more conservative*: it freezes the AIDE backbone and retrains only the MLP, while the original AIDE was presumably fully trained. If anything, this disadvantages the proposed method. Using published numbers on standard benchmarks with standard protocols is accepted practice in this field. This criticism is removed.
+
+- **Harsh Critic's claim that training for "only one epoch on AIGCDetect is unusual and not motivated"**: The paper states this follows standard methodology for the benchmark. Without evidence that this deviates from the benchmark's established protocol, this criticism is speculative and is removed.
+
+- **Harsh Critic's claim that the structural features lack any connection to structure**: The features are derived from recursive partitioning that identifies dominant intensity boundaries in an image. While "structural semantics" is an overstatement, the features do encode hierarchical intensity structure, which correlates with scene organization. The critic's framing that this is "not structural decomposition in the usual sense" is a semantic dispute, not a substantive flaw. The criticism about overclaiming is retained above in a more precise form.
+
+- **Strength Finder's "Qualitative validation of complementarity" as a core strength**: While Figure 3 is informative, it is a cherry-picked set of success cases. This is kept as a supporting strength in the main review but not elevated to core status.
+
+- **Strength Finder's generic framing of "strong out-of-distribution generalization"**: The Chameleon results are second-best, not best. The strength is retained but described more precisely.
 
 ## Novel Insights
-None beyond the paper's own contributions. The genuine empirical observation worth keeping is narrow: concatenating a global, low-level color-variance hierarchy descriptor to AIDE's existing features and retraining the head can lift GenImage mean accuracy by ~2.7 points; the broader claim that this captures "structural semantics" is not yet supported.
+
+None beyond the paper's own contributions. The observation that hierarchical intensity partitioning can serve as a complementary signal for AIGC detection is the paper's contribution, and the reviews do not surface a deeper insight beyond what the paper already claims.
 
 ## Suggestions
-1. Add the retrain-only AIDE-head baseline under the same frozen-encoder protocol — without it the GenImage delta cannot be attributed to the feature.
-2. Replace the "structural semantics" framing with what the method actually computes ("hierarchical color-variance descriptor") unless an interpretability analysis (e.g., partition overlays on matched content classes, correlation with anatomical artifacts) supports the stronger claim.
-3. Add ablations on N, M, normalization, and at least one trivial structural baseline (quadtree energy / wavelet sub-band energies).
-4. Report mean ± std over ≥3 seeds, at least on the headline GenImage row and the close AIGCDetect/Chameleon comparisons.
-5. Either implement the adaptive ensemble fix or soften the "highly complementary" / SOTA narrative to reflect that the augmentation regresses AIDE on two of three benchmarks.
 
-## Axis evaluation
-- **Originality**: Moderate. Cuboidal partitioning is repurposed from image-similarity work to AIGC detection; the descriptor itself is simple.
-- **Importance of question**: AIGC detection is genuinely important.
-- **Claims well supported**: Partially. The GenImage win is empirically present but confounded by head retraining; the "complementary" claim is contradicted on 2/3 benchmarks.
-- **Soundness of experiments**: Weak. Missing the key retrain-only control, no ablations on the proposed component, single-run numbers.
-- **Clarity**: Adequate; the mechanism is described in enough detail to follow, though several reproducibility specifics are loose.
-- **Value to community**: Limited unless framing and controls are fixed.
+- Tone down the "structural semantics" framing. Describe the features as capturing "hierarchical intensity structure" or "multi-scale variance-based partitioning." Remove or heavily qualify the claim about anatomical implausibilities and physics violations unless you can design an experiment that directly tests sensitivity to those specific artifact types.
+- Add the capacity-control ablation (random features, constant vector, or expanded MLP) — this is the single most impactful experiment to add and would directly address the main methodological concern.
+- Either remove Figure 1's implication of spatial localization or clarify in the caption that the feature vector is a sorted cumulative distribution, not a spatial map. The partitioning process can *identify* artifact regions during computation, but the feature fed to the classifier aggregates this into a global signature.
+- Include a brief analysis of failure cases — even 2-3 examples where the structural features hurt performance, with a hypothesis about why, would balance the qualitative evaluation and strengthen credibility.
 
 ## Score and Decision
 
-Anchor comparison (all anchors retrieved):
-- `ODRHZrkOQM.md` (avg 6.40, Accept — AIDE/Chameleon paper): substantially stronger — introduces both the Chameleon dataset and the AIDE detector this paper builds on. Our paper is a much smaller delta on top.
-- `F1OdjlfCLS.md` (avg 5.67, Reject): a more principled training-objective contribution for AIGC detection that was still rejected; our paper has weaker controls.
-- `pIVOSU7TFQ.md` (avg 5.00, Reject): uses predictive uncertainty for AIGC detection; comparable in scope but with a cleaner conceptual story than ours.
-- `1P6AqR6xkF.md` (avg 4.25, Reject): an AIGC-detection dataset paper rejected for limited methodological contribution — closest in tier to ours.
-- `lwn5fbqf74.md` (avg 5.50, Reject): training-free AIGC detection via high-frequency aliasing — cleaner methodological story than ours.
-- `fPBExgC1m9.md` (avg 4.50, Reject): frequency-deviation diffusion detector — similar incremental feature contribution, similar weaknesses; close match.
-- `hYEV8QmaOt.md` (avg 3.40, Reject): anti-forensics paper, clearly weaker than ours in scope.
-- `doBkiqESYq.md` (avg 6.00, Accept): dataset-alignment for fake detection, much stronger conceptual contribution than ours.
-- `SfTy1ac4OX.md` (avg 4.00, Reject): image-text discrepancy AIGC detector — similar tier of incremental-feature-with-flaws.
-- `NvSwR4IvLO.md` (avg 4.67, Reject): AI text detection — different modality, less relevant.
-- `EE75tyB5Ay.md` (avg 5.33, Reject): ChatGPT detection generalization — different modality.
+### Anchor Comparison
 
-The paper sits between `1P6AqR6xkF` (4.25) and `fPBExgC1m9` (4.50) / `SfTy1ac4OX` (4.00): a competent but flawed AIGC-detection paper with a real headline result (GenImage SOTA) undercut by a missing key control, a mismatch between mechanism and "structural semantics" framing, and Tables 2–3 contradicting the universal-improvement claim. It is clearly below the 5.5–6.0 accepted/borderline tier and above the 3.4 anti-forensics paper.
+- **`/home/wg25r/review_agent/human_reviews_2026/9QQ3Kc2hj6.md` (HiDA-Net, avg 5.00, Accept Poster)**: Proposes a new architecture and dataset for high-resolution AIGC detection with comprehensive ablations. Stronger contribution depth and experimental rigor than the current paper; the current paper is a simpler augmentation to an existing model.
+- **`/home/wg25r/review_agent/human_reviews_2026/r402yIwWGQ.md` (RAID, avg 5.00, Reject)**: Simple feature transformation (bit-reversal) applied to AIGC detection with strong results but weak theoretical justification. Similar pattern to the current paper — clever feature engineering with empirical gains. Despite its 5.0 average, it was rejected; the current paper has somewhat better benchmarking diversity but similar concerns about overclaiming.
+- **`/home/wg25r/review_agent/human_reviews_2026/NfM92qRuew.md` (Intermediate Representations, avg 3.33, Reject)**: Incremental extension of prior work with limited novelty and per-generator tuning undermining its "training-free" claim. The current paper is substantially more novel and better evaluated.
+- **`/home/wg25r/review_agent/human_reviews_2026/GcVvWAdQx7.md` (Advanced Image Forensics, avg 2.50, Reject)**: Fundamentally flawed methodology, unclear evaluation. The current paper is far stronger — its methodology is clear, its results are interpretable, and its limitations are honestly discussed.
+- **`/home/wg25r/review_agent/human_reviews_2026/XD43lfRCg6.md` (AI-Generated Video Detection, avg 5.00, Accept Poster)**: Video-domain detection with dataset contribution. Not directly comparable to the image-domain current paper.
+- **`/home/wg25r/review_agent/human_reviews_2026/DM0Y0oL33T.md` (Generative Universal Verifier, avg 8.00, Accept Oral)**: Much stronger paper with new benchmark, model, and broad impact. The current paper is clearly below this tier.
+- **`/home/wg25r/review_agent/human_reviews_2026/G9Oj0dMQIJ.md` (Training-free Spectral Artifacts, avg 3.33, Reject)**: Training-free method with limited evaluation scope. The current paper is stronger in empirical breadth.
+- **`/home/wg25r/review_agent/human_reviews_2026/hvO8d1KxZp.md` (Contrastive Inversion, avg 3.00, Withdrawn/Reject)**: Below the current paper in quality and experimental support.
+
+The current paper sits between the 3.33-tier papers (which were clearly rejected for limited novelty or flawed evaluation) and the 5.0-tier papers (which were borderline accept/reject with stronger experimental packages). It has a real, novel contribution with solid empirical support on three benchmarks, but is held back by overclaiming and a missing capacity-control ablation. I rate it at **4.0**.
 
 MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

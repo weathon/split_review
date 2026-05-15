@@ -1,65 +1,81 @@
 ## Summary
-The paper extends Gao (2025)'s relative-error framework for evaluating heterogeneous treatment effect (HTE) estimators. It derives moment conditions under which the relative-error estimator remains √n-consistent and asymptotically normal even when outcome regressions are misspecified, provided the propensity model is correct. A novel loss combining weighted least squares and a soft-margin balance regularizer is embedded in a Dragonnet-style network, and the framework is then extended to a pairwise-aggregated HTE learner.
+
+This paper proposes a robust evaluation framework for heterogeneous treatment effect (HTE) estimators based on relative error. The key insight is that by identifying and enforcing specific moment conditions (Equation 4) through a novel weighted least-squares loss and constraint-based regularizer, the relative error estimator achieves √n-consistency and valid confidence intervals even when outcome regression models are misspecified — only correct specification of the propensity score model is required. The method is implemented via a Dragonnet-inspired neural architecture with shared representations. The authors also propose an extension that aggregates the learned outcome models across pairs of candidate HTE estimators to produce a new HTE learner.
 
 ## Strengths
-- **Real theoretical advance over Gao (2025).** Theorem 1 (Sec. 4.4) provides √n-consistency and asymptotic normality of the relative-error estimator without requiring outcome-model consistency, relaxing Condition 2 of the prior work. The Taylor-expansion derivation in Sec. 4.1 cleanly identifies the moment conditions Eq. (4) needed for robustness.
-- **Principled loss design tied to the theory.** The weighted least-squares loss L_wls (Eq. 5) is derived directly from the first moment condition in Eq. (4); the soft-margin balance regularizer (Eq. 7) operationalizes the over-determined moment conditions on γ in a transparent way. This is the paper's clearest methodological contribution.
-- **Confidence-interval calibration is empirically validated.** Figure 1 shows the 90% intervals consistently attain nominal coverage across estimator pairs on IHDP and Twins, and selection accuracy in Figure 2 / Table 2 is meaningfully higher than the regression/boosting plug-in baselines.
-- **Honest ablation reporting.** Table 5 candidly shows that removing L_const collapses performance — an unusually transparent disclosure that anchors the ablation discussion.
+
+- **Novel and principled methodological contribution**: The derivation of moment conditions (Equation 4) under which the relative error estimator is robust to outcome model misspecification is technically sound and clever. The design of the weighted least-squares loss ℒ_wls and constraint-based regularizer ℒ_const to enforce those conditions during nuisance parameter training is a genuine innovation directly motivated by the necessary theoretical conditions.
+
+- **Convincing empirical evaluation for the core framework**: The proposed method achieves near-nominal 90% coverage across multiple estimator pairs on both IHDP and Twins (Figure 1), and substantially outperforms the plug-in Gao (2025) baseline on selection accuracy — e.g., 0.80 vs. 0.44 on IHDP (Table 2). The ablation study (Table 5) confirms that dropping ℒ_const severely degrades both HTE estimation and selection accuracy, isolating the contribution of the proposed loss design.
+
+- **Relaxation of a practically restrictive condition**: The paper addresses a real bottleneck in prior work (Gao, 2025), which requires both propensity score and outcome models to be consistent at fast rates. The argument that outcome models are more susceptible to extrapolation error in practice (Section 3, Motivation) is well-reasoned, and the proposed solution convincingly reduces reliance on outcome model correctness.
+
+- **Practical stability**: Sensitivity analyses demonstrate reasonable robustness to the hyperparameter λ₂ over a wide range (Table 4) and moderate robustness to propensity score perturbations (Table 6), supporting practical deployability.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **The headline HTE comparison in Table 1 is an aggregate of K(K−1)/2 networks placed against individual base learners.** Sec. 5 defines τ̃(x) as a uniform average over all pairs of the K candidate estimators that are themselves the baselines compared against in Table 1; the paper writes that this "even surpasses any single candidate estimator," which is essentially what aggregating K base learners through a Dragonnet meta-model would be expected to do. Without comparison to standard ensemble/stacking baselines over the same K candidates, Table 1 does not isolate the relative-error theory's contribution. The paper itself flags uniform averaging as a limitation in Sec. 7 but still leans on Table 1 as the headline empirical claim.
-- **The L_const ablation indicates the empirical regularizer is doing most of the work.** Table 5 shows IHDP √ε_PEHE jumps from 0.638 to 3.495 and selection accuracy from 0.80 to 0.14 when L_const is removed. L_const is the SVM-style slack relaxation introduced in Sec. 4.2 because Eq. (4) is over-determined; Theorem 1 analyzes the moment-condition-satisfying minimizer, not the slack-relaxed minimizer. The link between the relaxed minimizer and the γ̄ used in the asymptotic theorem is asserted in Appendix F.4 ("effective in practice") but not formally established. Given the magnitude of the ablation effect, the gap between what is proved and what is run matters.
-- **Theorem 1 still requires a correctly specified propensity model — including the learned representation Φ(X).** Sec. 4.4 sells the result as relaxing Condition 2, but it does so by shifting the burden onto propensity correctness. The "mild" defense (Sec. 4.4, paragraph after Prop. 2) appeals to neural-network flexibility on Φ(X) without giving a convergence rate for the learned representation, even though Eq. (1) remains parametric logistic in Φ(X). Table 6 stress-tests only additive Gaussian noise on the *true* propensity — a weak form of misspecification that does not exercise the parametric structural assumption Theorem 1 needs.
+
+- **Incomplete theoretical justification for the no-sample-splitting claim**: Theorem 1 asserts √n-consistency without sample splitting, assuming only n^{-1/4} convergence of nuisance estimators. The paper claims this as a key advantage over Gao (2025). However, the theoretical argument in Section 4.1 does not address the empirical process terms that typically necessitate sample splitting or cross-fitting in semiparametric inference with complex (neural network) nuisance models. The derivation relies on the moment conditions (4) eliminating first-order bias through E[Δ] = 0, but when nuisance parameters are trained on the same data used for the relative error estimator, the correlation between nuisance estimates and the estimating equation can introduce additional bias terms that the current analysis does not account for. The paper also does not verify that the neural network training procedure attains the assumed n^{-1/4} convergence rate. While the empirical coverage results are strong, the theoretical foundation for the no-sample-splitting claim remains incomplete. This weakens a central selling point of the method.
 
 ### Minor
-- **Selection accuracy in Table 2 should be reported alongside abstention rate.** The framework abstains when the CI contains zero; reporting a single "selection accuracy" of 0.44 (Regression) vs. 0.80 (Ours) without conditional accuracy and abstention rate makes the contrast harder to interpret — a method that abstains aggressively can look bad on selection accuracy by construction.
-- **Comparison to HTE model-selection methods beyond Gao (2025) would strengthen the evaluation.** Pseudo-outcome / R-loss / DR-score selection metrics are the natural competitors to the proposed evaluation framework, but only Gao (2025)-style plug-in nuisances are compared.
-- **Transition from over-determined system to slack variables is presented as routine.** Sec. 4.2 introduces ξ, η as if they were a standard relaxation, but they change the population objective; the connection back to the γ̄ used in Theorem 1 deserves a more careful statement in the main text rather than a one-line appendix appeal.
+
+- **The candidate set for HTE estimation is unspecified**: Table 1 reports "Ours" as the best-performing method across all metrics on IHDP and Twins, compared against 11 baselines. However, the paper never states which of those baselines (or which other estimators) constitute the candidate set K used to produce the aggregated estimator. Without this information, the reader cannot assess whether the comparison is fair — for instance, whether "Ours" benefits from access to estimators that are more informative than any single baseline. This should be straightforward to clarify.
+
+- **Missing simple aggregation baseline for the HTE learner**: The aggregated HTE estimator in Section 5 averages the learned outcome models μ̂₁ − μ̂₀ over all pairs of candidate estimators. A natural baseline would be to simply average the original HTE predictions of the candidate estimators themselves, to disentangle the benefit of the neural network's learned outcome models from a generic ensemble effect. Comparing against such a baseline would strengthen the claim that the network architecture adds value beyond ensembling.
+
+- **The standard-loss baseline for evaluation is partially addressed but incomplete**: Table 5's ℒ_wls & ℒ_ce row (without ℒ_const) is described as approximating Gao (2025) with the neural network as a nuisance estimator. However, a more informative ablation would replace ℒ_wls with standard MSE for outcomes (and standard cross-entropy for propensity) to isolate the benefit of the proposed WLS loss specifically. The current ablation shows the importance of ℒ_const but not the independent contribution of ℒ_wls over standard losses.
 
 ### Trivial
-- The Twins columns in Table 1 appear to repeat values across in-/out-of-sample columns; worth a sanity check.
+
+- **Sensitivity analysis on propensity score misspecification uses Gaussian noise** (Table 6): While informative as a first check, adding Gaussian noise to the true propensity score is not representative of realistic model misspecification (e.g., omitted interactions or nonlinearities). The conclusions about robustness should be qualified accordingly.
+
+- **Hyperparameter sensitivity for ρ and λ₁ is deferred to appendix**: Results for penalty parameter ρ and cross-entropy weight λ₁ are only available in Appendix F.8 (stripped in the submission version). A brief summary in the main text would improve completeness.
 
 ## Nice-to-Haves
-- A scatter plot of estimated vs. true δ across IHDP replications would make the framework's advantage over plug-in nuisances tangible.
-- Decouple the evaluation framework (Sec. 4) and the HTE learner (Sec. 5) experimentally: present them as two contributions with appropriate, separate baselines (e.g., stacking baselines for Sec. 5).
-- A structural propensity misspecification stress test (omitted variable, wrong link function) rather than additive Gaussian noise.
+
+- The uniform averaging over all estimator pairs in Section 5 is acknowledged as a limitation by the authors (Section 7). An adaptive or data-driven weighting scheme would be a natural next step.
+- Reporting average confidence interval widths alongside coverage rates would provide a more complete picture of practical utility, particularly to quantify how much tighter the proposed intervals are compared to the Gao baseline.
+- Showing empirical values of the moment condition violations before and after training would help readers understand how effectively the soft relaxation enforces the desired constraints.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- *Harsh critic's request for proofs/derivations* — appendix material is stripped by the parser.
-- *Style/typesetting concerns* such as duplicated table columns kept only as trivial sanity check, not as a substantive criticism.
+
+These points are flagged to be removed, treat them with caution:
+
+- **"The proof strategy is outlined but not provided"** — Removed per hard rules: proofs are in the appendix, which is stripped in the parser output. The original submission includes them.
+
+- **"Results for λ₁ and ρ are deferred to an appendix that is not available for review"** — Removed per hard rules: the appendix exists in the original submission; its unavailability is a parser artifact, not an author error.
+
+- **"The choice of candidate estimators used to produce 'Ours' in Table 1 is never stated"** — This was partially removed; the substantive concern about transparency remains as a Minor weakness, but any implication of dishonesty or fabrication is removed. The paper clearly does have a method; the issue is clarity of reporting.
+
+- **"The description of how the network is actually trained for HTE estimation (training set, candidate estimators, cross-validation) is missing"** — This overlaps with the Minor weakness about unspecified candidate set. The specific phrasing about missing training details is softened since Section 6.1 provides dataset splits and the appendix (F.10) contains hyperparameter tuning details. The core issue (unspecified candidate set K) is retained.
 
 ## Novel Insights
-None beyond the paper's own contributions. The strongest conceptual observation — that the outcome nuisance is fit on one arm but evaluated across the full sample, while the propensity nuisance is fit on the full sample — is the paper's own motivation in Sec. 3 and a clean framing of the asymmetry that justifies relaxing Condition 2.
+
+The paper's key novel insight is that robustness to outcome model misspecification in relative error estimation can be achieved by identifying and enforcing a specific set of moment conditions (Equation 4) through carefully designed loss functions, rather than requiring both nuisance models to be consistent. The connection between the Taylor expansion of the estimator and the derived moment conditions — and the translation of those conditions into a weighted least-squares loss for outcomes plus a constrained optimization for the propensity score — is elegant and non-obvious. This approach effectively decouples the evaluation framework's validity from outcome model correctness, which is a meaningful step beyond the doubly-robust-style conditions in prior work.
 
 ## Suggestions
-- Compare τ̃(x) against stacking/ensemble of the same K base learners — without this, Table 1 cannot support the claim that the theory (rather than ensembling) drives the gains.
-- State explicitly in Sec. 4.4 that Theorem 1 still requires correct propensity, including the learned Φ(X), and discuss what convergence rate on Φ is assumed.
-- Add abstention rates to Table 2 and report conditional selection accuracy.
-- Either (a) provide a population-level analysis tying the slack-relaxed minimizer back to the moment conditions of Eq. (4), or (b) include a formal asymptotic statement covering the actually-trained estimator.
+
+- Clarify in Section 6.1 exactly which estimators form the candidate set K for the "Ours" method in Table 1, and discuss whether any of those candidates overlap with the listed baselines.
+- Add a brief discussion in Section 4.4 addressing why sample splitting is unnecessary under the proposed framework — specifically, whether the moment conditions (4) are sufficient to eliminate empirical process bias, or whether additional regularity conditions (e.g., Donsker properties) are implicitly assumed.
+- Include a simple-average-of-candidates baseline in Table 1 to isolate the contribution of the learned outcome models.
+- Report confidence interval widths alongside coverage to quantify the practical tightening relative to the Gao baseline.
 
 ## Score and Decision
 
-**Anchors retrieved:**
-- `Q2bJ2qgcP1.md` (avg 6.00, accept) — CATE benchmark paper, similar problem domain; finds many CATE models worse than trivial baselines. Comparable: this paper is more theoretical, less broad empirically.
-- `0iscEAo2xB.md` (avg 6.75, accept) — targeting strategies for treatment allocation; positive reception due to clear practical framing. Comparable: the paper under review has narrower scope.
-- `glgvpS1dD1.md` (avg 4.50, reject) — robust HTE under covariate perturbation; rejected for incremental contribution. Similar in that contribution feels narrow but our paper has a stronger theoretical claim.
-- `yuy6cGt3KL.md` (avg 7.25, accept) — empirical CATE model-selection benchmark; closest topical match. Stronger empirical breadth than the paper under review (which compares only to Gao 2025 plug-ins).
-- `jFox1iMWUa.md` (avg 3.40, reject) — continuous treatment causal NN; rejected as weak both in theory and experiments. Our paper is clearly above this.
-- `x2rZGCbRRd.md` (avg 5.50, reject) — post-treatment covariates HTE; rejected but identified a legitimate issue. Roughly similar standing.
-- `oOGqJ6Z1sA.md` (avg 6.33, accept) — semiparametric weighting for treatment effects; accepted on theoretical merit despite modest empirics. Strong analogy to the present paper's profile.
-- `TC9r8gsaoh.md` (avg 6.00, reject) — nuisance-robust weighting network; reviewers split on theory vs. empirics — close to our case.
-- `1z3SOCwst9.md` (avg 6.50, accept) — DP-CATE; doubly-robust CATE under DP. Cleaner contribution than the paper under review.
-- `9vTAkJ9Tik.md` (avg 7.00, accept) — doubly robust identification across environments; substantially stronger paper.
-- `fSxiromxAq.md` (avg 3.00, reject), `0sO2euxhUQ.md` (avg 4.00, reject), `Wgb8tuu5BI.md` (avg 3.67, reject), `QV6uB196cR.md` (4.75, reject), `N134PpnlKs.md` (4.00, reject) — all weaker than this paper either in clarity, theory, or empirical rigor.
+### Anchor comparisons
 
-Positioning: the paper has a genuine, well-derived theoretical relaxation of Gao (2025), valid coverage experiments, and a transparent ablation, putting it above the cluster of rejected causal-inference papers (3.0–4.5). It sits below stronger accepts (≥7) like yuy6cGt3KL and 9vTAkJ9Tik because (i) the headline Table 1 comparison is structurally unfair, (ii) the L_const ablation suggests the empirical regularizer dominates and is not theoretically analyzed, and (iii) propensity correctness is still required despite the framing. Closest match is the cluster around oOGqJ6Z1sA (6.33) and TC9r8gsaoh (6.00), but those have cleaner theorem-experiment alignment. I land slightly below that cluster.
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/0Xi3WDwd5w.md` | 7.00 | Overlap-weighted meta-learner; stronger theoretical guarantees (Neyman orthogonality fully proven), comparable experimental scope. Current paper is weaker theoretically (incomplete no-splitting justification) but offers a more practical evaluation framework. |
+| `/home/wg25r/review_agent/human_reviews_2026/rxZdaKhu2I.md` | 6.00 | Good allocations from bad estimates; elegant theoretical insight with weaker experiments. Current paper has stronger experiments and a more practical contribution but a similar theoretical gap. Comparable quality. |
+| `/home/wg25r/review_agent/human_reviews_2026/dYaos1ITw4.md` | 6.00 | Topological causal effects; novel framework with strong theory. Current paper is comparably novel but has a weaker secondary contribution (HTE learner). |
+| `/home/wg25r/review_agent/human_reviews_2026/O6iPDyUP97.md` | 4.67 | Treatment responder classification; decent theory but weaker empirical scope. Current paper is clearly stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/mPrnJcEhGR.md` | 4.00 | Bias-correction term estimation; limited to synthetic data, marginal gains. Current paper is substantially stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/NIA49K1k1N.md` | 3.50 | Assumption-lean inference; novelty concerns, missing confidence bands. Current paper is meaningfully stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/sJxz6o5jKM.md` | 3.00 | ECAM; major methodological gaps. Current paper is much stronger. |
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper's core contribution — a robust evaluation framework for HTE estimators that relaxes outcome model requirements — is novel, well-motivated, and empirically validated. The evaluation experiments are convincing and the loss design is clever. The main weakness is the incomplete theoretical justification for the no-sample-splitting claim, which is a key differentiator from prior work. The HTE learning extension is underdeveloped but secondary to the paper's main contribution. Relative to the anchors, the paper sits between the 6.00 and 7.00 anchors but closer to 6.00 due to the theoretical gap and secondary weaknesses.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

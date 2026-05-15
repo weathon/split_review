@@ -1,12 +1,18 @@
+Now I have all the information needed. Here is my consolidated final review.
+
 ## Summary
-The paper introduces Content-Aware Mamba (CAM) for learned image compression. Two mechanisms are proposed: (i) Content-Adaptive Token Permutation (CTP), which clusters tokens via an EMA-updated codebook and permutes the 1-D scan so similar tokens are contiguous, and (ii) Global-Prior Prompting (GPP), which augments the SSM output projection C with a per-cluster prompt derived from centroids. The resulting CMiC model claims SOTA BD-rate against VTM-21.0 (−15.91/−21.34/−17.58% on Kodak/Tecnick/CLIC) while using ~56% fewer parameters and 78% less peak memory than MambaIC.
+
+This paper introduces Content-Aware Mamba (CAM) for learned image compression, addressing two fundamental limitations of standard Mamba SSMs: the content-agnostic raster-scan order and strict causality. It proposes Content-Adaptive Token Permutation (CTP), which clusters latent tokens by cosine similarity and reorders the scan sequence to group semantically similar tokens, and Global-Prior Prompting (GPP), which injects sample-specific prompts derived from cluster centroids to relax causality. The resulting model, CMIC, achieves state-of-the-art BD-rate savings of 15.91%, 21.34%, and 17.58% over VTM-21.0 on Kodak, Tecnick, and CLIC respectively, with moderate complexity and notably lower memory footprint than prior Mamba-based compression models.
 
 ## Strengths
-- **CTP is empirically effective and cheap.** Adding CTP alone to the vanilla single-scan Mamba baseline gives ~2.0/2.4/1.8% BD-rate gains (Table 2), and Tab. 3 shows training throughput drops only from 23.19 → 22.05 samples/s, with decoding latency rising just 4% (0.387 → 0.405s).
-- **Strong efficiency vs other Mamba LIC models.** Vs MambaIC, CMiC reduces parameters 56%, FLOPs 57%, decoding latency 39%, peak memory 78% (Tab. 1). The single-scan + codebook design is a real engineering improvement over multi-directional 2D scans.
-- **Codebook + EMA clustering is a reasonable design.** It side-steps the well-known instability of per-batch K-Means and gives deterministic inference-time assignments (Sec. 3.3, Alg. 1).
-- **Structural ablation (Tab. 4) is well controlled.** Replacing CAM with Conv / 2D-Mamba / Attention-only / CAM-only all degrade BD-rate at comparable parameter counts, supporting the architectural choice rather than scale.
-- **Cluster visualizations (Fig. 10) corroborate the mechanism.** Centroids show consistent semantic specialization across images (edges, red textures, smooth backgrounds), backing the claim that the codebook captures dataset-level patterns.
+
+- **State-of-the-art rate-distortion performance**: CMIC outperforms all prior learned methods including MambaVC (by 7.51% BD-rate on Kodak) and MambaIC (by 2.36%), as well as Transformer-based models like FTIC and TCM-L, across three standard benchmarks (Table 1). The gains are consistent across PSNR, MS-SSIM, and multiple bitrate levels (Figs. 4-6).
+
+- **Clean ablation validates both components**: Table 2 shows CTP alone yields 1.8-2.4% BD-rate improvement, GPP alone yields 0.5-1.4%, and their combination gives 2.7-3.6% total, cleanly demonstrating that both components are individually effective and complementary. Table 4 further shows CAM blocks outperform 2D Mamba and attention-only alternatives.
+
+- **Favorable complexity-efficiency trade-off**: CMIC (69.11M params, 2.39 TFLOPs, 4.44 GB peak memory) achieves better RD than much larger models (MambaIC: 157M params, 20.32 GB memory; MLIC++: 116M params), and the CTP/GPP overhead is minimal (throughput drops from 23.19 to 22.05 samples/s, decoding latency increases from 0.387s to 0.405s) (Tables 1, 3).
+
+- **Compelling qualitative analysis**: ERF visualizations (Figs. 7-9) show that CTP and GPP jointly produce a substantially broader, content-adaptive receptive field that aligns with semantic structures. Cluster visualizations (Fig. 10) confirm that the codebook-based grouping captures semantically meaningful tokens (e.g., red doors, clouds, feathers). Table 5 demonstrates dynamic adaptivity: only 23-26 of 64 centroids activate per image, varying across content.
 
 ## Weaknesses
 
@@ -14,59 +20,72 @@ The paper introduces Content-Aware Mamba (CAM) for learned image compression. Tw
 None.
 
 ### Major
-- **GPP's stated mechanism does not match what it implements.** Sec. 3.4 repeatedly frames GPP as "injecting sample-specific global priors" allowing "information from the entire image to influence the sequence modeling process at every step." But the construction is U = 𝒜([c₁;…;c_K]) on **dataset-level codebook centroids**, and P_i = U[g_i] is just a per-cluster prototype bias indexed by token i's cluster ID. There is no pooling, aggregation, or summary of the current image's features. Any sample-specificity enters only through Γ (the cluster-assignment one-hot), which is the same information CTP already uses for permutation. The "non-causality" demonstration in Fig. 9(c) is most parsimoniously explained by Γ being computed with knowledge of later tokens (assignment), not by the SSM gaining a global view through P. Combined with the relatively small marginal gain of GPP-only (CLIC: 0.47%; Kodak: 1.01%), the contribution narrative around GPP is over-stated and the mechanism description should be rewritten to reflect what is actually implemented.
-- **The Kodak "SOTA" framing is fragile and not acknowledged.** Tab. 1 itself reports MLICv2 at −16.16% and DCAE at −15.40% on Kodak, vs CMiC's −15.91%. CMiC is *not* best on Kodak, yet the abstract, intro, and §4.3 repeatedly call the result SOTA across all three datasets without noting the tie/loss on the most widely reported benchmark. The margins on Tecnick/CLIC are decisive; the Kodak claim is not, and the paper should say so.
+
+1. **Missing control for random permutation in CTP ablation.** The paper attributes CTP's ~2% BD-rate gain to content-aware grouping, but does not compare against a simple random permutation baseline. Any reordering that breaks the raster-scan order—whether content-aware or not—exposes the SSM to non-local tokens and could improve global awareness. Without this control, the paper cannot fully separate the effect of *content-awareness* from the effect of *order-breaking*. The ERF visualizations (Fig. 9) and cluster visualizations (Fig. 10) provide qualitative support for the mechanism, but a quantitative random-permutation ablation is needed to substantiate the central claim that feature-space proximity, not merely the disruption of spatial locality, drives the improvement.
+
+2. **Missing ablation of prompt dictionary design.** The paper distinguishes GPP from MambaIRv2's prompt pool by tying prompts to cluster centroids via a learnable projection A. However, no experiment compares this design against (a) a directly learned prompt pool (as in MambaIRv2) or (b) a fixed random projection from centroids. Without this ablation, it is unclear whether the centroid-tie provides any benefit, or whether the performance gain of GPP simply comes from adding a learnable conditioning signal. This is not a fatal issue—the method works as demonstrated—but it weakens the claim about the specific design choice.
 
 ### Minor
-- **No variance/seed information** despite Tab. 1 differences of <0.5% BD-rate carrying the central claim against MLICv2/DCAE on Kodak. Single-run reporting is standard in LIC, but here the margin really matters for framing.
-- **Cross-cluster long-range modeling is not isolated.** CTP makes within-cluster tokens contiguous; image-compression redundancy is also useful *between* similar-but-different regions. The paper provides ERF visualizations but no direct measurement (e.g., conditional entropy across cluster boundaries) to show CTP doesn't hurt cross-cluster modeling.
-- **K-ablation saturates quickly.** Tab. 6: K=64 (−15.91%) vs K=128 (−15.96%) — essentially flat, and K=32 already gets −14.97%. A wider sweep (16, 256) and analysis of activation-rate saturation would strengthen the codebook design argument.
-- **GPP's projection 𝒜 is not ablated** — comparing P = Γ𝒜(C) vs P = ΓC (raw centroids) would isolate how much of GPP's small gain comes from the learnable projection vs the cluster-identity bias itself.
+
+1. **Clustering stability and hyperparameter sensitivity are not analyzed.** The clustering is central to both CTP and GPP, yet the paper does not report variance in cluster assignments across training seeds, sensitivity to the EMA decay parameter λ, or quantitative clustering quality metrics (e.g., intra-cluster similarity, silhouette score). While the provided cluster visualizations (Fig. 10) are informative, they cover only three images from one stage. Given that the entire content-adaptivity chain depends on clustering quality, some quantitative stability analysis would be valuable.
+
+2. **The paper does not evaluate whether CTP/GPP transfer to prior Mamba-based LIC architectures.** The ablation adds CTP/GPP to the authors' own strong baseline, which already includes window attention and a custom entropy model. Demonstrating on MambaVC or MambaIC would strengthen claims about generalizability of the CAM mechanism. (Table 4 substitutes CAM with 2D Mamba within the same architecture, which partially addresses this, but does not establish transfer to existing Mamba LIC implementations.)
+
+3. **Throughput overhead characterization.** The paper describes the ~5% throughput drop (23.19 to 22.05 samples/s) as "negligible," but the 5% figure combines both CTP and GPP overhead. A breakdown of which component costs what would be helpful. This is a very minor presentation issue; the absolute overhead remains small.
 
 ### Trivial
-- The "redundancy-aware" framing in Sec. 3.4 ("prompt signal reflects how redundancy is distributed across semantic clusters, highlighting clusters with higher or lower redundancy") is not supported by U's construction — nothing in U encodes a per-cluster redundancy magnitude.
-- FTIC latency >10s in Tab. 1 vs others <1s is unexplained.
+None.
 
 ## Nice-to-Haves
-- Re-train MLICv2 and MambaIC on the same Flickr2W schedule for an apples-to-apples Kodak comparison.
-- Try GPP variants that *actually* inject image-global statistics (e.g., mean-pooled per-image cluster features, or attention over U weighted by the cluster histogram). If they match the current GPP, that clarifies where the gain truly comes from.
-- Direct measurement of conditional-entropy reduction across vs within cluster boundaries.
-- Soften "SOTA" to "SOTA on Tecnick/CLIC, competitive on Kodak."
+
+- Apply CAM to other modalities or tasks (video compression, super-resolution) to demonstrate generality.
+- Analyze why CAM provides negligible gains when applied to the entropy model (mentioned in Section 4.5 but not explained).
+- Report whether the number of codebooks (one per CAM block, likely 7 blocks) contributes meaningfully to the parameter count.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-- **"Table 2 appears corrupted"** — the harsh critic correctly noted the first column shows ✓ for the all-off row, but the text clearly states the first row is the both-disabled baseline. This is a parser/rendering artifact (per hard rules, formatting artifacts are not author errors); the numerical content is self-consistent and interpretable.
-- **"Hyperparameters/training-step disclosure missing"** — removed per reproducibility-nitpick rule; standard hyperparameters are given in §4.1.
-- **Strength: "GPP relaxes strict causality without multi-directional scans"** — conflicts with the verified major weakness on GPP's actual mechanism; the empirical effect exists but the causal interpretation is unsupported.
-- **Strength: "GPP injects global context at every step, evidenced by Fig. 9(c) non-zero activations beyond the causal scan boundary"** — same reason; the non-causality is more cleanly attributed to Γ being computed with whole-image knowledge than to GPP carrying global statistics.
+
+These points are flagged to be removed; treat them with caution:
+
+- **Criticism that tokens are not normalized before cosine similarity (Critic Claim 3, part):** The critic states "it is not stated whether tokens are also normalized before distance computation (lines 3-4 of Algorithm 1 imply they are not)." This is incorrect. Algorithm 1, line 3 explicitly computes `(x_i^T c_j^*) / (||x_i||_2 ||c_j^*||_2)`, which normalizes both the token and the centroid. The paper is clear on this point.
+
+- **Criticism that the baseline is "already strong" and this confounds claims (Critic Claim 2):** This is a strawman. The paper claims the *full CMIC model* achieves SOTA, not that CTP/GPP alone are responsible for all gains. The ablation (Table 2) cleanly shows marginal contributions of each component added to a fixed baseline, which is standard methodological practice. The critic's suggestion to start from a reimplementation of prior Mamba LIC methods is a nice additional experiment but not a requirement for validity.
+
+- **Criticism about missing appendix content (Appendix A.2 comparisons with Zhang et al. 2024b):** The appendix is stripped by the PDF parser. The paper references it; its absence in the parsed text is a tool artifact, not an author error.
+
+- **"5% throughput drop is small but not negligible":** 5% training throughput reduction for two new mechanisms is negligible by any standard in this field. This is a nitpick.
+
+- **Various missing related work suggestions:** Per policy, I cannot verify whether suggested missing references exist or are relevant, so these are removed.
+
+- **Formatting/style nitpicks and typo-related complaints:** These are parser artifacts.
 
 ## Novel Insights
-None beyond the paper's own contributions. The harsh critic's observation that GPP's "global prior" is really a per-cluster prototype bias rather than image-global pooling is a useful diagnostic but follows directly from reading the equations.
+
+The reviews surface an interesting tension in evaluating "content-adaptive" mechanisms: distinguishing genuine content-awareness from the general benefit of breaking structural priors (raster order, spatial locality). The paper's ERF visualization (Fig. 9) is a creative approach to this problem—showing that CTP reshapes the ERF toward semantically relevant regions rather than spreading activation uniformly—but the missing random-permutation baseline means the evidence for content-awareness is qualitative (ERF shape, cluster visualizations) rather than quantitative. This is a methodological challenge that extends beyond this paper to any work claiming content-adaptive token reordering: the reviewer community expects a control that isolates adaptivity from order-disruption. The paper's clustering design (codebook-based, EMA-updated) is well-motivated to avoid K-Means instability, but the lack of quantitative clustering metrics leaves a gap between the qualitative visual evidence and the strong claims about clustering quality.
 
 ## Suggestions
-- Rewrite §3.4 to describe GPP as "cluster-prototype conditioning" (what it actually is) rather than as image-global pooling. Acknowledge the limitation honestly.
-- In abstract/intro/§4.3, restrict "SOTA" claims to Tecnick/CLIC; describe Kodak as competitive with MLICv2/DCAE.
-- Add an experiment with a genuinely image-global prompt (mean-pooled features or attention over centroids weighted by image cluster histogram) — either it matches GPP (clarifies the gain mechanism) or it beats GPP (strengthens the paper).
-- Add at least 2-seed variance for Kodak BD-rate given <0.5% margins drive the central comparison.
 
----
+1. **Add a random-permutation baseline to Table 2:** Replace the CTP grouping with a fixed random permutation (shared across all images) and report the resulting BD-rate. If random permutation yields significantly less improvement than CTP, the content-awareness claim is strongly supported. If random permutation gives comparable gains, the paper should reframe its contribution accordingly.
 
-## Calibration
+2. **Add an ablation comparing prompt designs:** Compare centroid-tied prompts (current GPP) against (a) a directly learned prompt pool of the same size, and (b) a fixed (non-learned) projection from centroids. This would clarify whether the centroid tie itself, the learnable projection A, or simply adding a conditioning signal is the source of GPP's gain.
 
-**Anchors retrieved:**
-- `KgJwbsfN7G.md` (MambaVC) — avg 4.80, Reject. Same domain (Mamba for LIC) but a simpler first-attempt; CMiC clearly improves on it both in design and empirics.
-- `iDe1mtxqK5.md` (Spatial-Mamba) — avg 7.00, Accept. More fundamental architectural contribution for 2D Mamba; CMiC is narrower in scope (compression-specific).
-- `AL1fq05o7H.md` (Mamba original) — avg 6.25, Reject. Not directly comparable scope.
-- `0A6f1b66pE.md` (Mamba VLM) — avg 4.60, Reject. Different domain.
-- `FowFLhUTgO.md` (V2M) — avg 5.50, Reject. 2D Mamba representation learning; similar incremental flavor.
-- `HKGQDDTuvZ.md` (FTIC) — avg 6.00, Accept. Closest analog: a transformer-LIC paper accepted with mid-tier scores, incremental but solid empirical gains; CMiC's empirical case is comparably strong with a similar over-claim risk.
-- `foKwWau15m.md` (CMC-Bench) — avg 6.00, Reject. Different LIC area (benchmark paper).
-- `GSUNPIw7Ad.md` (Compressed latents+MLLM) — avg 6.00, Accept. Less comparable.
-- `U67J0QNtzo.md` (Disentangled training LIC) — avg 7.50, Accept. Stronger conceptual contribution than CMiC.
-- `lnVPfgRnIV.md`, `qi7udwV66M.md`, `ZWi6RpT4mJ.md`, `7L2bpe7lfm.md` — low-scoring (3.5–4.75) papers in adjacent areas, all noticeably weaker than CMiC.
-- `PQpvhUrA1C.md` (AR pretraining Mamba) — 5.75; `iWSl5Zyjjw.md` (DeciMamba) — 5.00; `UAKnJMIBwf.md` (MambaPEFT) — 6.00. Mid-tier Mamba accepts with similar incremental positioning.
+3. **Report clustering stability across 3 training seeds** (mean, variance of cluster assignments and BD-rate). This is inexpensive and would substantially strengthen the robustness claims.
 
-CMiC sits closest to FTIC (6.00, accepted) and HKGQDDTuvZ-family: a solid empirical LIC contribution with real efficiency gains and a defensible-but-overclaimed mechanism. Stronger than MambaVC (4.80) and V2M (5.50); weaker than Disentangled Training (7.50) and Spatial-Mamba (7.00).
+## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+### Calibration Anchors
+
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| `/home/wg25r/review_agent/human_reviews_2026/0dHrYUd17W.md` (MambaSIC) | 4.00 | Mamba-based SIC with limited novelty; CMIC has more novel components (CTP, GPP) and stronger validation |
+| `/home/wg25r/review_agent/human_reviews_2026/42gPoLZLQB.md` (S3Mamba) | 4.50 | SSM-based super-resolution criticized as "module replacement"; CMIC has more fundamental architectural innovation |
+| `/home/wg25r/review_agent/human_reviews_2026/FXu4G5T5QZ.md` (ARPC) | 5.00 | Accepted poster at similar tier; CMIC has more thorough evaluation and cleaner ablations |
+| `/home/wg25r/review_agent/human_reviews_2026/lO6I66lweK.md` (Taming Hierarchical) | 5.50 | Accepted poster with strong spectral analysis; CMIC has comparable empirical performance but higher methodological novelty |
+| `/home/wg25r/review_agent/human_reviews_2026/YDRoTtmXu1.md` (CoTAM) | 6.00 | Accepted poster; CMIC's novelty and evaluation thoroughness are comparable |
+| `/home/wg25r/review_agent/human_reviews_2026/R5xBLfD9Dv.md` (SSMs for Neural Repr.) | 5.00 | Accepted poster; different topic, similar clarity and evaluation depth |
+| `/home/wg25r/review_agent/human_reviews_2026/AuzSDvSUzg.md` (Human Aligned Compression) | 2.00 | Low-scoring anchor; CMIC is dramatically more rigorous and substantial |
+| `/home/wg25r/review_agent/human_reviews_2026/XpvgGoTrza.md` (CSA-LIC) | 3.33 | Withdrawn/reject; CMIC is far stronger in methodology, evaluation, and results |
+
+The paper is solid and makes genuine contributions. The missing random-permutation baseline is the most significant weakness, but it does not invalidate the core results—the paper still demonstrates SOTA performance with moderate complexity and provides compelling qualitative evidence for the claimed mechanism. Relative to the calibration anchors, CMIC sits above the 5-5.5 range (papers accepted with moderate enthusiasm) but below the 7+ range (exceptionally strong papers where every claim is fully controlled). The paper's contributions are well-motivated, the experiments are thorough, and the writing is clear.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,13 +1,20 @@
+Now I have all the information needed. Let me write the consolidated review.
+
+---
+
 ## Summary
-PI-CCA proposes a replay-free continual-learning framework for vision-language models that summarizes pre-trained image–text alignment with a compact "certificate" (top-k canonical correlations plus sketched canonical subspaces), enforces spectral and subspace-angle consistency during adaptation, and adds a prompt-invariance loss via projector averaging. Experiments on MTIL, X-TAIL, VLCL, and ConStruct-VL show modest but consistent improvements over strong replay-free baselines.
+This paper proposes PI-CCA, a replay-free continual learning framework for vision-language models that reframes catastrophic forgetting as drift of the underlying cross-modal alignment geometry. Rather than regularizing proxy signals (logits, similarity distributions), PI-CCA maintains a compact "CCA certificate" — the top-k canonical correlations and sketched canonical subspaces of the whitened image-text cross-covariance — and constrains new updates to preserve these alignment invariants. A prompt-invariance component averages text projectors over template perturbations to improve robustness. Across four standard VL-CL benchmarks (MTIL, X-TAIL, VLCL, ConStruct-VL), PI-CCA achieves state-of-the-art results among replay-free methods, including surpassing a synthetic-replay competitor on two tracks.
 
 ## Strengths
-- **Conceptually clean reframing**: Treating forgetting as drift of CCA invariants of the *whitened* cross-covariance (Eq. 2) is a sensible and reasonably novel preservation target compared with off-diagonal or logit distillation approaches (§2, §3.2).
-- **Constant-memory certificate**: Storing only sketched bases of dimension h×k (Eq. 4) genuinely decouples memory from feature dimension, an engineering advantage over teacher-logit or reference-corpus methods.
-- **Projector-averaging for sign/rotation ambiguity** (Eq. 5–6) is a tidy way to handle prompt variation without Procrustes alignment.
-- **Component-wise ablations** in Table 3 are structured cleanly, showing each loss term contributes meaningfully (spectral and subspace terms cause the largest drops on removal).
-- **Task-order robustness study** (Fig. 5, 20 orders × 3 seeds) is good practice and shows narrow IQR.
-- **Consistent gains across four heterogeneous tracks** — including beating the synthetic-replay method GIFT on VLCL retrieval (Table 2) — provides reasonable evidence that the approach works.
+- **Novel geometric reframing of VL forgetting**: The paper makes a genuine conceptual contribution by recasting forgetting as drift of canonical alignment geometry (spectrum + subspaces) rather than mismatch of proxy signals. This is a clean, principled perspective that unifies the method's design. (Section 3.2, Eqs. 3–6)
+
+- **Replay-free, compact certificate with prompt-invariant averaging**: PI-CCA stores only a small sketched certificate (h×k, independent of feature dimension d) computed via EMA mini-batch statistics, requiring no past data, generator, or reference corpus. The prompt-invariant text basis (Eqs. 5–6) handles sign/rotation ambiguity through projector averaging rather than costly Procrustes alignment — a neat design choice.
+
+- **State-of-the-art across four diverse VL-CL protocols**: Tables 1–2 show PI-CCA achieving best performance among all replay-free methods on MTIL (Avg 76.8%), X-TAIL (Avg 68.1%), VLCL (I2T R@1 48.6), and ConStruct-VL (FA 75.2, AF 2.7). It even surpasses the synthetic-replay method GIFT on VLCL and ConStruct-VL, demonstrating that directly constraining alignment geometry can be more effective than data synthesis.
+
+- **Thorough ablation with meaningful insights**: Table 3 isolates each loss term, showing that removing spectral (ℒ_spec) or subspace (ℒ_sub) terms causes the largest drops, confirming both invariants are necessary. The prompt-invariance stress test (Figure 4) cleanly demonstrates that ℒ_pi flattens degradation slopes under increasing perturbation strength. Task-order sensitivity analysis (Figure 5) over 20 random sequences establishes robustness.
+
+- **Pareto analysis of certificate capacity**: Figure 2 identifies a robust efficient frontier for k ∈ [48, 96] and h ∈ [192, 320], showing the method is not brittle to capacity choices and that a small certificate suffices.
 
 ## Weaknesses
 
@@ -15,67 +22,59 @@ PI-CCA proposes a replay-free continual-learning framework for vision-language m
 None.
 
 ### Major
-
-- **Figure 3's reported correlations are not credible as presented.** Across a heterogeneous sweep (certificate size, EMAs, invariance strength, whitening, pairing scheme, LoRA capacity/LR, sketch type) the paper reports Pearson r = 1.00 / Spearman ρ = 1.00 (with one panel at r = 0.99) on all four panels of ΔAvg/ΔR@1 against D_ang and D_ρ. Obtaining four simultaneously perfect correlations across such heterogeneous perturbations is empirically implausible; the caption's claim of "realistic scatter" conflicts with r = 1.00. Because this figure is the central empirical bridge for the paper's headline thesis ("alignment-geometry drift predicts forgetting", §5), the issue is not cosmetic. The authors should re-run, decompose by perturbation type, or report what aggregation was done — currently this undermines the strongest conceptual claim.
-
-- **Internal tension between "certificate as invariant" and Eq. 13.** §3.2 frames the certificate as a *reference (pre-continual)* quantity (ρ\*, U\*, V\*), but Eq. 13 EMA-updates ρ\*, S\*_v, S̄\*_t toward the current mini-batch every step. The authors describe this as "controlled plasticity" (§3.4), which is reasonable as engineering, but it means the constraint is toward a moving anchor partially tracking adaptation, not a strict pre-training invariant. The motivating contrast with "proxy regularizers" (§1) is therefore softer than the paper claims. The paper should quantify how far the EMA-tracked certificate drifts from the t=0 reference over a full task stream — without this, the "invariant preservation" interpretation cannot be cleanly distinguished from a smoothed self-regularizer.
-
-- **Source of the initial reference statistics is undisclosed.** Constructing ρ\*_{1:k}, U\*_k, V\*_k requires paired image–text statistics from *some* corpus (Eq. 1–2), and §3.2 mentions "a diverse anchor prompt set" but never specifies the data. If this corpus is held-out generic VLM data, PI-CCA implicitly relies on a reference set, comparable to what ZSCL uses, and the "replay-free / reference-free" framing in §1 should be qualified. This is a real disclosure gap that affects whether comparisons to other replay-free baselines are apples-to-apples.
+None.
 
 ### Minor
+- **PD metric promised but not reported against baselines in main tables**: Section 4.1 states that PD (performance drop on a held-out zero-shot suite) is reported, but Tables 1–2 contain only Avg/Last/Transfer (classification) and R@1/FA/AF (retrieval/structured). The Transfer metric partially addresses zero-shot retention on unseen domains, but a direct PD comparison against baselines — which the paper itself identifies as a metric — would substantiate the central claim about preserving zero-shot ability. PD only appears in Figure 4 as a self-comparison (PI-CCA with/without ℒ_pi).
 
-- **No variance/significance estimates on Table 1.** Margins over the strongest baselines on MTIL/X-TAIL are 1–2 points (e.g., 76.8 vs 75.2 Avg on MTIL). Single-run is common in CL benchmarks, so this isn't disqualifying, but error bars or seed std for the headline table would meaningfully strengthen the SOTA claim — particularly because Table 2 already reports ± values.
-- **L_pi gain not isolated from "more prompt augmentation".** The stress test (Fig. 4) compares L_pi on/off but does not include a baseline that simply trains with the same M prompt perturbations as text augmentation. The reported +2.44 pp at s=1.0 may partly reflect augmentation volume rather than the projector-averaging geometry.
-- **Sketch-space surrogate justification is informal.** §3.3 asserts that the sketched Frobenius distance "preserves order/angles under near-isometric sketches" but does not provide a JL/SRHT bound for the top-k projector setting at the practical h≈256, d≈thousands regime. A short bound or empirical check vs. principal-angle distance would close this gap.
-- **Pareto and component ablation use only PI-CCA itself.** The task-order study and Pareto sweep do not include baselines, so we cannot tell whether PI-CCA's tight IQR or broad Pareto ridge is unusual relative to e.g. C-CLIP or ZSCL.
+- **Conceptual link between CCA invariants and CLIP's operational mechanism is asserted rather than justified**: The paper targets preservation of the whitened cross-covariance's canonical spectrum and subspaces, but CLIP's zero-shot recognition relies on unwhitened cosine similarities (or dot products). The relationship between whitened CCA invariants and actual task-relevant alignment is indirect, and the paper provides no formal justification (e.g., bounds relating canonical correlations to downstream margins) that constraining these particular invariants is necessary or sufficient. The empirical correlation evidence (Figure 3) is supportive but does not close this conceptual gap. The framing as a "principled" and "first-class invariant" is somewhat overstated.
+
+- **The "constant memory" claim needs qualification regarding streaming covariance matrices**: The certificate itself is compact (O(hk)), but the streaming EMA maintains full d×d covariance matrices (Σvv, Σtt, Σvt) as described in Eq. 12. For d=768 this is ~7MB — modest in absolute terms but multiple times larger than the certificate. The paper's abstract and introduction emphasize "constant memory" without acknowledging these matrices, though Figure 2's Pareto analysis does include total peak memory measurements.
 
 ### Trivial
-- The notation in Eq. 12/13 mixes notation styles (Σ vs S\*) that could be tightened for clarity.
+- **Table 1 lacks standard deviations or confidence intervals** (Table 2 includes them for VLCL/ConStruct-VL). Given that the gains over the second-best method on MTIL are 1.6 percentage points (76.8 vs. 75.2), reporting variance would help readers judge whether these margins are statistically meaningful.
+
+- **The stress test comparison (Figure 4) removes ℒ_pi without adjusting the total loss coefficient budget** (λ₁, λ₂ remain unchanged), so the comparison confounds the presence/absence of ℒ_pi with a change in overall regularization strength. This is a minor experimental design issue that does not undermine the qualitative conclusion.
 
 ## Nice-to-Haves
-- A direct plot of the principal-angle trajectory between current canonical subspace and the t=0 reference across the task stream — this is the most direct test of the central claim.
-- A controlled ablation where competing baselines are also given access to the initial paired corpus used to seed the certificate.
-- A check that gradients through the differentiable SVD / Newton–Schulz whitening are numerically stable across whole runs, not just per-step.
+- A direct geometry-drift comparison across methods: measuring D_ang and D_ρ for strong baselines (e.g., C-CLIP, ZSCL) under identical conditions would close the loop on the "geometry-first" argument by showing PI-CCA genuinely reduces alignment drift and that this drift connects to their performance decay.
+- A memory breakdown separating certificate storage, covariance EMAs, and LoRA parameters, alongside comparable numbers for baseline methods, to make the "constant memory" claim fully transparent.
+- Visualization of what the certificate subspaces capture — e.g., retrieval examples using canonical directions — would make the geometry story more concrete.
 
 ## Removed Points
 These points are flagged to be removed; treat them with caution.
 
-- *"Code unavailable for review."* The authors explain commercial constraints and commit to camera-ready release; this falls under the soft rule about reproducibility nitpicks.
-- *"Baselines like LADA / ENGINE / MG-CLIP / Proxy-FDA appear only as point numbers."* Without external lookup we cannot tell whether these are re-implementations or cited numbers; the harsh critic's complaint requires evidence we don't have here.
-- *"Table 2 ±values are suspiciously low."* The standard deviations (e.g., AF 2.7 ± 0.2) are within plausible ranges for averaged metrics on these benchmarks; "suspicious" is not a substantive criticism without comparison data.
-- *"Averaging projectors only works when perturbations sample the same subspace, otherwise trailing eigenvalue mass should be reported."* Reasonable as a nice-to-have analysis, but the paper's top-k truncation is a standard, well-defined operation regardless of rank; calling this a flaw is overreach.
-- The Strength Finder's claim that the Fig. 3 near-perfect correlations *validate* the central insight is dropped — the weakness about Fig. 3 wins.
+1. **"Figure 3 perfect correlation is implausible and likely fabricated"** — This accusation is based on an auto-generated image description from the PDF parser (line 241), which lists r=1.00, ρ=1.00. The paper's actual figure caption (line 245) describes "clear positive trends with realistic scatter." The parser's image descriptions are not reliable evidence of paper content. The paper's own text (line 235) says "larger angle/spectral drifts generally imply larger drops" — not perfect correlation. This is a parser artifact, not a paper problem.
+
+2. **"Baselines appear taken from prior works; no description of re-tuning"** — Using published numbers from standardized benchmarks is standard practice in VL-CL literature. All cited methods (ZSCL, C-CLIP, Mod-X, etc.) are established baselines on these exact benchmarks. Demanding re-tuning of every baseline is unreasonable.
+
+3. **"Figure 2 memory numbers implausibly low if full covariance matrices are included"** — Speculative. The paper reports actual measurements on A100-80GB hardware (line 233). Without evidence of measurement error, this criticism is unfounded.
+
+4. **"The paper's own method targets a transformed (whitened) version of the cross-covariance, which is not obviously more 'direct'" (from Section-by-Section notes)** — This misunderstands the paper's claim. The paper argues that prior methods regularize *outcomes* (similarities, logits) while PI-CCA constrains *alignment geometry invariants* directly. Whether whitened or not, CCA invariants characterize the cross-modal relationship in a way that similarity distillation does not. The paper's distinction is meaningful.
+
+5. **"Backward gradient flow through differentiable SVD and whitening is under-specified"** — The paper explicitly addresses this at lines 144-145: stop-gradient on inverse square root if needed, differentiable SVD via power iteration with re-orthogonalization, gradients propagated to M̃ not through the certificate. Implementation details are deferred to Appendix A.1 (stripped by parser). This is adequately specified for the main paper.
+
+6. **Formatting/typo/style complaints** — All parser artifacts. Removed per hard rules.
 
 ## Novel Insights
-None beyond the paper's own contributions. The core conceptual move — using CCA spectrum + subspaces of the whitened cross-covariance as the preservation target, and handling prompt variability via sketched projector averaging — is the paper's own contribution.
+The paper's most genuinely novel observation is that alignment-geometry drift — measured through canonical subspace angles and spectral deviation of the whitened cross-covariance — appears to be a stronger and more direct predictor of VL-CL performance degradation than the proxy signals (similarity matching, logit distillation) targeted by prior work. While the conceptual link between CCA invariants and CLIP's operational mechanism could be tighter, the empirical demonstration that constraining these invariants yields SOTA results across diverse VL-CL protocols is a meaningful contribution that could influence how the community thinks about preserving cross-modal generalization.
 
 ## Suggestions
-- Re-derive Figure 3 transparently: report each perturbation family separately, the units of D_ang and D_ρ, the number of points, and the raw correlations without aggregation. Ideally include a plot where the perfect linearity is *not* trivially induced by aggregating means.
-- Either drop the "invariant of pre-trained alignment" framing in favor of "smoothly tracked alignment anchor", or freeze the certificate at t=0 for an ablation and report the gap. This will resolve the §3.2 ↔ Eq. 13 tension.
-- Disclose the corpus used to construct the initial certificate, its size, and its overlap with downstream tasks; relabel the method's "reference-free" status accordingly.
-- Add seed std for Table 1's main rows, even with a small number of seeds (e.g., 3).
-- Add an L_pi ablation where the baseline also sees the M prompt perturbations as standard augmentation.
+- Add a PD comparison table against major baselines (or clarify in-text that Transfer serves this purpose and explain why PD is not separately tabulated).
+- Provide a brief theoretical or empirical justification for why preserving whitened CCA invariants is relevant to unwhitened cosine-similarity-based retrieval — even a simple empirical comparison showing that raw cross-similarity drift correlates less well with performance than CCA drift would strengthen the argument considerably.
+- In the revision, add a footnote or sentence quantifying the memory cost of the streaming covariance EMAs relative to the certificate, so the "constant memory" claim is fully transparent rather than inviting nitpicks.
 
-## Axes
-- **Originality**: Moderate. CCA-invariant preservation as a CL objective is a genuinely fresh framing, though related to representation-similarity diagnostic work and the prior Mod-X/Proxy-FDA family.
-- **Importance**: Replay-free VL-CL is a real and active problem.
-- **Claim support**: Mixed. The headline ranking results are credible (small but consistent margins). The "geometry predicts performance" claim rests on a figure whose reported statistics are not believable as-is. The "invariant" framing is not fully consistent with the actual update rule.
-- **Soundness**: Mechanism is reasonable; some derivations (sketch-space Frobenius ≈ principal angles) are asserted rather than bounded.
-- **Clarity**: Generally clear; notation occasionally heavy but standard for CCA.
-- **Value to community**: A useful new regularizer to compare against. The integrity question around Fig. 3 and the corpus disclosure must be addressed before the conceptual contribution stands.
+## Score and Decision
 
-## Anchors
-- `G9Ea7mlqGO.md` (avg 3.80, Reject) — CLIP online CL. Topic-near; weaker methodology and analysis than PI-CCA, which is more thoroughly evaluated.
-- `sb7qHFYwBc.md` (avg 6.50, Accept) — C-CLIP, a direct comparator and baseline in PI-CCA. PI-CCA reports beating it numerically but has more presentation/integrity concerns.
-- `TLADT8Wrhn.md` (avg 6.25, Accept) — TiC-CLIP. Stronger benchmark contribution; PI-CCA is a method paper of narrower scope.
-- `k9NYnsC4Mq.md` (avg 5.67, Reject) — LwF for VLMs. Borderline reject in the same neighborhood as where PI-CCA sits, but cleaner story.
-- `9aZ2ixiYGd.md` (avg 5.00, mixed scores) — rehearsal-free VL CL. Similar borderline-paper profile.
-- `4SrzKsJocx.md` (avg 3.80, Reject) — CCA-based multimodal DR. Related technical machinery, weaker empirics than PI-CCA.
-- `HCCkCjClO0.md` (avg 3.00, Reject) — weak online CL; clearly below PI-CCA in rigor and results.
-- `WM5G2NWSYC.md` (avg 2.00, Reject) — projected subnetworks for zero-shot retention; clearly below PI-CCA.
-- `6Mg7pjG7Sw.md` (avg 6.00, Accept) — CCA-style unimodal-to-multimodal mapping; comparable technical machinery, more disciplined empirical story.
+### Anchor Comparison
+- **Compo-ReAlign (eiTy6AYeQi.md)** — avg 6.0, Accept (Poster): Similar geometry-first reframing for VL-CL, evaluated on compositional DIL and MTIL retrieval. PI-CCA has substantially broader evaluation (4 tracks vs. 2), more baselines, and a more general framework not limited to compositional structure. PI-CCA is clearly stronger.
+- **NuSA-CL (tucuU4sQ3s.md)** — avg 5.5, Accept (Poster): Memory-free null-space adaptation for CLIP. Evaluated on MTIL and CIFAR-100 CIL. PI-CCA covers far more diverse tasks (retrieval, structured concepts), has stronger results, and offers a more novel conceptual contribution. PI-CCA is clearly stronger.
+- **RLAP-CLIP (rMHZfCznhZ.md)** — avg 6.0, Accept (Poster): RL-based prototype optimization, classification only. PI-CCA's scope (4 tracks including retrieval and structured concepts) and geometric framing are stronger. PI-CCA is somewhat stronger.
+- **KeepLoRA (T3Vc5fkTzV.md)** — avg 5.5, Accept (Poster): Subspace-based gradient projection, evaluated on MTIL only. PI-CCA has broader evaluation, more comprehensive baselines, and a more novel conceptual framing. PI-CCA is clearly stronger.
+- **Caption-Guided Replay (HN18kuyf4o.md)** — avg 4.0, Reject: Heavy external dependencies, limited novelty. PI-CCA is vastly stronger — replay-free, self-contained, SOTA.
+- **Consistent Cross-Modal Alignment (mDuton6Tg7.md)** — avg 3.0, Withdrawn/Reject: Poorly structured, marginal gains. PI-CCA is vastly stronger.
 
-PI-CCA sits between the C-CLIP / LwF-VLM band and the weaker rejected anchors. The empirical contribution (SOTA across four tracks, sensible ablations, order-robustness) is real, but the Fig. 3 integrity concern and the unresolved EMA-vs-invariant + reference-corpus disclosure issues make it weaker than the 6.0–6.5 accept anchors. It is closer to the 5.0–5.67 borderline-reject anchors than to the clearly bad ≤4 anchors.
+The paper under review has stronger empirical results across more benchmarks than any anchor in the 5.5–6.0 range, with a cleaner conceptual contribution. The weaknesses are real but minor — none threatens the core claims. This places PI-CCA above the 6.0 accept threshold but below the 8.0+ oral-tier papers (which are in different subareas entirely). A score of 6.5 reflects a solid accept with minor weaknesses that the authors can address in revision.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,11 +1,20 @@
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
+
+---
+
 ## Summary
-The paper proposes CV-imputation, a K-fold cross-validation procedure for graphon models that, instead of deleting/masking validation edges, replaces them with i.i.d. Bernoulli(θ) draws. An affine identity (Lemma 1, Eq. 5) lets the authors back out an estimate of **P** from a model fit on the perturbed matrix. Theorem 1 establishes that the CV score V_K(M) tracks the true loss L(M) up to a model-independent constant Λ at rate max(1/n, K^{-(1+α)/2}, K^{-α}), and simulations/real-network experiments show consistent accuracy gains and large runtime savings over ECV (Li et al. 2020a).
+
+This paper proposes CV-imputation, a cross-validation method for selecting tuning parameters and estimation methods in graphon models. The core idea is to replace held-out edges with random Bernoulli(θ) imputations during training, then apply an affine correction to the resulting estimate. This avoids the expensive matrix-completion step required by the existing Edge Cross-Validation (ECV) method. The authors provide an asymptotic theory (Theorem 1) showing that the CV-imputation score is consistent for model selection under a regularity condition, and empirically evaluate the method on four graphon models and three real-world networks using four different graphon estimators.
 
 ## Strengths
-- **Clean and exploitable affine identity (Lemma 1, Eq. 5).** Replacing the held-out block with iid Bernoulli noise preserves a tractable linear relationship between E[A^{[-k]}] and P, enabling estimator-agnostic back-transformation. This is a genuinely useful methodological observation.
-- **Substantial, evidenced runtime gains.** Table 2 shows 240s vs 6021s on Yeast (n=2617) and similar gaps on PolBlog/NetSci; §3's computational analysis correctly attributes this to avoiding per-fold matrix completion (replaced by an O(n²) perturbation step). The speedup is large and the source is honestly identified.
-- **Model-agnostic across four estimators (NS, SAS, USVT, ICE).** Table 1 and Figures 4–5 show CV-imputation produces lower or equal MSE versus ECV and default hyperparameters across four graphon designs and four estimators, supporting the agnostic-tuning claim.
-- **Theoretical guarantee for model selection (Theorem 1).** Under Condition 1 (which the authors explicitly note is computationally verifiable, with empirical validation in Fig. S.3), V_K is asymptotically parallel to L up to an additive constant, so the V_K-minimizer asymptotically selects the L-minimizer.
+
+1. **Strong computational advantages**: The method replaces per-fold matrix completion (typically O(n³)) with O(n²) Bernoulli imputation and an affine transformation. This speedup is convincingly demonstrated across all four estimators and four graphons (Figure 3), on three large real networks (Table 2: e.g., Yeast: 240.9s vs 6021.12s), and in isolation (Figure S.7). This is the paper's clearest contribution.
+
+2. **Consistent empirical accuracy**: Table 1 shows that CV-imputation selects models with lower or comparable MSE than ECV across all four estimators and four graphons. In several cases the gains are large (e.g., NS on Graphon 1: 0.51 vs 9.15; USVT on Graphon 2: 2.99 vs 5.06). Figure 4 demonstrates that the CV-imputation score tracks the oracle MSE curve, and Figure 5 shows 100% method-selection accuracy at n=200.
+
+3. **Model-agnostic and easy to implement**: The method works with any graphon estimator (NS, SAS, USVT, ICE) without modification—just plug in the estimator and apply the affine correction. The algorithm is straightforward.
+
+4. **Practical impact via real-world case study**: The COVID-19 drug-disease co-occurrence application (Section 6) is a compelling illustration. The method identified ledipasvir as a high-probability candidate for repurposing, supported by later clinical trial results. AUC improvements on PolBlog (0.88 vs 0.80) and NetSci (0.72 vs 0.70) are meaningful.
 
 ## Weaknesses
 
@@ -13,72 +22,57 @@ The paper proposes CV-imputation, a K-fold cross-validation procedure for grapho
 None.
 
 ### Major
-- **Stated motivation is not what the mechanism actually achieves.** §1 and §3 motivate the method as preserving "the network's inherent topology and connectivity" relative to direct edge sampling. But replacing a fraction w_k of node pairs with iid Bernoulli(θ) noise also perturbs every neighborhood — for NS/SAS this is a corrupted local structure, just a different corruption than masking. The actual reason the method works is the affine-inversion identity in Eq. 5, which holds in expectation regardless of topology preservation. The paper should foreground this argument rather than the topology-preservation framing, which is misleading and arguably overclaims.
-- **Single CV baseline.** All quantitative comparisons are against ECV. Given that the paper positions CV-imputation as a general advance in graphon cross-validation (abstract, conclusion), at least one alternative network-CV procedure (e.g., a node-split scheme) would meaningfully broaden the evidence. Without it, the supported claim is narrower than the stated claim: "improves on ECV," not "the right way to do graphon CV." On Yeast, AUC ties exactly with ECV (0.80 ± 0.02 vs 0.80 ± 0.02), so the "consistent superiority" phrasing in §5–§6 is somewhat overstated.
+
+1. **Central theoretical guarantee (Theorem 1) depends on Condition 1, which is not verified for the estimators used in the paper.** Condition 1 requires the maximum K-fold optimism bias Q_K(M) to decay at rate K^{-α}. While the paper provides one example where this holds (Erdős–Rényi model with simple averaging, α=1), it does not establish that Condition 1 holds for any of the four nonlinear estimators (NS, SAS, USVT, ICE) actually deployed in the experiments. The claim that Q_K(M) "can be verified computationally" (with reference to Appendix Figure S.3) is not a proof, and the asymptotic regime K→∞ does not match CV practice where K is small and fixed. This means the paper's claim of being "theoretically sound" is only partially supported—the theory provides a framework but the key condition remains unchecked for the paper's own estimators.
+
+2. **The affine correction (Equation 6) is derived from the generative model but applied to estimates from nonlinear estimators without analysis of bias propagation.** Lemma 1 and Equation (5) correctly characterize the distribution of the imputed training data P^{[-k]}. The correction in Equation (6) inverts this transformation on the estimate P̂(M|A^{[-k]}). However, if a nonlinear estimator is biased for P^{[-k]} (which all four estimators are, in finite samples), the corrected estimate inherits an uncontrolled bias for P. The paper's theory (via Condition 1) is meant to bound this discrepancy, but since Condition 1 is unverified for these estimators (see point 1), the justification for the core correction step remains incomplete.
 
 ### Minor
-- **§6.2's evaluation protocol uses the very random edge holdout §1 criticizes.** "We randomly sampled 10% of the node pairs from each network ... as testing data." The paper's introduction argues that random edge sampling distorts neighborhood structure and biases estimation. The authors should clarify why this is acceptable for *evaluation* but not *training*, or use an alternative test protocol. (Note: the distinction is defensible — held-out test pairs do not feed back into the estimator — but the paper does not make this argument.)
-- **Theorem 1's rate parameter α is uncharacterized for the actual estimators used.** Condition 1's rate K^{-α} is only verified analytically for an Erdős–Rényi example with averaging; the paper does not give α for NS/SAS/USVT/ICE, relying on a computational verification figure. This weakens the practical interpretability of Eq. 8.
-- **Graphon 1 ECV(NS) MSE 9.15 ± 19.25 — a std twice the mean** suggests ECV breaks down catastrophically in some replicates on this near-complete graph (p̄=0.95). Worth investigating whether this reflects a configuration issue rather than a fundamental ECV deficiency; otherwise the headline gap on Graphon 1 is partly inflated.
-- **Simulations cap at n=200.** Asymptotic claims in §4 should be probed at sizes closer to the real networks (n up to 2617), or at least one n ≥ 10³ simulation should be added.
-- **θ as a tuning knob is under-discussed in the main text.** Eq. 6 divides by (1−w_k) and subtracts w_k θ 11ᵀ; estimates can exit [0,1] for poor θ. Sensitivity is relegated to S.4. Some main-text discussion is warranted.
+
+3. **Comparison to ECV lacks some implementation details and discussion of failure cases.** The paper does not describe its ECV implementation in the main text (which matrix completion algorithm was used, how its tuning parameters were chosen). Several ECV entries in Table 1 show enormous standard deviations (e.g., NS on Graphon 1: 9.15 ± 19.25, suggesting ECV is unstable or poorly configured in this setting). Without investigating whether this reflects inherent ECV instability or suboptimal configuration, the claim of "consistently superior accuracy" is somewhat undersupported for the cases where ECV behaves erratically. The paper also does not compare against node-based CV or simple hold-out baselines (though it does discuss why these are theoretically problematic in the introduction).
+
+4. **Key hyperparameters (θ, K) are not reported in the main text.** The imputation parameter θ is mentioned as a tuning parameter whose selection is deferred to Section S.4 (appendix). The number of folds K is never explicitly stated. Without these values, the experiments cannot be fully reproduced from the main text alone. This is a minor issue since the information is presumably in the appendix, but it should be stated upfront.
 
 ### Trivial
-- §7 claims "no tuning requirements," but θ and K are both tuning choices introduced by the method.
-- The COVID-19 case study's ledipasvir highlight (§6.1) is anecdotal evidence and would be stronger framed as illustrative rather than supporting a quantitative claim.
+None.
 
 ## Nice-to-Haves
-- A side-by-side visualization comparing A^{[-k]} under CV-imputation vs ECV's masked/completed matrix to show concretely what each estimator fits.
-- An experiment on at least one truly large network (n ≥ 10⁴) to substantiate the scaling story.
-- Explicit derivation or empirical estimation of α (Condition 1) for NS/SAS/USVT/ICE.
+- An ablation on θ (e.g., θ ∈ {0.1, 0.3, 0.5, 0.7, 0.9}) showing sensitivity of model selection to this choice.
+- A visual comparison (e.g., heatmaps of true P vs estimates selected by CV-imputation and ECV) to complement the MSE numbers.
+- Discussion of how the method extends to weighted or directed networks (acknowledged as future work in Section 7).
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-
-- **"Comparison to ECV is unfair because Graphon 1 has p̄=0.95 / ECV may be misconfigured."** This is speculation, and the comparison is symmetric (both methods get the same data); the high variance of ECV on Graphon 1 is itself a legitimate empirical observation. (Kept as a Minor instead — the variance pattern is worth investigating but does not invalidate the comparison.)
-- **"Anecdotal COVID-19 ledipasvir highlight."** Reframed as trivial; case studies of this form are standard.
-- **"Maximum n=200 cannot speak to n=10³–10⁴."** Kept as a Minor — already in main weaknesses.
-- **"No proof sketch in main text" / appendix-content critiques.** Removed: the appendix is the appropriate location for full proofs.
+- "ECV requires a low-rank matrix" criticism: The paper accurately states this is a condition of Li et al.'s approach and explicitly notes that Graphon 2 is full-rank (line 149). The paper applies ECV anyway and reports results. No overstatement.
+- "Affine correction is exact only if the estimator is linear": The transformation in Equation (6) is a data-processing step applied to any estimate regardless of linearity. The concern is not about linearity per se but about whether the estimator trained on P^{[-k]} reliably estimates P^{[-k]}. This is a different (and valid) concern, which I have incorporated into Weakness 2 above with corrected framing.
+- Generic strengths from Strength Finder ("addressed an important problem"): Removed as insufficiently specific.
+- Missing related works: Not verifiable and forbidden per instructions.
+- Formatting/style nitpicks and appendix-deferred content complaints: Removed as parser artifacts.
+- "No comparison to node-based CV": The paper discusses why node-based CV is inappropriate for networks (lines 55-57). Requesting it as a baseline is scope creep.
+- Various "missing experiments" (ablation on θ, diagnostic of ECV failures): These are recommendations, not evidence of flaws. Moved to Nice-to-Haves.
 
 ## Novel Insights
-None beyond the paper's own contributions. The affine-inversion identity in Lemma 1 is the central novel observation and is the paper's own.
+None beyond the paper's own contributions. The core insight—replacing expensive matrix completion with Bernoulli imputation plus affine correction—is the paper's genuine contribution, and the reviews do not surface additional novel angles beyond what the authors already articulate.
 
 ## Suggestions
-- Reframe the introduction around the affine-inversion mechanism (Eq. 5) rather than the topology-preservation argument, which is not what the method does.
-- Add at least one non-ECV CV baseline (e.g., a node-split variant) and one larger-n simulation (n ≥ 1000).
-- Reconcile §6.2's random edge holdout protocol with §1's critique — either justify the train/test asymmetry explicitly or change the evaluation.
-- Move a brief θ sensitivity analysis and a discussion of α for NS/SAS/USVT/ICE into the main text.
-- Soften "consistent superiority" / "no tuning requirements" claims in light of the Yeast tie and the θ, K choices.
-
-## Evaluation
-- **Originality:** Moderate. The Bernoulli-imputation + affine inversion idea is a genuinely new twist on edge-CV, but it is one technical idea rather than a broad framework.
-- **Importance:** Reasonable. Hyperparameter tuning for graphon estimators is a real practical pain point; ECV is widely used.
-- **Soundness of claims:** Mostly supported; theorem is correct but its practical content is limited by un-characterized α, and "consistent superiority" is mildly overstated.
-- **Experiments:** Adequate but narrow — single CV baseline, n capped at 200 in simulation.
-- **Clarity:** Good; the motivation/mechanism mismatch is the main clarity issue.
-- **Value to community:** Real, especially the runtime savings on networks of n ~ 10³.
+1. Either prove Condition 1 for a specific estimator class used in the paper (e.g., USVT with known thresholding behavior) or provide a finite-sample bound that does not require K→∞. Alternatively, soften the theoretical claims to match what is actually established.
+2. Provide a sensitivity analysis for the imputation parameter θ and explicitly state the K value used in all experiments.
+3. Add a brief investigation of why ECV exhibits extreme variance on some configurations (e.g., NS on Graphon 1)—is this a fundamental limitation or a configuration issue?
+4. Clarify the ECV implementation details (matrix completion algorithm, tuning) either in the main text or by citing a specific public implementation.
 
 ## Score and Decision
 
-Anchors retrieved (calibration_search batch):
-- `l3qtSNsPvC.md` (Poincaré inequality for graphon signal sampling) — avg **7.50**, accept. Graphon-adjacent theory paper of higher technical depth than the paper under review; significantly stronger theoretical contribution.
-- `SjufxrSOYd.md` (Invariant Graphon Networks) — avg **8.00**, accept. Graphon-based theory with universal approximation results; clearly stronger than the paper under review.
-- `i9Vs5NGDpk.md` (Sketched Ridge GCV consistency) — avg **7.50**, accept. Closest methodological cousin: CV-consistency theory. Technically deeper (random matrix theory) than the paper under review's Theorem 1.
-- `oOGqJ6Z1sA.md` (Treatment Effects by Uniform Transformer) — avg **6.33**, accept. Comparable statistical-methodology paper with theory + empirics; the paper under review is similarly placed but with a narrower experimental footprint and a single baseline.
-- `xljPZuprBA.md` (Edge Probability Graph Models beyond independence) — avg **5.75**, reject. Same domain (graph generative models); borderline scientific value; comparable in scope to the paper under review.
-- `Ivk2j3uRYh.md` (Random Graph Asymptotics for Two-Sided Markets) — avg **4.50**, reject. Network-asymptotics methodology paper; weaker empirical evidence than the paper under review.
-- `xljPZuprBA` / `vQIVbfTMzf.md` (Adapting finite-sample/asymptotic, avg **3.25**, reject) — clearly weaker than the paper under review; conceptual issues with claims.
-- `L0pMPCmEfN.md` (Splitted Wavelet Differential Inclusion) — avg **4.33**, reject. Statistical methodology paper rejected for limited evidence/clarity; the paper under review is clearer and has stronger empirical support.
-- `ifK9NFyrhn.md` (Leakage-Free Protein Datasets) — avg **3.50**, reject. Domain-specific, weaker theory; below the paper under review.
-- `LjQDYcFWmN.md` (Symmetric Kernels Learnability Bound) — avg **5.00**, reject. Theory paper of comparable density but narrower scope than the paper under review.
-- `kiwyQsZIGP.md` (Few-Shot Benchmarks Evaluation) — avg **5.00**, reject. Methodologically broader survey/evaluation paper; not closely comparable.
-- `K5QGZut3uu.md` (GP + Synthetic Data) — avg **3.75**, reject. Limited evidence; weaker than paper under review.
-- `t5kThOYtxn.md` (Stable Batched Bandits) — avg **4.20**, reject. Stronger theory but narrower applicability; comparable theoretical depth.
-- `DNjHslZrqu.md` (Tabular AR Baseline) — avg **3.67**, reject. Empirical-only with limited novelty; below the paper under review.
-- `l5ouuojPGe.md` (NN Monitoring Thresholds) — avg **3.00**, reject. Below the paper under review.
-- `Jztt1nrjAM.md` (Misinformation Dataset Guide) — avg **3.50**, reject. Different scope; below the paper under review.
+**Comparison to calibration anchors:**
 
-Positioning: clearly above the 3–4 reject cluster (clean theorem + meaningful empirical wins), but below the 7.5+ graphon theory anchors (single CV baseline, n ≤ 200 simulations, mechanism/motivation mismatch). Closest to `xljPZuprBA` (5.75) and `oOGqJ6Z1sA` (6.33). The paper has a real contribution and substantial runtime evidence but its claims modestly overshoot its evidence and one CV baseline limits the scope. I land at borderline-positive.
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| /home/wg25r/review_agent/human_reviews_2026/fArR5qngYw.md (Graphon Mixture-Aware, Reject) | 4.00 | This paper has clearer computational advantages and more thorough experiments, but shares similar theory-in-practice gaps. Stronger overall. |
+| /home/wg25r/review_agent/human_reviews_2026/HtMt9XNZv6.md (Transfer Bound GCN, Reject) | 3.50 | This paper has more extensive experiments (multiple graphons, real networks) and a more practical contribution vs that paper's narrow Cora-only validation. |
+| /home/wg25r/review_agent/human_reviews_2026/nGizKVBCgn.md (PolyGraphScore, Accept) | 6.00 | Both have theory+experiments. The PolyGraphScore paper has more thorough validation of its theory-meets-practice claims. This paper's theoretical gap (Condition 1) is wider. |
+| /home/wg25r/review_agent/human_reviews_2026/P2GIT8LpV2.md (Minimax GNN, Accept) | 5.00 | Similar tier: both have novel contributions marred by a gap between theory and experiments (Condition 1 unverified vs spectral-homophily assumption hard to verify). Comparable overall quality. |
+| /home/wg25r/review_agent/human_reviews_2026/LquoWQaEyw.md (ValiGraph, Reject) | 2.00 | This paper is substantially stronger—clearer contribution, better experiments, real-world validation. |
+| /home/wg25r/review_agent/human_reviews_2026/1CR1MTIgmq.md (False/misleading, Reject) | 0.00 | Not comparable; this is a meta-critique paper, not a research contribution. |
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+This paper sits between the 4.0 reject-level papers (limited validation, narrow scope) and the 6.0 accept-level papers (thorough theory-experiment alignment). It has a genuinely novel and practically useful method with clear computational advantages and solid empirical results across diverse settings. However, the central theoretical guarantee depends on an unverified condition, leaving a gap between the paper's "theoretically sound" framing and what is actually established. The empirical evidence for accuracy improvements over ECV is generally positive but sometimes marginal (e.g., SAS on Graphon 1: 1.69 vs 1.72; ICE on Graphon 1: 0.31 vs 0.32). The computational advantage is the paper's strongest and most unambiguous contribution.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

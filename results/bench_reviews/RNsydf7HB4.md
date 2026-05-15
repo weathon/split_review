@@ -1,75 +1,116 @@
+Now I have thoroughly reviewed the paper and all calibration anchors. Let me synthesize the final review.
+
+---
+
 ## Summary
-GAMA proposes a learning-to-improve framework for CVRP that encodes the problem instance and current solution as two graph modalities via a Dual-GCN, fuses them with stacked self/cross-attention and a gated mechanism, and uses PPO to select among local-search operators. Experiments on CVRP20/50/100 and Uchoa benchmark instances are reported, plus ablations on cross-attention and gating.
+
+GAMA proposes a neural neighborhood search method for the Capacitated Vehicle Routing Problem (CVRP) that formulates operator selection as an MDP solved via RL. Its core contribution is a Graph-Aware Multimodal Attention encoder that independently encodes the problem instance graph and the current solution graph via dual GCNs, models intra- and inter-modal dependencies through stacked self- and cross-attention layers, and fuses them via a learned gating mechanism. The resulting state representation feeds a PPO policy that selects local search operators. Experiments on synthetic CVRP instances (N=20, 50, 100) and generalization tests on the Uchoa benchmark demonstrate consistent improvements over existing neural baselines (DACT, L2I, L2C methods).
+
+---
 
 ## Strengths
-- The architectural change over GENIS is concrete and well-isolated: Dual-GCN → self-attention → cross-attention → gated fusion. The §4.4 ablations (GENIS vs. GAMA_NG vs. GAMA) and Wilcoxon tests directly attribute gains to cross-attention + gating rather than to incidental hyperparameter changes.
-- Zero-shot evaluation on the Uchoa benchmark (instances up to 1000 customers, distribution shifted from training) is included rather than only the training distribution.
+
+- **Novel and well-motivated encoder architecture**: The dual-GCN + cross-attention + gated fusion design addresses a genuine gap in neural neighborhood search — prior work either concatenated heterogeneous features naively or ignored cross-modal interactions between instance structure and solution topology. The paper clearly motivates why these interactions matter for operator selection (Section 3.3).
+
+- **Convincing ablation experiments with statistical rigor**: Table 2 cleanly isolates the contributions of cross-attention (GAMA vs. GENIS) and gated fusion (GAMA vs. GAMA_NG). On CVRP100, removing cross-attention degrades mean cost from 15.6510 to 15.7441, and removing gating degrades it to 15.7001. Wilcoxon rank-sum tests at p<0.05 confirm significance. Figure 2 provides distributional evidence showing lower variance and better median performance for GAMA across inference budgets.
+
+- **Strong results against neural baselines at comparable compute**: On CVRP100, GAMA (T=20k, 19m) achieves mean cost 15.6510 vs. DACT (T=20k, 19.3m) at 15.6925 and L2I (T=20k, 18.7m) at 15.7334 — a clear and meaningful margin over the most directly comparable methods at essentially equal wall-clock time.
+
+- **Zero-shot generalization to out-of-distribution instances**: GAMA, trained only on synthetic instances up to N=100, achieves a 4.956% average optimality gap on the Uchoa benchmark (up to N=1000), outperforming ReLD (5.018%), LEHD (9.111%), and L2I (13.557%). This demonstrates practical transferability of the learned representations.
+
+---
 
 ## Weaknesses
 
-### Fatal
-None — the work is not invalidated, but the headline claims are not supported.
-
 ### Major
-- **Headline empirical claim is not supported by Table 1.** Table 1 shows GAMA(T=20k) on CVRP100 at 15.6510 (19 min) versus HGS at 15.6994 (59 s) and LKH3 at 15.6752 (1.95 min). GAMA's gain over HGS (~0.3%) is achieved with ~19× the wall-clock time, and against DACT(T=20k) at 15.6925 the gap is ~0.0415 — only ~2× the reported std (0.0215). Significance testing is performed only on the ablation (§4.4), not on Table 1. The §4.3 narrative ("maintains superior solution quality across all instance sizes," "significantly outperforms") is not supported at matched compute, and no iso-time comparison is presented. This goes to the paper's central claim.
-- **Generalization table excludes the dominant classical solvers.** Table 3 reports GAMA at 4.956% avg gap on Uchoa instances, but includes only neural baselines and reports DACT at 25.305% and L2I at 13.557% — values that strongly suggest L2I-class methods were run out-of-regime. LKH3 and HGS, which were included in Table 1 and are state-of-the-art on Uchoa, are absent. The "strong zero-shot generalization" claim is therefore evaluated against a comparison set that flatters GAMA. The inconsistency with Table 1's baseline selection requires justification.
-- **Scope vs. claims mismatch.** The title, abstract, and §1 repeatedly say "Vehicle Routing Problem." All experiments are CVRP with uniform [0,1]² customers and integer demands in {1..9}. There is no evaluation on VRPTW, OVRP, PDP, or non-uniform distributions. The paper's positioning against general L2I methods (DACT, GIRE) is overstated relative to its actual experimental scope.
+
+None that threaten the core contribution.
 
 ### Minor
-- **Contribution over GENIS is small.** §4.4.1 gives mean improvements of 0.0004 (CVRP20), 0.0071 (CVRP50), 0.0931 (CVRP100). The smaller-instance differences are essentially within reported stds; the Wilcoxon "↑" marks significance but not effect-size meaningfulness.
-- **Variance claim is inconsistent with Table 2.** §4.4.2 asserts GAMA "exhibits notably lower variance." On CVRP100, GAMA's std is 0.0215 vs. GENIS 0.0053 and GAMA_NG 0.0042 — i.e., higher variance. The Figure 2 box-plot is on CVRP50 only; the broader claim is not supported by the numbers in Table 2.
-- **Initialization fairness.** §4.1 specifies that GAMA's initial solutions are "randomly generated." Whether DACT and L2I were re-implemented with identical initialization is not stated. For L2I-class methods, the initial-solution distribution is a non-trivial confound.
-- **Timing protocol underspecified.** §4.3 reports "run one instance average CPU time" while training/inference uses A100 GPUs; what exactly is timed (GPU+CPU; sequential vs. batched) is not specified, which weakens cross-method timing comparisons.
-- **Operator-selection mechanism not analyzed.** The motivation hinges on adaptive operator selection, but the paper never inspects the policy's operator-selection distribution, how it differs from L2I/GENIS, or which operators drive gains — so the proposed mechanism is not directly verified.
+
+- **Time reporting missing from generalization experiment (Section 4.4.3)**: Table 3 shows optimality gaps on the Uchoa benchmark but reports no inference times or computational budgets for any method. Without knowing the runtime per method, it is unclear whether GAMA's 4.956% gap reflects better solution quality per unit of compute or simply longer search. Since runtime varies substantially across methods (e.g., DACT's 25.3% gap could reflect running at a smaller budget than GAMA), the generalization comparison cannot be fully interpreted. The authors should report per-instance inference time and ideally match computational budgets.
+
+- **Classical solver comparison favors GAMA on quality but ignores time asymmetry**: Table 1 shows GAMA (19m) achieving 15.6510 vs. HGS (59s) at 15.6994 and LKH3 (1.95m) at 15.6752 on CVRP100 — a ~0.3% improvement at 19× and ~10× the runtime respectively. The paper's claim that GAMA "maintains superior solution quality" relative to classical solvers is true in raw numbers but does not acknowledge the large runtime disparity. While classical solvers serve as reference points rather than the main comparison target, and the primary neural baselines ARE time-comparable, the paper should more carefully qualify its claims about classical solver superiority. Ideally, an equal-time comparison (or cost-vs-time Pareto analysis) would strengthen the evaluation.
+
+- **DACT's anomalous 25% generalization gap is unexplained**: In Table 3, DACT achieves a 25.305% average gap, dramatically worse than all other methods (including L2I at 13.557%). This gap is so large that it likely reflects either a configuration issue (e.g., the model was not run with sufficient steps) or a fundamental limitation of DACT's architecture for out-of-distribution generalization. The paper does not discuss or analyze this anomaly, which is conspicuous given that DACT is the most directly comparable L2I baseline.
+
+- **Only CVRP is evaluated**: The core idea of multi-modal graph encoding for iterative improvement could generalize to other routing problems (e.g., VRPTW, TSP, PCVRP), but the paper restricts evaluation to CVRP. Broader evaluation would strengthen the generality claim of the encoder design.
 
 ### Trivial
-- §4.1 mentions "the proposed GENIS" — appears to be a leftover reference to a prior method.
-- The depth of the GCN in Eq. 2 is not explicitly stated.
+
+- The operator set is mentioned only generically ("2-opt, swap, insertion and so on") in the main text, with details deferred to supplementary material. While acceptable, listing the exact operator set in the main text would help readers assess whether the comparison is fair (e.g., whether GAMA uses more operators than baselines).
+
+- Table 1 omits standard deviations; these appear only in Table 2 (ablation). Including them in the main results table would give a fuller picture of solution quality variability.
+
+- Training set size and generation procedure are not specified in the main text (Section 4.1 mentions 500 test instances and training times of 1–7 days, but not the number of training instances or the train/test split ratio).
+
+---
 
 ## Nice-to-Haves
-- A cost-vs-wall-clock Pareto plot covering LKH3/HGS and the neural baselines, replacing the (T=5k/10k/20k) discrete table.
-- Attention/gating visualizations showing what cross-attention learns and how α concentrates across phases.
-- Per-instance Uchoa results in the main text.
-- One additional VRP variant (e.g., VRPTW or OVRP) to back the "VRP" framing.
+
+- **Attention map visualizations**: Qualitative examples of cross-attention weights on specific instances would illustrate whether the model learns interpretable alignments between distance and solution graphs, strengthening the intuition behind the architecture.
+
+- **Sensitivity to operator set composition**: An ablation varying which operators are available to GAMA (and to baselines) would clarify whether performance gains stem from the attention mechanism itself or from interaction with specific operators.
+
+- **Inference-time speedups**: The paper mentions future work on speeding up GAMA via diverse rollouts or model compression. Any preliminary analysis of the inference-time bottleneck (e.g., where time is spent across encoding, policy forward pass, and exhaustive local search) would be valuable.
+
+---
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- Harsh critic's framing of §3.3 GCN as possibly "collapsing to near-linear difference" — this is speculative and the paper does specify L=3 stacked attention layers after the GCN; the architecture is more expressive than the reviewer implied.
-- Strength-finder's generic claims about "consistent superiority across scales and budgets" and "strong zero-shot generalization" — these conflict with the Major weaknesses (iso-compute and missing classical baselines) and so the weaknesses win.
-- Strength-finder's "Comprehensive experimental protocol" — generic; the protocol has known gaps (no VRPTW/OVRP, no iso-compute), so it does not support a kept strength.
-- Strength-finder's "Clear algorithmic description for reproducibility" — generic and not backed by specifically novel content.
+
+These points were flagged for removal; treat them with caution:
+
+- **"Unequal hardware utilization" (Harsh Critic #3)** — Removed. Neural methods run on A100 GPUs while LKH3/HGS run on CPU because classical solvers are fundamentally CPU-bound and cannot exploit GPUs meaningfully. This asymmetry is standard and unavoidable in the field. The paper transparently reports hardware (Section 4.2: "2× AMD EPYC 7713 CPUs @ 2.0GHz and 2× NVIDIA A100 GPU cards"), which is more than most papers do.
+
+- **"DACT and L2I runtimes at T=20k are substantially shorter than GAMA's" (part of Harsh Critic #1)** — Removed as factually incorrect. At T=20k on CVRP100, GAMA takes 19m, DACT takes 19.3m, and L2I takes 18.7m. These runtimes are comparable, not "substantially shorter."
+
+- **"Claim that 'achieves lower objective values with fewer steps' is not quantified" (Harsh Critic)** — Removed. The claim IS quantified in Table 1: GAMA T=5k on CVRP100 achieves 15.7389 vs. L2I T=10k at 15.8008, and GAMA T=5k (15.7389) is comparable to L2I T=20k (15.7334). The evidence is right there in the table.
+
+- **"Graph definitions deferred to appendix" and "operator set...making these choices explicit" (Harsh Critic)** — Removed. The appendix, which contains these details, was stripped by the parser. This is a parser artifact, not an author error. The paper explicitly states "full definition...is deferred to the supplementary material" and "details of the operators are presented in supplementary material."
+
+- **"The paper's central claim...is not supported" (Harsh Critic #1)** — Removed as overstatement. The paper's central claim concerns the GAMA architecture for neural neighborhood search. The main comparison is against neural baselines (DACT, L2I), where time IS controlled. The classical solver comparison is ancillary. The core claim about superiority over neural baselines IS supported.
+
+- **"No description of training-set size or split" (Harsh Critic)** — Partially addressed: the paper states 500 unseen test instances for evaluation. Training details are sparse but this is a minor presentation issue, not a methodological flaw that invalidates results.
+
+- **Strength: "Comprehensive baseline comparison"** — Kept. The paper compares against 3 classical solvers, 3 L2C methods (with multiple configurations), and 2 L2I methods (at 3 time budgets each), plus GENIS. This is genuinely comprehensive.
+
+---
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+None beyond the paper's own contributions. The reviews converge on the same assessment: the architectural design (dual-GCN + cross-attention + gated fusion) is the paper's genuine contribution and is well-validated by ablation. The tension between solution quality and runtime is an important but well-known issue in the field; the paper's handling of it is adequate but not groundbreaking.
+
+---
 
 ## Suggestions
-- Replace Table 1 with an iso-time Pareto curve, and report Wilcoxon tests on the main result, not only the ablation.
-- Add LKH3 and HGS rows to Table 3; if they win, report it honestly and reposition GAMA as a competitive neural method rather than as dominating classical solvers.
-- Either rescope the paper to "CVRP" in title/abstract or add at least one additional VRP variant.
-- Analyze the operator-selection policy (entropy, per-phase preference) to back the AOS motivation.
-- Clarify the timing protocol (GPU vs. CPU, batched vs. sequential, hardware).
 
-## Evaluation by Axis
-- **Originality:** moderate — cross-attention + gated fusion over a dual-graph encoder is an incremental but reasonable refinement of GENIS.
-- **Importance:** moderate; CVRP is well-studied and dominated by mature classical solvers.
-- **Support for claims:** weak — central claims of "outperforming" classical solvers and L2I baselines do not hold up under iso-compute or significance scrutiny.
-- **Soundness of experiments:** mixed — clean ablation, but unbalanced compute budgets and inconsistent baseline selection in the generalization table.
-- **Clarity:** acceptable; methodology is readable, though some claims overstate what the tables show.
-- **Value to community:** limited unless the empirical claims are tightened and the scope broadened.
+- Add a column or row to Table 3 reporting the inference time per method on the Uchoa benchmark, and ideally match computational budgets across methods (e.g., report results at equal wall-clock time).
+- Briefly discuss DACT's anomalously poor generalization performance — if it is a configuration issue, state the configuration; if it reflects a real limitation, discuss why GAMA avoids it.
+- Qualify the classical solver comparison in Section 4.3 by noting the runtime asymmetry, even just to say "GAMA achieves marginally better solution quality than HGS/LKH3, though at higher computational cost."
+- Include standard deviations in Table 1 for completeness.
+- Specify the training set size in Section 4.1.
 
-## Score and Decision
+---
 
-Anchor comparison:
-- `SrnTGdJKYG.md` (avg 3.00, Reject) — Neural Deconstruction Search for VRP. Stronger empirical record than GAMA (claims to surpass OR methods across three VRP variants) yet rejected. GAMA is weaker in scope (CVRP only) and matched-compute evidence; comparable or below this anchor.
-- `IA3wm5vwUl.md` (avg 3.67, Reject) — Dynamic encoder dual-channel decoder for routing. Similar incremental architectural novelty on routing; rejected. GAMA sits at a similar level.
-- `km2nHt2YoD.md` (avg 3.50, Reject) — Bilevel min-max CVRP integration. Comparable scope, rejected. GAMA at this level.
-- `Gs8jWk0F01.md` (avg 2.20, Reject) — Dynamic-CVRP DRL with weak experiments. GAMA's experiments are cleaner than this anchor, so GAMA scores higher.
-- `iWCfiDxLIY.md` (avg 3.00, Reject) — GREAT architecture for TSP, rejected. Comparable.
-- `TbTJJNjumY.md` (avg 6.25, Accept) — Boosting NCO for large-scale VRP, with linear-complexity cross-attention and self-improved training; substantively stronger contribution and scale than GAMA. GAMA clearly below this anchor.
-- `L0pMPCmEfN.md` (avg 4.33, Reject), `pTsP30MoBq.md` (avg 4.20, Reject), `7dufGaLYF8.md` (avg 4.00, Reject) — off-topic but anchor the 4-range as papers with mixed weak-empirical patterns.
-- `cUFIil6hEG.md` (avg 5.75, Accept), `oO6FsMyDBt.md` (avg 7.33, Accept), `qT1I15Zodx.md` (avg 4.75, Reject) — off-topic, well above GAMA.
+## Anchor Comparison
 
-GAMA most closely matches the cluster of routing papers around 3.0–3.5 (SrnTGdJKYG, iWCfiDxLIY, km2nHt2YoD): an incremental architectural idea, narrow CVRP scope despite "VRP" framing, gains in the noise band against neural baselines at much larger compute, and an unfavorable comparison to classical solvers.
+Here are the calibration anchors retrieved and how the paper under review compares:
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| RRNCO | `/home/wg25r/review_agent/human_reviews_2026/sKvo9ZZfpe.md` | 5.50 | RRNCO provides a new benchmark + architecture for real-world routing. GAMA has deeper architectural novelty and cleaner ablation but narrower scope (CVRP only). Comparable overall quality; GAMA slightly less broad. |
+| CaR | `/home/wg25r/review_agent/human_reviews_2026/raDFGuQxvD.md` | 6.00 | CaR handles multiple VRP variants with hard constraints and has very comprehensive experiments. GAMA is narrower and has the minor time-reporting issues. CaR is the stronger paper. |
+| FrontierCO | `/home/wg25r/review_agent/human_reviews_2026/BVprkacwFY.md` | 5.33 | Benchmark paper with different contribution type. Both are solid. GAMA's methodological contribution is more focused. Roughly comparable quality. |
+| L2Seg | `/home/wg25r/review_agent/human_reviews_2026/pN261iTKvr.md` | 5.00 | Both are neural improvement methods for VRP. L2Seg has theoretical proofs (FSTA monotonicity) and multi-solver compatibility; GAMA has more novel architecture. Comparable quality. |
+| HADES | `/home/wg25r/review_agent/human_reviews_2026/NLgJcADMtr.md` | 4.00 | Similar neural improvement approach. HADES had marginal gains and concerns about core contribution. GAMA has cleaner ablation with statistically significant improvements. GAMA is stronger. |
+| L2R | `/home/wg25r/review_agent/human_reviews_2026/hAurIMOhOW.md` | 4.00 | Search space reduction for NCO. GAMA has more substantive experiments and clearer architectural novelty. GAMA is stronger. |
+| Recurrent State Encoders | `/home/wg25r/review_agent/human_reviews_2026/5x3qj0fRgK.md` | 3.33 | Incremental encoder contribution. GAMA is substantially stronger in both novelty and empirical validation. |
+| One-Shot TSP | `/home/wg25r/review_agent/human_reviews_2026/VrXOym8iiA.md` | 3.00 | Performance degrades on larger instances, limited scope. GAMA is significantly stronger. |
+| Distance Metric Generalization | `/home/wg25r/review_agent/human_reviews_2026/R6np5nEhJo.md` | 2.50 | Very limited novelty. GAMA is dramatically stronger. |
+
+GAMA sits comfortably above the Reject papers (HADES at 4.0, L2R at 4.0, RSE at 3.33) and around the same level as L2Seg (5.0). It is slightly narrower than RRNCO (5.50) and CaR (6.0) which have broader evaluation scope and fewer unresolved questions.
+
+---
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

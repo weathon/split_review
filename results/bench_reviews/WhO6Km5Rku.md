@@ -1,84 +1,75 @@
+Now I have sufficient calibration. Let me write the final review.
+
 ## Summary
-QubitCache proposes a KV-cache compression framework that retains ~15% of tokens (anchor + recent + attention-scored "critical") classically, encodes the layer/head-averaged attention distribution of the remaining 85% into a 9-qubit amplitude-encoded state, and reconstructs a "soft attention" term using measurement probabilities applied to inverse-distance-interpolated value vectors from preserved tokens. The authors claim 7× memory reduction with 92–97% retained performance and frame the contribution as a quantum-inspired paradigm shift from token selection to relational preservation.
+QubitCache proposes a KV-cache compression method that partitions tokens into preserved (anchor, recent, critical) and non-critical sets, encoding the latter's attention-derived importance scores into a quantum-inspired amplitude representation. During inference, a hybrid attention mechanism combines hard attention over preserved tokens with soft attention over compressed tokens using measurement probabilities and interpolated value vectors. The paper claims 7× memory reduction while retaining 92–97% of baseline performance across five models and six benchmarks, with particular gains on multi-hop reasoning tasks.
 
 ## Strengths
-- The compositional retention scheme (anchor sinks + recent window + attention-scored critical tokens) plus inverse-distance value interpolation across preserved indices is a coherent design, and Table 4 shows that attention-based critical-token selection is the dominant driver of measured F1 (−20.4% when removed), which is a clean empirical finding.
-- The paper does run a broad evaluation: five 4–8B models across seven benchmarks (Table 1) plus a 70B/30B scaling check (Table 2), at a more aggressive 15% retention budget than the typical 50% used by H2O/ScissorHand/StreamingLLM defaults.
+- **Solid empirical evaluation across five models and multiple benchmarks**: Table 1 shows consistent improvement over baselines (H2O, ScissorHand, StreamingLLM, GEAR) on Mistral-7B, Qwen2-7B, Phi-4-mini, DeepSeek-Coder, and Llama-8B, spanning short-context (PG19, PIQA) and long-context tasks (HotpotQA, TriviaQA, GovReport, Contract, SummScreen). The scaling results in Table 2 on Llama-70B and Qwen-30B further validate robustness at larger model sizes.
+
+- **Meaningful gains on multi-hop reasoning tasks**: QubitCache achieves HotpotQA F1 of 0.459 vs. H2O's 0.420 on Mistral-7B and 0.604 vs. 0.487 on Qwen2-7B (Table 1), while using only 15% token retention compared to 50% in token-selection baselines. This demonstrates that the soft-attention mechanism provides tangible benefits for tasks requiring relational reasoning.
+
+- **The soft attention + value interpolation mechanism is a genuine design contribution**: Equations (6–7) define a practical scheme where evicted tokens retain partial influence through interpolated value vectors weighted by importance-derived probabilities, avoiding the catastrophic disconnection of binary eviction. The ablation (Table 4) confirms that removing this mechanism ("No Quantum") drops F1 from 0.491 to 0.472, and that random selection without it falls to 0.334.
+
+- **Ablation validates the importance of attention-based token selection**: Table 4 shows removing critical tokens (selected by accumulated attention scores) causes a 20.4% F1 drop, while removing anchor or recent tokens causes minimal degradation. Random selection with the same retention budget achieves only 68.2% of full QubitCache performance, demonstrating that attention-guided selection is essential.
 
 ## Weaknesses
 
-### Fatal
-- **The "quantum" mechanism is mathematically a no-op.** Eq. 5 encodes amplitudes √α_i with α_i = ā_i/Σā_j, and §3.2.2/Eq. 7 reads out p_j = |⟨j|ψ⟩|² — which by construction equals α_j. So the "measurement" returns exactly the normalized average attention distribution that was just encoded. The entire pipeline is algebraically identical to "store the layer/head-averaged attention probabilities and use them as soft weights." The word "quantum" can be removed without changing a single number. This invalidates the central claim that "preserving relational information through probabilistic quantum states fundamentally outperforms binary token selection" (§5).
-- **The advertised log N memory term is wrong for the deployed system.** The paper explicitly runs as "classical simulation" on a GPU (§3.2.2, last paragraph; §4.1.1). Classical simulation of a 9-qubit amplitude state requires storing 2⁹ = 512 complex amplitudes per segment per layer/head — not log N bytes. Table 3's "O(L·H·0.15S·D + log N)" misrepresents the actual memory footprint by counting a hypothetical physical qubit register, not the simulation's tensor. The abstract's "logarithmic compression beyond classical information-theoretic limits" is also inconsistent with Holevo's bound (n qubits → at most n classical bits extractable).
-- **Own ablation contradicts the central thesis.** Table 4: Full = 0.491, No-Quantum = 0.472 (−3.9% relative), while Random+Quantum (0.335) ≈ Random No-Quantum (0.334). Under random selection the quantum component contributes nothing; under attention-based selection it contributes <4 points. The "preserving relational structure through quantum states" claim therefore lacks empirical support — the gains come from attention-scored selection + IDW interpolation, both classical.
-
 ### Major
-- **Compression-ratio comparison is structurally unfair.** Headline numbers (7× vs 2×, "15–25% improvement on multi-hop reasoning at 3.3× more aggressive compression") compare QubitCache at 15% retention against baselines at ~50%. H2O / ScissorHand / StreamingLLM can be run at 15% retention; this control is absent. Without matched-retention curves, no causal claim about algorithmic superiority can be made. Also, the actual margins in Table 1 (e.g., Mistral HotpotQA 0.459 vs ScissorHand 0.443) are ~3–4%, not the "15–25%" stated in §1.
-- **The "non-critical token V content" is not actually preserved.** Eq. 6 defines Ṽ_j as a distance-weighted interpolation between preserved tokens' V_{left(j)} and V_{right(j)}; the original V_j of non-critical tokens is discarded. So the "soft attention over non-critical tokens" reweights preserved tokens' values by cached attention statistics — it is not preserving non-critical token content, despite the framing.
-- **No ablation isolating IDW value interpolation.** Given the analysis above, Shepard-style interpolation is plausibly the actual driver of the small No-Quantum vs Full gap. The paper attributes the 3.9% to quantum encoding without testing this alternative explanation.
+- **The method encodes per-token global importance, not pairwise attention patterns — the core framing is overstated**. Equation (3) defines the encoded signal as column sums \(a_i^{(l,h)} = \sum_j A_{j,i}^{(l,h)}\), which collapses the full attention matrix into a query-independent marginal distribution per token. Equation (4) further averages across layers and heads. The resulting quantum state encodes only which tokens were globally attended *to*, not which tokens attended to which other tokens. During inference (Equation 7), the soft-attention term uses \(p_j(\psi)\) derived entirely from these precomputed scores with zero dependence on the current query \(Q_t\). The claim that the method "preserves attention patterns" or "encodes relational structures" misrepresents what is actually a token-importance vector. The method is better described as *importance-weighted soft eviction*, not relational structure preservation. This weakens the paper's central narrative and the theoretical claims about rank-\(r\) attention structure preservation.
+
+- **The "quantum-inspired" encoding is functionally equivalent to a classical probability distribution in the current implementation**. The paper states: "the current implementation operates as a classical simulation." In this regime, the amplitude encoding deterministically maps importance weights \(\alpha_i\) to amplitudes \(\sqrt{\alpha_i}\), and the measurement probabilities \(p_j(\psi) = |\langle j|\psi\rangle|^2\) simply recover the normalized \(\alpha_i\). The quantum circuit adds no new information — it is a storage format for a probability vector that could equally be stored as 512 floats. The ablation in Table 4 compares Full QubitCache against "No Quantum" (which drops non-critical tokens entirely), but does not compare against a classical variant that uses the same \(\alpha_i\) weights directly as soft-attention coefficients without the quantum circuit. Consequently, the 3.9% gain attributed to "quantum amplitude encoding" actually measures the benefit of soft attention over hard eviction, which is a classical mechanism. The quantum framing is cosmetic in the current implementation.
 
 ### Minor
-- §2 misstates the Shannon bound: "classical methods remain bounded by H(X) ≥ log₂|X| bits" conflates a lossless coding bound with the lossy regime that all baselines (and QubitCache) operate in.
-- §4.5.2 claims NISQ feasibility (9 qubits, depth 15, 750 ns) but performs no hardware execution; only Qiskit simulation. Arbitrary 512-amplitude state preparation is known to need O(2ⁿ) gates in general (the paper acknowledges this in §2), so a fixed depth-15 circuit will not faithfully realize an arbitrary attention distribution — yet the F1 numbers reported all assume exact amplitudes from simulation.
-- §4.1 evaluates on 2K–8K sequences while §1 motivates 100K-token deployment.
-- Table 2 draws "larger models exhibit increased compression resilience" from N=2.
-- Some Full-KV numbers (e.g., PG19 F1 = 0.124) are unusual; PG19 is typically evaluated by perplexity, and the F1 definition for it is not stated.
+- **Non-standard metric for language modeling**: Table 1 reports PG19 as "F1(↑)" with values around 0.12–0.19, which is inconsistent with the standard perplexity metric used for language modeling evaluation. The paper describes PG19 as "language modeling" in the experimental setup, but an F1 score on this scale is not interpretable as a language-modeling quality measure. While all methods share the same metric (preserving relative comparisons), the absolute claims about "97.6% performance retention" on PG19 cannot be compared against the broader literature.
+
+- **No inference latency or throughput measurements**: The paper reports memory reduction (Table 3, 0.55 GB vs. 3.91 GB) but provides no wall-clock timing. The method introduces per-segment quantum circuit simulation (Qiskit on GPU), value interpolation for all non-critical tokens, and hybrid attention computation. For a paper whose primary claimed contribution is practical deployment efficiency, the absence of tokens-per-second or latency comparisons against baselines is a significant omission.
 
 ### Trivial
-- None substantive.
+- The claim of "logarithmic compression beyond classical information-theoretic limits" in the abstract is imprecise. In the classical simulation, each 512-token segment is stored as a 512-dimensional complex vector (the statevector), which is larger than the original 512 floating-point attention weights. The logarithmic scaling refers only to the qubit count in a hypothetical quantum hardware deployment.
 
 ## Nice-to-Haves
-- A run that replaces the entire quantum block with the literal cached normalized attention distribution α (no encoding/measurement) — by the algebra this should produce identical F1, and demonstrating that would honestly position the contribution.
-- Matched-retention comparisons (H2O / ScissorHand / GEAR at 15%).
-- An IDW-only ablation isolating the interpolation contribution.
+- A classical soft-attention baseline using the same accumulated attention weights \(\alpha_i\) directly (without the quantum circuit) would cleanly isolate the contribution of the quantum encoding from the soft-attention mechanism. This is the single most important missing experiment.
+- Needle-in-a-haystack experiments would help quantify how the query-independent importance distribution performs on tasks requiring dynamic attention shifts to locally important but globally unimportant tokens — a scenario where the method's design would predictably struggle.
+- Reporting standard perplexity on PG19 alongside the F1 scores would make the language modeling claims interpretable against the literature.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- *Harsh critic's "duplicated paragraph in §4.3"* — likely a parser artifact, not an author error.
-- *Strength Finder's "theoretical guarantee of graceful degradation (rank-r bounded error)"* — the proof is deferred to an appendix the parser strips, so I cannot verify it; given that the empirical claim it allegedly underwrites (relational structure preservation) is contradicted by the No-Quantum ablation, I am not counting this as a verified strength.
-- *Strength Finder's "scalability to large models" (Llama-70B 96.9%)* — kept context but not a standalone strength because Table 2 has N=2 and no variance, and the comparison still suffers the matched-retention problem.
-- *Strength Finder's "efficient integration with autoregressive generation, O(log N) amortized update"* — the O(log N) figure is stated, not measured, and inherits the same classical-simulation memory accounting issue as the headline complexity.
-- *Strength Finder's "novel paradigm shift… strong empirical validation"* — fails verification against the Fatal weaknesses above (math equivalence + ablation).
+These points are flagged to be removed, treat them with caution.
+
+- **Harsh Critic claim that the PG19 F1 metric makes results "invalid" or "uninterpretable"**: While the metric is non-standard, all methods are evaluated identically, so relative comparisons remain valid. The claim of "invalidity" overstates the problem. Retained as a minor weakness about interpretability, not validity.
+
+- **Harsh Critic claim that "the entire quantum-circuit framing appears operationally vacuous" as a fatal error**: The quantum framing is indeed largely cosmetic in the classical simulation, but (a) the paper is transparent about this, stating it operates as classical simulation, and (b) the soft-attention mechanism it motivates is a real contribution. Downgraded from fatal to major (overclaim on motivation) and minor (missing ablation).
+
+- **Harsh Critic criticism about missing related works (Lin et al. Sparse Transformer)**: Per instructions, I do not flag missing related works as I cannot independently verify them.
+
+- **Strength Finder claim of "rigorous mathematical formulation" with "bounded reconstruction error guarantees"**: The claimed proof of rank-\(r\) preservation with bounded error is not presented in the main text (the paper's appendix was stripped by the parser). This strength is therefore unverifiable from the provided text and has been removed.
+
+- **Strength Finder's claim that the method "preserves relational structure" is contradicted by the verified major weakness**: The paper encodes per-token global importance, not pairwise relational structure. This strength conflicts with a verified weakness and is removed.
+
+- **Harsh Critic claim that the method "does not preserve the relational attention structure it claims to encode, invalidating the central motivation"**: While the paper overstates what it preserves, the method does preserve *some* relational information (which tokens receive high global attention). The method still has value as a soft-eviction scheme. This has been moderated to a major weakness about overclaiming rather than a fatal error invalidating all results.
 
 ## Novel Insights
-None beyond the paper's own contributions. The decomposition in Table 4 incidentally provides clean evidence that attention-score-based selection alone explains nearly all of the method's headroom over random retention — a useful negative result about the quantum framing, but not what the paper claims.
+The paper correctly identifies that binary token eviction discards information that could be partially recovered through soft-attention mechanisms, and demonstrates empirically that even a query-independent importance distribution provides meaningful gains over hard eviction on multi-hop reasoning tasks. The value interpolation scheme (Equation 6) using inverse-distance weighting between preserved neighbors is a practical heuristic that could benefit other KV-cache compression methods. However, the quantum formalism does not add algorithmic novelty beyond what a classical probability encoding would provide; the genuine insight is the soft-eviction paradigm, not the storage format.
 
 ## Suggestions
-- Drop the quantum framing. The contribution that survives — attention-score-selected retention at an aggressive 15% budget plus inverse-distance value interpolation — can be evaluated honestly as a classical method.
-- Run all baselines at matched 15% retention; this is the single most important missing experiment.
-- Add a "store and reuse normalized attention distribution as a soft weight" baseline to demonstrate (or refute) that the quantum measurement step is computationally identical.
-- Report actual GPU memory for the simulated state (512 complex amplitudes per segment per layer/head), and update Table 3's complexity accordingly.
-- Expand to 32K–100K context to match the motivation.
-
-## Axes
-- **Originality:** Low. Token-partitioning is H2O + StreamingLLM + ScissorHand-style attention flow; quantum framing is rhetorical because measurement returns the encoded distribution exactly.
-- **Importance:** The underlying problem (KV-cache compression) is important; this paper's framing does not advance it.
-- **Soundness of claims:** Central claims are not supported. Compression complexity is misreported for the deployed (classical) system; comparison ratios are unmatched; ablation contradicts the "quantum matters" thesis.
-- **Soundness of experiments:** Single-run F1 with no variance, mismatched retention budgets, short context relative to motivation, no hardware execution despite NISQ-feasibility claims.
-- **Clarity:** Reasonably clear, but uses physics vocabulary in ways that obscure the underlying algebra.
-- **Value to community:** Limited as written; the IDW-on-attention-selected-tokens recipe could be a modest contribution if reframed and re-evaluated.
+- Reframe the paper's contribution honestly: the method is a *soft-eviction KV-cache compression* scheme using attention-derived token importance and value interpolation. The quantum amplitude encoding is an alternative storage format, not a fundamentally new compression paradigm. This reframing would align the paper's claims with what it actually demonstrates.
+- Add a classical soft-attention baseline that uses the identical \(\alpha_i\) weights without the quantum circuit. This is the critical missing experiment that would show whether amplitude encoding provides any benefit beyond soft attention.
+- Report PG19 perplexity (not just F1) for all methods to allow comparison with the broader language modeling literature.
+- Report end-to-end inference latency/throughput for all methods on identical hardware, including the Qiskit simulation overhead.
 
 ## Score and Decision
 
-Anchor comparisons (all from the calibration batch):
-- `eZAlb8fX5y.md` KVTQ (avg 4.40, Reject) — KV-cache ternary quantization, classical, well-scoped; weaker than typical but real method. QubitCache is below this because its central mechanism is mathematically vacuous.
-- `4QWPCTLq20.md` IntelLLM (avg 3.00, Reject) — KV cache "little hints", judged shallow / unconvincing. Comparable in severity to QubitCache; QubitCache is somewhat worse due to the math-trivial core.
-- `xHPVGmLXjd.md` QJL (avg 3.50, Reject) — KV quantization with JL transform; technically real method but weakly motivated. Stronger than QubitCache in soundness.
-- `CRQ8JuQDEd.md` "Don't Discard…" (avg 5.00, Reject) — KV compression, sound but unexciting. Clearly above QubitCache.
-- `b27FJxtFeY.md` Quantum AdaBoost (avg 4.00, Reject) — actual quantum theory paper; sound but limited. Above QubitCache.
-- `erowpbZcPi.md` Tilted Losses in QNN (avg 3.67, Reject) — limited QML work but technically valid; above QubitCache.
-- `TgTxJALwDz.md` Language Model for Noisy Quantum Comm (avg 2.33, Reject) — weak quantum+ML mashup; comparable severity to QubitCache.
-- `waf6HreC53.md` Quantum Architecture Search (avg 3.50, Reject) — niche but real method; above QubitCache.
-- `8sglLco8Ti.md` ChunkKV (avg 5.25, Reject) — solid KV compression idea; well above.
-- `KscheKSYrh.md` FreqKV (avg 5.80, Reject) — sound FFT-based method; well above.
-- `jZVNmDiU86.md` PyramidKV (avg 5.60, Reject) — sound pyramidal cache; well above.
-- `OfjIlbelrT.md` FlexPrefill (avg 8.00, Accept) — strong, well-validated long-context inference work; far above.
-- `NG7sS51zVF.md` StreamingLLM (avg 7.50, Accept) — landmark attention-sink work; far above.
-- `osoWxY8q2E.md` ReLU Strikes Back (avg 7.33, Accept) — strong empirical sparsity paper; far above.
-- `uWUovmBRUq.md` OOD Semantic vs Covariate (avg 4.00, Reject) — disjoint topic; above QubitCache in soundness.
-- `OXIIFZqiiN.md` IGCP "image-guided code patch" (avg 1.50, Reject) — heavily padded with hollow math; QubitCache is somewhat above this, since the IDW + attention-scored retention portion is a real (if undersold-by-its-own-framing) classical method that produces real numbers.
+**Anchor comparison:**
 
-Positioning: QubitCache has a Fatal-tier problem — the central "quantum" mechanism is mathematically identical to caching a classical attention distribution, and the compression accounting double-counts a quantity that the actual simulated system does not realize. It sits below IntelLLM (3.0) and the Noisy Quantum Comm paper (2.33), and clearly above IGCP (1.5).
+| Anchor | Avg Score | Decision | Comparison to QubitCache |
+|---|---|---|---|
+| VQKV (YyxvRDh4d4) | 2.50 | Reject | QubitCache has much broader evaluation (5 models vs 2, 6+ benchmarks vs 3), a more novel mechanism (soft attention vs standard VQ), and stronger empirical gains. Clearly superior. |
+| Joint Encoding (M9SgtgvF7l) | 3.00 | Reject | QubitCache has stronger empirical results and a more clearly articulated mechanism. Superior. |
+| CompressKV (Eed6XsFNJ5) | 3.50 | Reject | QubitCache avoids the data-leakage concerns of CompressKV and has broader model coverage. Superior. |
+| Critical KV Cache (cZ74yWoKYr) | 5.00 | Reject | QubitCache has comparable theoretical ambition but its central claim (relational preservation) is overstated; Critical KV had a more honest relationship between theory and practice. QubitCache's empirical breadth is stronger, but the overclaim is significant. Comparable overall. |
+| ReST-KV (PhEHuo7oMm) | 4.80 | Accept (Poster) | Both have principled motivation and strong empirical results; ReST-KV's reconstruction-based approach is more honestly presented, while QubitCache overstates its quantum contribution. QubitCache's multi-hop gains are more pronounced. Slightly weaker due to framing issues. |
+| KVTC (aNVKROYpLB) | 5.50 | Accept (Poster) | KVTC is more honest about its contribution (classical transform coding), reports latency, and has comprehensive evaluation. QubitCache's quantum framing inflates the perceived novelty. KVTC is clearly stronger. |
 
-MY FINAL SCORE: <pineapple>2.5</pineapple>
+QubitCache sits between the rejected Critical KV Cache (5.00) and the accepted ReST-KV (4.80). The overclaim on the central motivation (relational attention pattern preservation) and the cosmetic quantum framing weigh against acceptance, but the empirical results are genuinely strong and the soft-eviction mechanism is a real contribution. A score of 4.5 reflects a paper with real value that requires significant reframing and additional experiments before acceptance.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

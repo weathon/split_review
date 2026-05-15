@@ -1,82 +1,99 @@
+Now I have all the information needed. Let me compose the final review.
+
+---
+
 ## Summary
-The paper proposes a "noise-to-process" (N2P) paradigm for single-trajectory stochastic-process modeling: a shared i.i.d. base-noise field is pushed through one learnable measurable generator to produce an entire trajectory in one pass. It instantiates the paradigm with DBPT — a pointwise MLP encoder feeding a multi-scale deconvolutional decoder — trained with masked MSE on observed indices. Experiments cover synthetic GP/Markov data, finance time series, image completion, and Bayesian optimization.
+
+This paper proposes a Noise-to-Process (N2P) paradigm for single-trajectory stochastic process modeling: a shared base-noise process is pushed through a single learnable generator to produce an entire trajectory in one forward pass, making projective consistency intrinsic by construction. The instantiation, Deconvolution-Based Process Transformation (DBPT), uses a deconvolutional decoder to capture inter-temporal dependencies from a single observed trajectory. The method is evaluated on synthetic data, financial time series, image completion, and black-box optimization.
 
 ## Strengths
-- The N2P framing (single shared-noise + single generator producing a joint trajectory in one pass, evaluated at irregular indices) is cleanly stated in Definition 1 and §2.1, and yields an index-agnostic parameterization decoupled from grid size.
-- Empirically the deconvolutional decoder is effective on image completion: DBPT attains PSNR 21.65/24.04 and SSIM 0.94/0.90 on MNIST/CIFAR (Table 2), substantially above all single-trajectory baselines reported.
-- The synthetic visualization (Fig. 2) is a useful illustration that prior-driven baselines (GP, Markov) degrade under prior mismatch, while DBPT behaves reasonably on both regimes from only two observation points.
+
+- **Relevant problem framing.** Single-trajectory stochastic process modeling without strong priors is genuinely underexplored. The paper correctly identifies the tension between prior-driven methods (data-efficient but inflexible) and data-driven meta-learning approaches (flexible but require multi-trajectory data), and proposes a clean middle ground.
+
+- **Convincing synthetic demonstration of flexibility.** Figure 2 shows the same DBPT model adapting to both a GP-generated and a Markov-generated trajectory under identical training, while prior-driven methods fail under mismatch (GP on Markov data; Markov on GP data) and CNP exhibits poorly calibrated extrapolation. This directly supports the paper's central claim of flexible, weak-prior modeling.
+
+- **Multi-domain empirical evaluation.** The paper tests DBPT across four distinct settings (synthetic, finance, image completion, black-box optimization) with seven baselines spanning prior-driven, data-driven, and hybrid methods. The scope is broader than typical for a methods paper in this area.
+
+- **Resolution ablation validates architectural choices.** Section 4.5 (Figure 5) demonstrates that output-grid resolution meaningfully affects smoothness and uncertainty calibration — higher resolution introduces excessive high-frequency noise while too-low resolution loses fidelity. This provides architectural insight beyond simple performance reporting.
 
 ## Weaknesses
 
 ### Fatal
-None — the contribution is overclaimed but not fabricated.
+
+None.
 
 ### Major
-- **Calibration claims are not supported by the training objective or the reported metrics.** The loss is purely masked MSE over observed indices (§2.3.2): no likelihood, no proper scoring rule, no KL, no coverage term. MSE constrains only the conditional mean at observed points; any variance the resampled $Z$ induces at observed *or* unobserved indices is a side effect of architecture/optimization, not of the objective. Yet "calibrated/flexible uncertainty quantification" is a headline contribution (Abstract; Contributions list; §2.3; §4.3). The paper reports no calibration diagnostic on synthetic data where the ground-truth law is known — no ECE, CRPS, coverage at nominal levels, reliability plot, or sample-diversity metric. NLL appears only on the finance tables (Table 1), where DBPT loses to WGP on BIA NLL (647.92 vs. 602.42) and the average rank is 2.50 vs. WGP's 1.75. This is the central claim and it is not pinned down by either the loss or the metrics.
-- **The "projective consistency by design" novelty is essentially functoriality of pushforwards.** Proposition 3 (and the sketch in §2.1) is literally: if $\mu_\theta = \nu\circ G_\theta^{-1}$ is one joint law, then projecting to a smaller index set after projecting to a larger one equals projecting directly. This holds for *any* model that emits a joint trajectory in one shot (joint MLPs, transformers, RNNs producing the whole sequence, joint diffusion on paths, GPs themselves). The paper repeatedly elevates this to a "by-design" structural advantage that "internalizes consistency" (Remark 4; Contributions; Conclusion) — but the property does not distinguish DBPT from standard joint generative models, contradicting Related Work's framing that NPs etc. lack it (NPs' joint formulations are consistent in the same sense). The theoretical "paradigm" claim is therefore weaker than presented.
-- **The "weak-prior" framing is inconsistent with the architecture.** The deconvolutional decoder (§2.3.1) hard-codes translation equivariance, locality, and a multi-scale hierarchy — strong, smoothness/stationarity-flavored inductive biases. Calling kernel-based GPs "strong prior" while branding a stacked deconv decoder "weak prior" is a rhetorical, not substantive, distinction. The good synthetic and image performance is plausibly *because* deconv priors suit those data, not because the prior is weak.
-- **Image-completion evaluation measures the wrong thing for the paper's stated contribution.** PSNR/SSIM (Table 2) reward sharp point reconstructions, not calibrated uncertainty. The paper itself attributes CNP's CIFAR sharpness to overfitting/under-dispersion (§4.3) — yet then reports DBPT's even larger margin (24.04 vs. 18.56) as evidence of "reliable uncertainty quantification" without any uncertainty metric (NLL, coverage, sample diversity). The same explanation the paper rejects for CNP cannot be ruled out for DBPT here.
+
+- **NLL computation for DBPT is not described in the main text, making the primary quantitative comparison (Table 1) difficult to assess.** DBPT is purely a sample generator and does not produce an analytic likelihood. The paper reports NLL alongside GP-based baselines that provide closed-form predictive likelihoods, but never explains in the main body how NLL is derived from DBPT's Monte Carlo samples (e.g., via Gaussian fit, KDE, or variational bound). The paper defers to Appendix F, which may contain the details, but a metric that is central to the paper's main quantitative claims should be described and justified in the main text. This makes the finance results in Table 1 — where DBPT's NLL performance is used to argue for better uncertainty quantification — uninterpretable from the main paper alone.
+
+- **Image completion evaluates point-prediction quality only, not uncertainty quantification.** Section 4.3 reports PSNR and SSIM, which measure reconstruction fidelity of a single completion, not the quality of the predictive distribution. The paper's core claim is about calibrated uncertainty, yet the image experiments provide no metric for this (e.g., CRPS, calibration curves, or negative log-likelihood of held-out pixels under a predictive distribution). The qualitative results (Figure 3) show single completions, making the uncertainty claim unsupported in this domain.
 
 ### Minor
-- BO results (§4.4, Fig. 4) are averaged curves with no error bars or stated seed counts on only two test functions and 30 evaluations; "DBPT can model the landscape distribution… more accurately" is asserted without calibration evidence.
-- Ablations (§4.5) only vary output grid resolution. The paper attributes flexibility to the decoder, yet does not ablate the central design choices (deconv depth/kernel size; deconv vs. dilated conv vs. MLP-on-grid vs. transformer; i.i.d. noise vs. structured base noise).
-- §1's framing that data-driven methods "require multi-trajectory supervision" elides the existence of various single-trajectory deep methods; the paper's own use of CNP/SDE-Matching via episodic segmentation already shows this is not a hard requirement.
-- The finance narrative (§4.2) "DBPT trades MSE for better NLL" is at odds with the table: WGP is simultaneously better than DBPT on NLL and MSE for BIA (602.42/4.12 vs 647.92/5.98), so the trade-off framing only partially holds.
+
+- **The theoretical "projective consistency" contribution is overstated.** Proposition 3 shows that when a joint distribution is defined as the pushforward of a shared noise measure through a single generator, finite-dimensional marginals are automatically consistent. This is a straightforward consequence of the construction — it follows from the functoriality of pushforwards and does not involve any learning or modeling assumption. The paper presents this as a novel theoretical insight distinguishing N2P from prior work, but the same property holds for any generative model that maps a shared noise vector to a joint output (e.g., GANs on sequence data, flow-based sequence models). The real contribution is architectural (the deconvolution-based design for learning from a single trajectory), not the consistency proof.
+
+- **Image completion uses a single image per dataset, making it an inpainting task rather than a test of process-level generalization.** While consistent with the single-trajectory premise, training and evaluating on masked versions of the same image primarily tests the model's ability to interpolate within a single instance, not its ability to learn a stochastic process that generalizes across index sets. This limits what can be concluded about representational flexibility.
+
+- **Black-box optimization implementation details are sparse.** Section 4.4 states that expected improvement is used as the acquisition function but does not describe how EI is computed from DBPT's samples (e.g., Monte Carlo estimation with how many samples, or fitting a parametric distribution to samples). Sensitivity to the sampling budget is not examined. The paper refers to Appendix I for details.
+
+- **The related work discussion of conditional generative models is imprecise.** The paper claims that conditional flows and diffusion models "do not capture dependencies across $s_1, \dots, s_n$ and thus do not induce a process-level joint distribution" (Section 3). This mischaracterizes several methods — e.g., conditional normalizing flows for time series and diffusion-based video prediction models do model joint dependencies across time steps. The distinction between N2P and these models is better framed in terms of the single-trajectory, index-agnostic design rather than denying that competitors model joint structure.
 
 ### Trivial
-None retained.
+
+- None that are substantive.
 
 ## Nice-to-Haves
-- Replace masked MSE with a proper scoring rule (Gaussian NLL with predicted variance, energy/CRPS, or score-matching) and compare; if calibration is unchanged, that is itself a finding.
-- Report coverage/ECE/CRPS on the synthetic GP and Markov tasks where the predictive law is known.
-- Show how $\mathrm{Var}_Z[G_\theta(Z)(t)]$ evolves during training to address concerns about variance collapse under MSE.
-- A non-stationary synthetic task where translation equivariance is violated to test the "weak prior" claim.
-- Promote the Appendix-D approximation/identifiability content into the main text as the theoretical contribution, since Proposition 3 alone does not differentiate the method.
+
+- Replacing or supplementing NLL with a sample-compatible metric such as the Continuous Ranked Probability Score (CRPS) or energy distance would avoid the ambiguity around likelihood computation entirely and align better with DBPT's sample-based nature.
+- A decoder architecture ablation (e.g., MLP decoder vs. deconvolutional decoder) would strengthen the claim that the specific deconvolution design is essential for capturing long-range dependencies.
+- Showing multiple posterior samples for image completion (rather than single completions) would visually demonstrate uncertainty calibration.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution.*
-- Harsh critic's call for "fair single-trajectory deep baselines" (deep image prior, INRs, single-trajectory score models, neural spline GPs, Student-t processes): this drifts into a missing-related-works-style critique; the chosen baselines (GP, WGP, Markov, DKL, SDE Matching, CNP) span both prior-driven and data-driven families and are reasonable for the paper's scope. Adding more baselines is nice-to-have, not a fatal omission.
-- "SDE Matching and CNP forced into single-trajectory mode is unfair": this asymmetry is acknowledged in §4 and works *against* the baselines in DBPT's favor — under the hard rules, an asymmetry that disadvantages baselines is not a fatal flaw against the author.
-- Strength Finder's "ablation analysis provides practical design insight": the ablation is narrow (only grid resolution) and does not justify the broader architectural claims — kept only as a minor positive, not a headline strength.
-- Strength Finder's "theoretical compatibility with Kolmogorov extension": this is a one-line corollary of Proposition 3 and adds little independent content; redundant with the (already-weak) consistency claim.
-- Strength Finder's "simplicity of training and loss design": this strength conflicts with the verified Major weakness that masked MSE cannot underwrite the calibration claim — the weakness wins.
+
+These points are flagged to be removed; treat them with caution.
+
+1. **"NLL is nowhere described" as a fatal flaw.** The paper references Appendix F for experimental details, and the appendix (stripped by the parser) may contain the NLL computation method. However, the lack of description in the main text remains a clarity issue, retained as a Major weakness above.
+
+2. **"CNP is not designed for 2D spatial structure without appropriate equivariances."** CNP is permutation-invariant and can operate on arbitrary index sets including 2D coordinates. While ConvCNP would be a stronger spatial baseline, the claim that CNP is inappropriate for 2D data is incorrect — it is simply less spatially aware. Removed as factually wrong.
+
+3. **"The image completion task does not constitute a valid test" as a fatal criticism.** The single-image setup is consistent with the paper's single-trajectory framing. The real issue is the lack of uncertainty metrics, not the single-instance nature per se. Retained as a Minor weakness about generalization scope.
+
+4. **"The theoretical contribution is trivial" as a fatal criticism.** While the projective consistency proof is indeed definitional, the paper's contribution is primarily architectural and empirical. The theoretical framing is overclaimed but does not invalidate the method. Retained as a Minor weakness.
+
+5. **"SDE Matching performs poorly" as a criticism of the paper.** The harsh critic's mention of this is a statement about baseline performance, not a weakness of the paper. Removed.
+
+6. **Strengths about "theoretical completeness" and "compatibility with Kolmogorov extension."** The Kolmogorov extension compatibility (Section 2.2) follows trivially from having consistent finite-dimensional distributions and adds no practical constraint or guidance. This is not a meaningful strength. Removed.
+
+7. **Strength Finder's claim that "the design decouples parameter count from index-set size."** This is true of many architectures (convolutional decoders, implicit representations) and is not a distinctive contribution of DBPT. Removed as generic.
 
 ## Novel Insights
-None beyond the paper's own contributions. The conceptual framing of "shared noise + single generator → joint trajectory" is clean to state, but as a structural property it is shared with most one-shot joint generative models, so the review does not extract any genuinely new theoretical insight.
+
+None beyond the paper's own contributions. The paper's core observation — that a single generator mapping shared noise to a full trajectory can serve as a learnable stochastic process for the single-trajectory regime — is a coherent design principle, though its theoretical novelty is limited. The review process did not surface insights beyond what the paper itself describes.
 
 ## Suggestions
-- Re-cast the theoretical contribution: drop "projective consistency by design" as the differentiator (it is automatic for any joint generator) and elevate the approximation/identifiability results deferred to Appendix D, with stress tests.
-- Train with a proper scoring rule and report ECE/CRPS/coverage on synthetic tasks; this is the single most decisive change for the paper's calibration claim.
-- For image completion, report sample-diversity / posterior-sample log-likelihood metrics in addition to PSNR/SSIM, since PSNR/SSIM cannot adjudicate uncertainty quality.
-- Add deconv-vs-alternative-architecture ablations with the same noise input to substantiate "weak prior."
-- Soften or replace the "weak prior" / "by-design consistency" rhetoric in Abstract and §1 with claims actually supported by the experiments.
 
-## Evaluation by Axis
-- **Originality**: Modest. The N2P viewpoint is a clean re-framing, but its claimed differentiators (projective consistency, weak prior) are not distinguishing.
-- **Importance of question**: Reasonable — single-trajectory stochastic-process modeling is a real regime.
-- **Claim support**: The flagship "calibrated uncertainty" claim is not supported by the loss or by reported metrics; the "by-design consistency" claim is overstated.
-- **Soundness of experiments**: Mixed. Image-completion metrics don't match the claimed contribution; finance NLL contradicts the headline narrative; BO lacks error bars; ablation is thin.
-- **Clarity**: Reasonable; the method section is readable.
-- **Value to community**: Limited as currently framed; the empirical recipe (i.i.d. noise → deconv decoder → masked MSE) is a useful baseline if reframed honestly.
+- Clarify in the main text how NLL is computed for DBPT (e.g., "we fit a Gaussian to 100 Monte Carlo samples and evaluate the NLL under that Gaussian"). If the appendix already describes this, relocate the key sentence to Section 4.2.
+- For image completion, report a distribution-aware metric (e.g., NLL or CRPS on held-out pixels) to support uncertainty claims, or show multiple sampled completions with variance maps.
+- Add a brief discussion acknowledging that the projective consistency result is a structural property of the pushforward construction rather than a non-trivial guarantee, and shift emphasis to the architectural and empirical contributions.
+- Describe how EI is computed from DBPT samples in the BBO experiment, and ideally report sensitivity to the number of Monte Carlo samples used.
 
 ## Score and Decision
 
-Anchor comparison (all retrieved anchors):
-- `UH4HinPK9d.md` (ODE Forecasting, avg 3.5, Reject): comparable in pattern — theory-flavored framing of a relatively standard mechanism applied to trajectories; this paper is closer to it but has more empirical breadth.
-- `H8hO3T3DYe.md` (Partially Observed Trajectory Inference, avg 5.67, Accept): more theoretically rigorous SDE/OT contribution; the paper under review is below this in theoretical depth.
-- `vfHISoWo2m.md` (Meta-Learning Latent Force Models, avg 4.0, Reject): similar in being a deep-kernel/structured method with limited evaluation depth — close to this paper.
-- `qKf0tZtF6B.md` (Helmholtz-Hodge GP, avg 5.8, mixed): better-motivated structural prior, stronger theory grounding — above this paper.
-- `rZzcaduYU1.md` (Score-Based NPs, avg 3.0, Reject): closest topical analog — also claims consistency benefits, also pushed back on; the paper under review has clearer empirics but similar overclaim issues.
-- `abOksepKfS.md` (Geometric Neural Process Fields, avg 5.33, Reject): more principled geometric extension of diffusion on processes — above this paper.
-- `r125wFo0L3.md` (Large Trajectory Models, avg 5.0, Reject): orthogonal topic.
-- `84fOBZlOiV.md` (Quasilinear UQ, avg 4.0, Reject): UQ paper with limited theoretical grounding — similar tier.
-- `cF6OoaYcRa.md` (Calibrated Physics-Informed UQ, avg 4.5, Reject): does actual calibration with conformal prediction — above this paper on the calibration axis.
-- `p79lnC36CO.md` (PIT Histogram Diagnosis, avg 2.0, Reject): below this paper.
-- `Qfqb8ueIdy.md` (Unified Consistency Generative Modeling, avg 5.0, Reject): comparable framing-of-paradigm paper, more theoretical depth — slightly above this paper.
-- `GgEAdqYPNA.md` (Projection Head, avg 5.5, Accept): off-topic.
-- `Pd7IOswRUZ.md` (GenVP, avg 5.75, Accept): off-topic.
+**Anchor comparisons:**
 
-The paper sits between `rZzcaduYU1` (3.0) and `vfHISoWo2m`/`UH4HinPK9d` (3.5–4.0): a method paper with reasonable empirical breadth on image completion but a central calibration claim unsupported by both objective and metrics, plus an overclaimed theoretical "by-design consistency" that is not differentiating. Better than the PIT-histogram paper (2.0) and slightly stronger than ScoreNP (3.0) due to broader experiments; weaker than the 5+ accepts/borderlines that have either stronger theory or actual calibration evaluation.
+| Path | Avg Score | Decision | Comparison |
+|------|-----------|----------|------------|
+| N4ajXTx30Y | 3.00 | Reject | Velocity-prior HJB flows — incremental contribution, missing baselines, unclear setups. DBPT has broader experiments and a more novel problem framing. |
+| ECc2td0LCZ | 3.00 | Reject | MAGI-X — missing critical baselines, unfair experimental setup (5x iterations over baselines), convergence instability. DBPT's issues are less severe. |
+| jDQyU5j8pn | 3.00 | Reject | Meta-learning contextual time series — poor presentation, trivial method, limited experiments. DBPT is substantially better presented with broader scope. |
+| WCU1bSJmBa | 4.00 | Reject | Graph Transformer NP — incremental architectural change, limited novelty, missing ablations. DBPT has broader empirical scope and clearer motivation. |
+| FNf9IV1P2L | 5.00 | Accept | Edit-based flow matching — novel formulation, solid experiments, clear metrics. DBPT lacks comparable metric clarity and theoretical depth. |
+| S1JJyWg1VG | 5.00 | Accept | Data-to-energy stochastic dynamics — novel bridge formulation with clear theory. DBPT's theoretical contribution is weaker and its metrics less well-justified. |
+| uVKtkLB6BZ | 5.50 | Reject | Learned 1D noise processes — novel formulation, limited but sound experiments. DBPT experiments are broader but its theoretical framing is weaker and metric clarity is poorer. |
+| RJHHbXhokV | 5.50 | Accept | Generative modeling from corruptions — novel iterative framework with theoretical grounding. DBPT has less theoretical novelty and worse metric justification. |
+| 3a2QuEzveq | 6.50 | Accept | Robust generalized Schrödinger bridge — strong theoretical and empirical contribution. DBPT falls well short of this standard. |
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+DBPT addresses a real and relevant problem with a reasonable architectural solution and diverse experiments. However, the key quantitative claims rely on a metric (NLL) whose computation for a sample-based model is not described in the main text, and the uncertainty quantification claims are unsupported by the image completion evaluation. The theoretical contribution is significantly overclaimed. These issues place the paper below the typical acceptance threshold but above the worst rejects — it has genuine engineering merit that could be strengthened with better metric justification and modest experimental additions.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,80 +1,95 @@
+Now I have a solid understanding of the paper, its strengths and weaknesses, and the calibration landscape. Let me write the consolidated review.
+
 ## Summary
-CLIP-Map proposes a "mapping-based" CLIP compression pipeline in which a large pretrained CLIP is compressed by learning two-sided Kronecker-factored projection matrices F^in and F^out (initialized as partial identities) plus a learnable linear-combination matrix L_depth over layers, followed by a KD retraining stage. Across MSCOCO/Flickr30K retrieval and ImageNet-1K and 20 downstream classification tasks, it reports gains over TinyCLIP at 1% and 10% compression ratios and parity at 50%, with fewer seen samples.
+
+This paper proposes CLIP-Map, a compression framework for CLIP that replaces hard parameter pruning (select-based) with learnable transformation matrices (mapping-based). The method uses Kronecker-factorized matrices to map large weight blocks to smaller ones (width compression) and a learnable linear combination operator for depth compression. A Diagonal Inheritance Initialization stabilizes the otherwise difficult optimization of these mapping matrices. The resulting compressed model is then fine-tuned via knowledge distillation. Experiments on zero-shot retrieval (MSCOCO, Flickr30K) and 21 classification datasets show consistent improvements over TinyCLIP at extreme compression ratios (1% and 10% of original parameters), with competitive results at 50% compression.
 
 ## Strengths
-- At aggressive compression (1% and 10%), the method shows large, concrete margins over TinyCLIP — e.g., MSCOCO TR@1 15.8 vs 10.5 / 12.5 (1%), 38.4 vs 33.8 / 36.2 (10%), and IN-1K 19.0 vs 16.6 (Tables 1, 3).
-- The Diagonal Inheritance Initialization is empirically well-motivated: Random/Kaiming/Xavier collapse to ≤5% IN-1K while Diag gives 28.9% after mapping (Table 5), giving the method a stable starting point and supporting the variance analysis in Eq. 5–8.
-- Reported compute efficiency is a real advantage: CLIP-Map base reaches 63.7% IN-1K with 0.30B seen samples vs TinyCLIP-39M's 63.5% at 0.75B (Table 3).
-- The pipeline is architecture-agnostic in practice: results are shown across OpenCLIP, Meta-CLIP teachers and ViT/ResNet-50 students.
+
+- **Genuinely novel compression paradigm.** The paper introduces a mapping-based approach to model compression that is conceptually distinct from the standard select-and-retrain pipeline. Rather than identifying and discarding "unimportant" weights, the Kronecker-factorized mapping learns a continuous transformation that recombines information across all dimensions. This is a principled departure from prior work, and the idea could generalize beyond CLIP.
+
+- **Diagonal Inheritance Initialization is a practical and well-motivated contribution.** The paper identifies why naive initialization of Kronecker factors fails (variance multiplication, Eq. 5–8) and provides a clean solution: initializing diagonal entries to 1 and off-diagonals to 0. Table 5 shows this is not a minor tweak — standard initializations yield 0.1–4.9% ImageNet-1K accuracy, while the diagonal init achieves 28.9% *before retraining*. This ablation convincingly demonstrates the necessity of the design.
+
+- **Strong results at extreme compression ratios (1% and 10%).** At 1% of original parameters, CLIP-Map_base achieves MSCOCO TR@1 of 15.8 vs TinyCLIP progressive's 12.5, and Flickr30K TR@1 of 30.3 vs 24.5 (Table 1). These are substantial, consistent gains across all recall metrics and across both retrieval benchmarks. At 10% compression, the advantages are similarly consistent (e.g., MSCOCO TR@1 38.4 vs 36.2).
+
+- **Competitive results with fewer seen samples.** Table 3 shows CLIP-Map_tiny reaches 19.0% ImageNet-1K with 0.45B seen samples vs TinyCLIP-8M/16's 16.6% with 1.125B samples. This supports the claim of training efficiency.
+
+- **Broad evaluation across 21 downstream classification tasks (Table 2) and two retrieval benchmarks**, providing reasonable evidence of general zero-shot capability.
 
 ## Weaknesses
 
 ### Fatal
-None — the empirical contribution is real, even if framed weakly.
+None.
 
 ### Major
-- **The "mapping vs. select" dichotomy is largely rhetorical.** Eq. 9 initializes F^in, F^out as rectangular partial-identity matrices, so the initial compressed weight F^out · W · F^in^T is exactly the top-left D₂×D₂ block of W — i.e., a fixed selection of pretrained weights with the rest discarded. This is precisely the "hard parameter removal" the paper frames itself against (Sec. 1, contribution 1). The mapping stage then refines this selection. Table 4 makes this concrete: "Manual Drop (0 epoch)" already reaches 41.1% IN-1K vs the best 42.1% with the full mapping stage — a ~1-point gain on IN-1K. The central conceptual claim is therefore overstated.
-- **The depth-compression operator (Eq. 2) has no functional justification.** W^new_{l′} = Σ L_depth[l′,l]·W_l linearly combines weights of transformer blocks whose function is non-linear (softmax attention, LayerNorm, residuals). Linear weight averaging across non-linear layers does not in general approximate any meaningful function of the original layers, and the paper never argues why it should. Compare with StackBERT (cited), which duplicates whole layers — a function-respecting operation. The paper also never analyzes whether L_depth ends up selection-like vs genuinely mixing.
-- **Claim that gains grow with compression is contradicted at 50%.** At 50% (Table 1), CLIP-Map_base is essentially tied with non-progressive TinyCLIP on MSCOCO (55.1 vs 54.9 TR@1) and worse on Flickr30K TR@1 (81.9 vs 84.6). The "particularly significant gains under high compression" narrative is only supported at 1% and 10%, and the regime crossover is not discussed.
-- **The mapping-stage training objective is never specified in the main text.** Sec. 3.2.1 only says mapping parameters are trained while the original model is frozen; only the retraining loss is given (Eqs. 11–13). For the headline new training step, the loss and data are unstated, hurting reproducibility and conceptual clarity.
+
+- **At moderate compression (50%), the gains are marginal or negative.** At 50% compression, CLIP-Map_base achieves MSCOCO TR@1 of 55.1 vs TinyCLIP's 54.9 (+0.2), but TR@10 is 86.5 vs 87.2 (−0.7), and Flickr30K TR@1 is 81.9 vs 84.6 (−2.7). The paper's framing emphasizes advantages "particularly...under high compression settings" (which is true for 1% and 10%), but the abstract and introduction do not qualify that the method's advantage is largely confined to extreme ratios. This is a meaningful scope limitation that readers should know upfront.
+
+- **The distinction between "mapping" and "selection" is somewhat oversold.** The paper contrasts its approach against "hard parameter removal" in select-based pruning, yet the Diagonal Inheritance Initialization copies a subset of weight dimensions (the first D₂ diagonal entries) and then the Kronecker product F_out W F_in^T operates in a reduced-dimensional subspace. The mapping is not lossless — it discards information that was projected out by the dimensionality reduction, just as structured pruning does. The paper would be more accurate framing this as *differentiable structured compression with continuous weights* rather than a fundamental paradigm departure from selection. The core contribution (the learnable mapping itself and its initialization) is still valuable; the rhetoric around "avoiding information loss" needs recalibration.
 
 ### Minor
-- **Kronecker factorization is not a new contribution.** Eq. 3–4 reduce to standard two-sided low-rank projection — the same operator LiGO (cited) uses for growth. The O(D₁²D₂²) "full mapping" baseline is fictitious; no one would instantiate it. The novelty here is restricted to direction (compression) and initialization (diagonal), not to the operator. The paper should reposition the contribution accordingly.
-- **Initialization ablation conflates two factors.** Table 5 contrasts Diag init against Random/Kaiming/Xavier, but all non-diagonal baselines are also non-inheriting. The cleaner comparison — variance-scaled random init that still copies the leading block, or random row selection with diagonal-1 entries — is missing, so the table does not isolate "diagonal" from "inherit".
-- **Single-run reporting.** Tables 1–4 are single-seed; some advertised gaps (e.g., 38.4 vs 36.2 TR@1) are within plausible CLIP-training seed variance, and the 50% regime is closer still.
-- **Table 2 numbers are uneven.** The 39M ViT row shows very large gaps over TinyCLIP-39M on some per-task scores (e.g., Aircraft 50.8 vs 15.7) while being near-tied on IN-1K (63.7 vs 63.5), which is unusual and deserves discussion — either the TinyCLIP baseline used is not the strongest published configuration, or the per-task results need explanation.
+
+- **Limited generalization evidence beyond OpenCLIP-B/16.** The results on MetaCLIP at 10% compression underperform TinyCLIP (MSCOCO TR@1 34.3 vs 36.2), and this negative result is not discussed anywhere in the paper. The ResNet-50 experiment is conducted without retraining, making it non-comparable to baselines. The paper's claims of "multimodal adaptation" (Sec. 2.2) and general applicability to "any CLIP-like architecture" are not well-supported by the evidence presented.
+
+- **The comparison to TinyCLIP does not fully isolate the source of improvement.** Table 4's ablation compares "Manual Drop (0 epoch)" to mapping+retraining, showing the mapping stage helps. But "Manual Drop" (naively keeping the first D₂ dimensions) is a weaker baseline than TinyCLIP's learned mask initialization. A controlled experiment that initializes from TinyCLIP's mask output and applies the same retraining pipeline would clarify whether the improvement comes from the learnable mapping itself or simply from the diagonal copy + distillation recipe.
+
+- **It is unclear whether width and depth compression operators are optimized jointly or sequentially.** The paper states "we firstly perform width-compression... Then, we perform depth-compression" (Fig. 3 caption) yet also claims "simultaneously learns the width and depth compression mappings in a fully differentiable manner" (Sec. 2.2). These statements can be reconciled (joint parameter optimization with sequential forward application), but the paper does not clarify this explicitly. An ablation of depth compression alone is also missing.
+
+- **Paper does not comment on the MetaCLIP 10% degradation.** The negative result (34.3 vs 36.2 TR@1 on MSCOCO) sits in Table 1 without discussion, leaving readers to wonder whether the method is sensitive to the quality of the pretrained teacher.
 
 ### Trivial
-- Figure 1 labels the right column "Mapping-based pruning Process" while the text contrasts mapping with pruning — internal terminology inconsistency.
+
+- **Notation inconsistency:** Eq. 11 defines the distillation loss as $\mathcal{L}_{distill}$, but Eq. 13 refers to $\mathcal{L}_{soft}$.
+- **Seen-sample accounting in Table 3:** 25 total epochs on YFCC-15M (15M samples) should yield ~0.375B seen samples, but the paper reports 0.45B. The discrepancy may be explained by the mapping stage using different batch sizes, but this is not clarified.
 
 ## Nice-to-Haves
-- Add an ablation that retrains only from the diagonal-init (literal top-left block), skipping the mapping stage entirely, at multiple compression ratios. This is the cleanest way to demonstrate that the learned mapping does meaningful work beyond inheritance.
-- Visualize F^in, F^out, and L_depth after training to show whether off-diagonal/mixing mass actually grows or whether the operator stays selection-like.
-- Compare against an apples-to-apples non-progressive magnitude / Wanda-style baseline with the same KD recipe and same compute budget, not only TinyCLIP.
+- An analysis of the learned mapping matrices (e.g., visualizing off-diagonal entries of $F^{in}$ and $F^{out}$ after training) would help assess whether the mapping truly learns cross-dimensional recombination or collapses to a learned scaling of selected dimensions.
+- A comparison to a simple low-rank (SVD) approximation of each weight matrix at initialization would be a natural baseline for a "mapping without selection" approach.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution.*
-- Strength Finder claim that "Kronecker factorization is a key technical contribution that makes the mapping tractable" — kept as enabling tooling, but downgraded; it is standard and used identically in LiGO.
-- Strength Finder claim of "framework generalises across teachers and encoders" — kept implicitly under strengths but de-emphasized as a generic strength.
+*These points are flagged to be removed, treat them with caution:*
+
+- **Criticism about conflating token pruning and model pruning in the abstract:** The paper explicitly distinguishes these two categories in Sec. 1 ("Pruning can be broadly divided into two categories... In this paper, our discussion focuses on the model pruning methods."). The criticism is incorrect.
+- **Criticism about missing discussion of tensor decomposition (CP, Tucker) in related work:** Per review guidelines, missing related work criticisms are not included.
+- **Criticism that the variance analysis "does not fully justify" the diagonal init:** The analysis correctly identifies the variance multiplication problem (Eq. 5–8) and the diagonal init is a clean practical solution. The claim about its variance being "zero when off-diagonals are zero" misses the point — the analysis justifies why *random* init fails, and the diagonal init sidesteps this entirely.
+- **Criticism that a learning-rate warm-up might rescue standard initializations in Table 5:** Speculative and unsupported. The paper's ablation shows catastrophic failure of standard inits; arguing that hyperparameter tuning might help is not a genuine weakness.
+- **Criticism that the conclusion "does not acknowledge limitations":** Standard paper format; no specific missing limitation was identified beyond what is already debated in the review.
+- **Nitpicks about formatting, typos, and proofreading artifacts** that are parser-induced rather than author errors.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews' most useful observation — that diagonal partial-identity initialization makes the method behaviorally equivalent to "select the top-left block + learnable refinement + KD" — is a direct consequence of Eq. 9 read against Eq. 4, not an external insight.
+None beyond the paper's own contributions. The reviews surface a useful observation that the paper's core framing oversells the mapping-vs-selection distinction, but this is better characterized as a presentation issue than a source of new insight.
 
 ## Suggestions
-- Explicitly write down the mapping-stage loss in §3.2.1.
-- Reframe contribution 1: position the method honestly as "leading-block inheritance + small learned two-sided refinement + KD," dropping the "mapping vs. select" rhetoric.
-- Either provide a sketch of why linear weight combination across non-linear transformer blocks is meaningful (or empirically verify with a function-preservation test), or replace L_depth with a layer-selection / duplication scheme à la StackBERT.
-- Report 50%-compression results without overclaiming, and either explain the regime crossover or remove the "gains grow with compression" framing.
-- Provide multi-seed numbers for at least the headline rows.
+1. Recalibrate the framing: present the method as *differentiable structured compression with learnable transformations* rather than claiming an opposition to selection. Acknowledge that the diagonal initialization is itself a form of weight inheritance (selecting the first D₂ dimensions), and the novelty is in learning to *augment* this selection with off-diagonal mixing.
+2. Add a discussion of the MetaCLIP negative result at 10% compression. If the method is sensitive to teacher quality, this should be acknowledged and preferably analyzed.
+3. Add a controlled ablation that uses TinyCLIP's learned mask (or a simple magnitude-based mask) as the initialization point for the retraining stage, to isolate the contribution of the learnable mapping from the diagonal copy + distillation pipeline.
+4. Add depth-compression-only ablations to disentangle the contributions of width and depth mapping.
+5. Clarify the width/depth optimization order (joint or sequential) in the main text, not just the figure caption.
+6. Add a qualitative analysis (e.g., visualization of learned $F^{in}$, $F^{out}$ entries) to show whether the mapping actually learns non-trivial cross-dimensional structure or stays near-diagonal.
 
-## Evaluation along requested axes
-- **Originality:** Low. The operator is the LiGO Kronecker projection applied in reverse; the new ingredient is the diagonal init, which is reasonable but conceptually equivalent to block-selection at t=0.
-- **Importance of research question:** Moderate. CLIP compression is a useful practical question.
-- **Claims supported:** Partially. Low-compression gains are convincing; the central "mapping ≠ selection" claim is not, and the high-compression claim is contradicted at 50%.
-- **Soundness of experiments:** Mixed. Single-seed, missing a clean ablation that isolates the mapping stage from inheritance, missing apples-to-apples pruning baselines.
-- **Clarity:** Mediocre — the mapping-stage objective is missing, and the conceptual framing conflicts with the actual operation at initialization.
-- **Value to community:** Modest. The diagonal-inheritance trick is a useful, simple recipe practitioners may adopt; the conceptual contribution is thin.
+## Score and Decision
 
-## Calibration Anchors
-- `774F8gF0UO.md` (avg 4.67, Reject) — "Best practices to compress MLLMs": pruning+KD study with mixed gains and limited novelty; comparable framing weakness to CLIP-Map.
-- `I5S1a1NKxo.md` (avg 5.00, Reject) — Data-scarce VLM distillation: similar empirical-strong / framing-weak profile.
-- `LC6ZtQV6u2.md` (avg 6.50, Accept) — Proteus, CLIP distillation: stronger and cleaner than CLIP-Map; CLIP-Map falls clearly below.
-- `9ccZzuix2D.md` (avg 5.33, Reject) — KD on pruned data: solid empirics, modest conceptual contribution; comparable.
-- `pAVJKp3Dvn.md` (avg 5.67, Accept) — Differentiable structured matrices: more general theoretical contribution; CLIP-Map narrower.
-- `VMV8gefvq8.md` (avg 6.00, Accept) — MCNC neural compression: more novel than CLIP-Map.
-- `FVgizbs3o2.md` (avg 3.75, Reject) — TensorGPT TT-decomposition compression: weak and incremental; CLIP-Map is somewhat better empirically (clear baseline gains at 1%/10%).
-- `1RrOtCmuKr.md` (avg 6.33, Accept) — Codebook+mapping compression: more thorough than CLIP-Map.
-- `t84UBRhhvp.md` (avg 4.75, Reject) — VLM with description-based representations: similar acceptance profile.
-- `VFhJtV29jZ.md` (avg 4.75, Reject) — SlimLLaVA: pruning VLM with limited novelty; very close peer to CLIP-Map.
-- `tNxr38vfYR.md` (avg 5.00, Reject) — Token-compression for VLMs.
-- `GSUNPIw7Ad.md` (avg 6.00, Accept) — Compressed image latents for MLLMs.
-- `9bMZ29SPVx.md` (avg 7.50, Accept) — CLIP-powered data selection; well above CLIP-Map.
-- `5Ca9sSzuDp.md` (avg 8.00, Accept) — CLIP interpretation paper; well above.
-- `3d6awrrpUq.md` (avg 3.50, Reject) — CLM JPEG: clearly weaker than CLIP-Map.
-- `TdgAtxP6G2.md` (avg 4.00, Reject) — Transformers learn Markov chains: weaker than CLIP-Map.
-- `ZWi6RpT4mJ.md` (avg 3.50, Reject) — CoINR: weaker than CLIP-Map.
+**Calibration anchors** (all from the batch):
 
-CLIP-Map sits a bit above pure-incremental rejects (TensorGPT 3.75, CoINR 3.50) thanks to real and reproducible empirical gains at 1%/10%, but clearly below borderline-accepts like MCNC (6.00) and Proteus (6.50) due to thin conceptual novelty, an inconsistent 50% result, unspecified mapping-stage loss, and a framing that the data itself partly contradicts. It maps onto the SlimLLaVA / "Bulk-to-Budget" / Data-scarce-distillation reject cluster around 4.5–5.0.
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|--------------------------|
+| `/home/wg25r/review_agent/human_reviews_2026/UGCgt3cvcC.md` (Adaptive MLP Pruning) | 4.00, Reject | Weaker contribution — incremental Taylor-based pruning vs a genuinely new compression paradigm |
+| `/home/wg25r/review_agent/human_reviews_2026/Bq0CAUrMCC.md` (Structured Transformer Circuits Pruning) | 3.50, Reject | Weaker — similar structured pruning but less novel framing and smaller-scale evaluation |
+| `/home/wg25r/review_agent/human_reviews_2026/srVlwlS8yt.md` (Diversity-Guided MLP Pruning) | 3.50, Reject | Weaker — Gram-Schmidt pruning with distillation, narrower scope |
+| `/home/wg25r/review_agent/human_reviews_2026/jmQKr47S77.md` (MLLM-Pruner) | 3.00, Withdrawn | Much weaker — ad-hoc metric combination vs principled mapping approach |
+| `/home/wg25r/review_agent/human_reviews_2026/YqDMOJCGyG.md` (Kronecker Quantization) | 3.00, Withdrawn | Different problem (quantization), comparable use of Kronecker but weaker paper overall |
+| `/home/wg25r/review_agent/human_reviews_2026/i36E5Ezm0H.md` (PruneSID) | 5.50, Accept (Poster) | Comparable strength — both introduce clean, novel solutions; PruneSID has crisper claims and more thorough empirical isolation |
+| `/home/wg25r/review_agent/human_reviews_2026/DjefrO8TJr.md` (Sparse CLIP) | 5.00, Accept (Poster) | Comparable — both have genuine technical contributions with some framing/scope issues |
+| `/home/wg25r/review_agent/human_reviews_2026/bl3drImevi.md` (Prototype-guided Distillation) | 5.60, Accept (Poster) | Slightly stronger — simpler method, cleaner evaluation, better cross-architecture generalization |
+| `/home/wg25r/review_agent/human_reviews_2026/57IXIg6nZ0.md` (VisionTrim) | 5.50, Accept (Poster) | Comparable — both propose novel compression paradigms with solid empirical support |
+| `/home/wg25r/review_agent/human_reviews_2026/DSq3r8PjpQ.md` (QLIP) | 5.50, Accept (Poster) | Slightly stronger — cleaner idea with practical drop-in benefits and strong empirical validation |
+| `/home/wg25r/review_agent/human_reviews_2026/DldwXCCP25.md` (CLIP BoW) | 5.00, Accept (Poster) | Different topic, comparable strength |
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Overall assessment:** CLIP-Map introduces a genuinely new approach to model compression — learnable Kronecker-structured mapping rather than hard selection — and demonstrates clear advantages at extreme compression ratios. The Diagonal Inheritance Initialization is a clean, well-motivated, and empirically necessary contribution. However, the paper's framing overstates the novelty of "mapping vs selection" (the diagonal init is itself a selection, and the method discards information like any compression technique), the advantages largely disappear at moderate (50%) compression, generalization evidence beyond OpenCLIP-B/16 is thin, and a negative MetaCLIP result goes undiscussed. The contribution is real but bounded.
+
+**Score: 5.0**
+
+**Decision: Accept (Poster)**
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,86 +1,87 @@
+Now I have all the information needed. Let me write the consolidated review.
+
+---
+
 ## Summary
-The paper introduces Distributed Neural Architectures (DNA), a framework in which tokens/patches are routed by per-step routers through a pool of computational modules (transformer/MLP/attention/identity), with no fixed depth/width and with skipping incentivized by a DeepSeek-style bias trick on identity modules. Authors train DNAs at ViT-Small (vision) and GPT-2-Medium (language) scales, report competitiveness with the dense baselines under matched *active* parameters, and analyze emergent path distributions (power law), specialization of paths, learned compute allocation, and emergent parameter sharing.
+
+This paper introduces Distributed Neural Architectures (DNAs) — a novel paradigm where tokens dynamically select their own computation paths through an unstructured collection of modules (transformers, MLPs, attention), with routing learned end-to-end. Unlike feed-forward networks, DNAs have no predefined depth or topology; each token's trajectory through the model is determined by content-dependent router decisions. The authors demonstrate feasibility by training DNA models on ImageNet (ViT scale) and FineWeb-Edu (GPT-2 medium scale), showing competitive performance with dense baselines. They also analyze emergent properties: path distributions follow power laws, individual paths/modules exhibit semantic specialization, and models learn interpretable, content-dependent compute allocation when incentivized via identity-module skipping.
 
 ## Strengths
-- **Clean, reimplementable formalism.** Sec. 2.1–2.2 lay out a single-router-per-step proto-architecture with explicit residual routing (Eq. 1) and an identity-module bias rule (Eqs. 2–3) that subsumes MoE/MoD/weight-sharing/early-exit as special cases. The construction is concrete enough that others can reproduce it.
-- **Honest, useful negative controls.** Sec. 3.2 reports that *randomly initialized* DNAs also produce power-law path distributions (exponent ≈ −1) and can cluster patches; Sec. 4.3 admits that language-side module reuse "is most likely random." This kind of self-critique is unusual and strengthens the paper's empirical credibility.
-- **Suggestive compute-allocation finding.** Fig. 5 shows that high-compute images contain dense boundaries while low-compute images are largely background/uniform — a concrete qualitative phenomenon consistent with the Riquelme et al. (2021) observation cited in the paper.
-- **Top-2 language DNA outperforms GPT-2 Medium on most reported metrics.** Table 3 shows the 433M-active top-2 DNA improves val loss (2.674 vs 2.720) and beats GPT-2 on ARC-E, BoolQ, HellaSwag, LAMBADA, PIQA, Wiki perplexity. Under the active-parameter convention standard in MoE work, this is a real win for the framework.
-- **Deep-dream-on-routing visualization (Fig. 4)** is a novel interpretability instrument: maximize agreement of synthetic-image routing decisions with a real image, revealing a texture→lighting→semantics progression.
+
+- **Genuinely novel architecture concept.** The idea of a fully distributed neural architecture where any token can traverse any sequence of modules — encompassing MoE, MoD, weight sharing, and early exit as special cases — is conceptually ambitious and opens a new design space beyond incremental modifications to feed-forward networks. The paper convincingly shows that such architectures can be trained end-to-end, which is non-trivial.
+- **Cross-domain demonstration.** The same DNA construction is successfully applied to both discriminative vision (ImageNet, ViT scale) and generative language (FineWeb-Edu, GPT-2 scale) tasks. This two-domain validation strengthens the claim that DNAs are a broadly applicable framework rather than a vision-specific or language-specific trick.
+- **Competitive performance with dense baselines.** In vision, top-1 DNA reaches 79.1% ImageNet accuracy vs. 79.8% for ViT-small (a 0.7% gap). In language, top-2 DNA achieves 2.674 validation loss vs. 2.720 for GPT-2 medium, while also outperforming on most downstream benchmarks (ARC-E, BoolQ, HellaSwag, LAMBADA, PIQA, WikiText). The paper explicitly positions itself as demonstrating *feasibility*, not SOTA, and the results support that claim.
+- **Honest and informative negative findings.** The paper reports that random DNA models also exhibit power-law path distributions, and that language model parameter reuse appears random (unlike vision), providing useful baselines and identifying domain-specific challenges for future work.
+- **Emergent parameter reuse.** Vision DNA models spontaneously reuse modules, yielding ~25% non-shared active parameters, and this reuse correlates with image content (low-reuse images lack clear objects). The differential behavior between vision (structured reuse) and language (random reuse) is an interesting finding.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The paper's core claims — that DNAs are trainable and competitive with dense baselines — are supported by the reported experiments.
 
 ### Major
-- **No head-to-head against the methods DNA claims to generalize.** The introduction frames DNA as a generalization of MoE, MoD, parameter sharing, and early exit (Sec. 1), but Tables 1 and 3 contain no matched-cost MoE, MoD, LayerSkip, or weight-sharing baseline. The lone non-dense comparator (GPT-2 30%-shallower in Table 3) *beats* the top-2 30%-skip DNA on every metric, which directly undermines the learned-skipping efficiency story. Without these comparisons, the "generalization" claim is not validated.
-- **Total-parameter gap softens the "competitive with dense" headline.** Top-1 DNA vision has 34M total vs ViT-Small's 22M and underperforms (79.1 vs 79.8, Table 1); top-1 language DNA has 583M total vs GPT-2 Medium's 406M and is worse on loss (2.754 vs 2.720, Table 3). The active-parameter convention is reasonable in MoE-style work, but the paper would be much stronger with a dense baseline scaled to the *total* parameter count, since memory footprint and (often) training compute track total params. The top-2 language DNA result is the cleanest positive case but still uses ~50% more total params than GPT-2 Medium.
-- **Power-law / "emergent specialization" is partially neutralized by the authors' own controls.** Trained vision DNA exponent ≈ −1 vs random-init exponent ≈ −1; trained language exponent ≈ −1.2 vs random ≈ −1 (Sec. 1, Sec. 3.2). The paper provides no statistical test of this gap and no quantitative specialization metric (e.g., MI between path and label/POS) benchmarked against the random control. The interpretability narrative therefore rests on cherry-picked qualitative examples (Figs. 3, 8) rather than a measurable effect.
+
+- **"Emergent compute efficiency" is partially pre-determined, not fully learned.** The skip mechanism (Eq. 2–3) uses a bias-based scheme with a target skip ratio $r$ set as a hyperparameter. While the model learns *which* tokens to skip, the overall skip rate is imposed rather than emerging from the optimization objective alone. The paper's framing (Abstract: "compute efficiency/parameter sharing can be learnt from data") overstates the degree of emergence. Furthermore, the 30% skip DNA model underperforms a static 30% shallower GPT-2 baseline on all downstream benchmarks (Table 3), which weakens the claim that dynamic, learned skipping provides an advantage over static depth reduction. A compute-aware loss that lets the router freely discover when to skip would more directly test the "learned from data" claim.
+
+- **Interpretability evidence is entirely qualitative.** Sections 3.2 and 4.2 present selected path groupings, deep-dream reconstructions, and two-paragraph token routing examples to argue for "emergent specialization." However, no quantitative metrics are provided — no clustering purity, no statistical tests comparing trained vs. random routing patterns, and no controlled comparisons against baseline models. The power-law path distribution (Fig. 1c,d) is observed in both trained and random models, which the paper acknowledges but does not quantify how trained distributions differ beyond the exponent. Without systematic metrics, the interpretability analysis remains suggestive rather than persuasive.
 
 ### Minor
-- **Skipping is partly controller-driven, not purely learned.** Eq. 3 actively pushes the model toward a target identity-routing ratio `r·k`. A random-skip baseline at the same rate would disentangle "learned" skipping from forced skipping; this is missing.
-- **Single-seed reporting.** Gaps of 0.7–1.0 pp on ImageNet and 0.03–0.05 nats on val loss are within typical seed noise at these scales; without at least 2–3 seeds for the headline rows in Tables 1 and 3, the competitiveness claim is fragile (though single-seed reporting is admittedly common at this scale).
-- **Language model is undertrained (21B tokens, far below Chinchilla-optimal; authors acknowledge "vastly underparametrized").** This is fine as a feasibility study but the high-rank path interpretability claims in Sec. 4.2 ("common words on rare paths carry context") are particularly speculative under that condition.
-- **Quantitative cross-model parameter-sharing correlation (Sec. 3.3) is deferred to appendix** — it is the main quantitative evidence for non-random vision-side sharing and belongs in the main text.
-- **Deep-dream reconstructions (Fig. 4) classify as wrong classes** (e.g., bell pepper → spotlight). The paper spins the bird/dog cases as "hierarchical," which is reasonable, but the spotlight failure deserves direct treatment rather than being read positively.
+
+- **Parameter count comparisons are not fully controlled.** In the language domain, the best DNA model (top-2, 603M total / 433M active params) has more total parameters than the GPT-2 baseline (406M). The paper uses active parameter counts for comparison, which is standard in conditional computation literature, but the total parameter disparity means some of the observed gains could stem from additional capacity rather than the distributed architecture itself. A matched-total-parameter baseline would strengthen the competitiveness claim. (Note: the vision top-2 DNA with skip actually has *fewer* total params than ViT-small, so this concern is domain-specific.)
+
+- **Limited scale of investigation.** The vision models are at ViT-small scale (22M active params) and the language models at GPT-2 medium scale (406M active params), trained on 21B tokens. The authors acknowledge this limitation and state that scaling is future work. While appropriate for an exploratory paper, it means the findings (particularly the emergent specialization and power-law patterns) may not generalize to larger regimes where MoE and related methods are typically deployed.
 
 ### Trivial
-- Eq. 1's "subtract-then-add" form would benefit from a one-sentence ablation against the standard MoE residual form.
-- The motivation cites layer-pruning evidence for over-depth, but DNAs end up *deeper* (more steps) than the dense baselines — the conceptual link from motivation to architecture deserves a sentence.
+
+- The paper would benefit from clearer specification of router initialization and how the bias mechanism (Eq. 3) interacts with top-k sampling in practice. These details are not central to the contribution but would aid reproducibility.
 
 ## Nice-to-Haves
-- Run one configuration at near-Chinchilla-optimal token budgets so the language interpretability story doesn't rest on an undertrained model.
-- Quantitative interpretability metric (mutual information between path identity and label/POS), reported for trained vs random-init.
-- Sensitivity sweep over `r` (skip ratio) and `k` (top-k), and an ablation of the bias-update rule vs. a learned auxiliary loss.
-- A negative-cases gallery for routing interpretability (paths that fail to specialize, fraction of "interpretable" paths).
+
+- A compute-aware training objective (e.g., FLOPs penalty in the loss) that lets the router freely learn skipping behavior, rather than imposing a target skip rate via bias hyperparameters, would more cleanly test the "emergent efficiency" claim.
+- Quantitative evaluation of routing specialization (e.g., normalized mutual information between path identity and class labels, compared against a random-routing baseline) would substantially strengthen the interpretability claims.
+- Scaling experiments to larger models/training budgets would help establish whether the observed emergent properties persist at scale.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **Strawman/format strengths from the strength finder.** Generic boilerplate strengths (e.g., "approach is reproducible" with no concrete grounding beyond restating equations) were folded into the more specific strengths above.
-- **"Cannot be independently verified" / reference availability concerns** — none triggered, but the rubric forbids them.
-- **Demand for full training logs, every hyperparameter, etc.** — not standard at this scale; appendix coverage suffices.
-- **Asymmetric-baseline criticism re: active vs total parameters.** Kept as a *major* weakness only in its strongest form (request a dense baseline matched on *total* params). The harsh critic's framing that this single-handedly invalidates the paper is overstated: active-parameter parity is the dominant convention in MoE/CC literature, and DNA is explicitly positioned within that literature.
+
+These points are flagged as removed from the main review; treat with caution.
+
+- **"Unfair baseline comparison invalidates the core claim of competitiveness" (Harsh Critic #1):** The critic argues the comparison is structurally unfair because DNA models have more total parameters. This is partially addressed above as a minor weakness, but the critic's framing as "invalidating the core claim" is too strong. The paper explicitly states it is not trying to beat SOTA but to demonstrate feasibility. The 0.7% accuracy gap in vision and the competitive language results support the "competitive" claim adequately. The vision top-2 DNA with skip (18M total) actually has fewer total parameters than ViT-small (22M), directly contradicting the critic's implication that all DNA models enjoy a parameter advantage.
+
+- **Claim that "the mechanism is imposed, not learned" invalidates the efficiency narrative (Harsh Critic #2):** Retained above in softened form as a major weakness. The critic's claim that this "directly contradicts" the paper's contribution is overstated — the paper does show learned allocation of *which* tokens to skip, just not the overall rate.
+
+- **"Interpretability analyses are anecdotal and lack quantitative support" (Harsh Critic #3):** Retained as a major weakness. The critic's additional claim that path-distribution power-law similarity between trained and random models "undercuts the claim of emergent structure" is noted; the paper itself acknowledges this observation and discusses differences in similarity measures used by trained vs. random models (Sec. 3.2, footnote 5, Appendix G.2), so this is not a failure to address but rather a limitation of the qualitative analysis.
+
+- **Reproducibility concerns about router initialization and bias interaction (Harsh Critic, Section 2 notes):** These are legitimate implementation details but fall under the "trivial reproducibility nitpicks" category per the hard rules. Moved to Trivial.
+
+- **"Missing appendix, missing proofs" (Harsh Critic, general):** Per hard rules, the parser strips appendix sections. Not a valid criticism of the paper.
+
+- **Pure formatting/style criticisms from the Harsh Critic:** Removed per hard rules.
 
 ## Novel Insights
-The most genuinely novel observation from the reviews — beyond what the paper itself claims — is that the random-init power-law (exponent ≈ −1, admitted in the paper) plus the small −1 vs −1.2 trained-vs-random gap implies the path-distribution finding is largely a topological property of routed architectures, not a training-induced emergent phenomenon. This reframes one of the paper's headline figures and points to a concrete follow-up: an MI-based or null-model-controlled specialization measure. None of the other points are novel beyond the paper's own self-critique.
+
+The paper's most genuinely novel observation is that path distributions in DNA models follow power laws even at random initialization, and that training shifts the *qualitative nature* of path specialization (from superficial feature clustering to semantic clustering) rather than fundamentally changing the distribution shape. This suggests that the architecture's combinatorial path space itself induces a power-law structure, and that training primarily reorganizes the *meaning* of paths rather than their frequency distribution. If verified quantitatively at scale, this could have implications for understanding how routing-based architectures organize computation.
 
 ## Suggestions
-- Add a 34M dense ViT and a ~600M dense GPT-2 to Tables 1 and 3; if DNA still matches them, the headline claim becomes solid.
-- Add MoE-active-matched and MoD/LayerSkip baselines at the same active-parameter and skip-rate budgets.
-- Replace "paths are interpretable" with a quantitative score (MI(path; label) or MI(path; POS-tag)) and report it for both trained and random-init DNAs.
-- Report at least 2 seeds for the headline rows.
-- Move the cross-model parameter-sharing correlation result from appendix into Sec. 3.3.
 
----
+- Add a quantitative metric for routing specialization (e.g., adjusted mutual information between path clusters and class labels, compared against a random-routing baseline) to convert the qualitative interpretability analysis into a testable claim.
+- Consider replacing the hyperparameter-controlled skip bias with a compute-aware loss term (e.g., FLOPs penalty) to more directly demonstrate that compute efficiency can be learned from data alone.
+- A matched-total-parameter dense baseline for the language experiments would help isolate the effect of the distributed architecture from raw capacity differences.
+- The finding that language model parameter reuse is random while vision model reuse is structured is under-explored. A hypothesis about why this occurs (e.g., discrete vs. continuous input spaces, dataset complexity, training objective differences) would add depth.
 
-## Evaluation by Axis
-- **Originality:** Above average. The unified "proto-architecture + per-step routers + identity modules for skipping" framing is a clean recombination of existing ideas (MoE, MoD, weight sharing) with a novel deep-dream-on-routing visualization.
-- **Importance:** Conditional computation and emergent routing are central to current efficient-LLM research; the questions asked are timely.
-- **Support for claims:** Mixed. "Competitive with dense" is partially supported (clearly so for top-2 language; less so for vision). "Generalizes MoE/MoD/early-exit" is not supported by experiments. "Emergent specialization" is qualitatively supported but quantitatively underexamined relative to a strong null model the authors themselves identify.
-- **Soundness of experiments:** Two scales × two modalities is decent breadth, but seed counts, missing CC baselines, and the lone failed shallow-GPT-2 comparison weaken the case.
-- **Clarity:** Good. Formalism in Sec. 2 is unusually clean; figures carry the story.
-- **Value to community:** Moderate. The framework + identity-bias trick + deep-dream-on-routing technique are usable building blocks; the interpretability claims need more rigor before they can be cited.
+## Anchor Comparison
 
-## Score and Decision
+| Anchor Paper | Avg Score | How DNA Compares |
+|---|---|---|
+| S7o8zBYw4V (DARE, dynamic MoE routing) | 4.50 | DNA is more novel architecturally (fully distributed vs. just dynamic expert count) and demonstrates across two domains vs. one. Similar experimental rigor. DNA is stronger. |
+| exMMxIakjl (Subjective Depth Transformers) | 3.00 | DNA clearly stronger: DNA achieves competitive results with baselines while Subjective Depth models consistently underperform dense baselines. |
+| wPemGNb66V (Informed Routing / LFF) | 4.50 | DNA is more novel in architecture design. Informed Routing has more systematic experiments. DNA's cross-domain validation is a differentiator. Comparable overall. |
+| ANKQqRicBM (DiffMoE) | 5.33 | DNA is more architecturally novel (fully distributed routing vs. MoE for diffusion). DiffMoE has stronger quantitative results (SOTA on its benchmark). Comparable quality. |
+| BqyPLOkxFY (Cross-layer MoE interpretability) | 5.00 | DNA has the dual contribution of novel architecture + interpretability analysis. BqyPLOkxFY has more rigorous interpretability methodology but less architectural novelty. DNA comparable. |
+| XGODWn7HeJ (FleS activation) | 6.67 | FleS has stronger empirical validation across many benchmarks and clearer problem identification. DNA is more ambitious in scope but less rigorous. DNA is weaker. |
+| koKWoKaMrE (Tversky Neural Networks) | 7.00 | Tversky has a clear novel concept with demonstrated quantitative benefits. DNA is similarly novel but lacks comparable experimental rigor. DNA is weaker. |
 
-Anchor comparisons (all from query batch):
-- `1Ogw1SHY3p` Monet — avg 7.00: MoE + interpretability **with monosemanticity quantification**; methodologically more rigorous than DNA's qualitative interpretability. DNA is below this bar.
-- `Pu3c0209cx` Tight Clusters — avg 7.00: MoE routing with theoretical analysis + matched MoE baselines. Stronger evidentiary base than DNA.
-- `V7EiYG5DwZ` Mutual-Inform SMoE — avg 5.75 (reject): MoE routing improvement with concrete baselines but limited; comparable to DNA's positioning — DNA has more breadth, less direct comparison rigor.
-- `RtDok9eS3s` Simplifying Transformer Blocks — avg 7.33 (accept): clean architectural insight with thorough ablations. DNA lacks the ablation rigor.
-- `RQz7szbVDs` Theory of Initialisation's Impact on Specialisation — avg 6.00: theoretical framing of specialization; DNA is more empirical and less rigorous about the same concept.
-- `B4nhr6OJWI` Instilling Inductive Biases — avg 6.67 (reject).
-- `jX2DT7qDam` Jointly-Learned Exit and Inference — avg 7.50 (accept): an early-exit work with strong empirical case. DNA's skipping evidence is weaker.
-- `EzrZX9bd4G` BEEM — avg 6.25 (accept): focused early-exit method, well-supported.
-- `0gVatTOgEv` Glider — avg 4.00 (reject): MoE routing with limited evaluation. DNA is clearly stronger than this.
-- `7DY2DFDT0T` EfficientSkip — avg 2.50 (reject): poor experimental design. DNA is well above this.
-- `bcHty5VvkQ` SkipDecode — avg 5.50 (reject): reasonable idea, limited evaluation. Closest sibling to DNA in spirit.
-- `sceqRsa0oo` SPEED — avg 3.80 (reject).
-- `v675Iyu0ta` Interpretability Illusions — avg 5.60.
-- `FlvtjAB0gl`, `vvi5OjPhbu`, `EXitynZhYn` — less topically relevant vision–language anchors in 6.25–7.0 band.
+**Calibration:** The paper sits above the 4.5 band (DARE, Informed Routing) due to higher conceptual novelty and cross-domain demonstration. It sits below the 6.67–7.0 band (FleS, Tversky) due to weaker experimental validation and qualitative-only interpretability. It is most comparable to DiffMoE (5.33) and the MoE interpretability paper (5.0) — novel concepts with solid but not outstanding experimental support.
 
-DNA sits below the 7-point cluster (Monet, Tight Clusters, Simplifying Blocks, Jointly-Learned Exit) because those provide quantitative interpretability or rigorous matched-cost ablations DNA does not. It is well above the 2.5–4.0 cluster (EfficientSkip, SPEED, Glider). It is closest to the mid-band rejects/borderlines (Mutual-Inform SMoE 5.75, SkipDecode 5.50, Interpretability Illusions 5.60): interesting framework + suggestive findings + missing matched baselines and weak quantitative interpretability. The honest negative controls and clean formalism nudge it slightly above pure reject territory but the absence of MoE/MoD baselines and the controller-driven skipping caveat keep it below the accept line.
-
-MY FINAL SCORE: <pineapple>5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

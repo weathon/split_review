@@ -1,75 +1,95 @@
+Now I have a thorough understanding of both the paper and the calibration landscape. Let me produce the final consolidated review.
+
+---
+
 ## Summary
-LEGO-EVAL is a tool-augmented VLM framework for evaluating fine-grained alignment between text instructions and synthesized 3D scenes. It decomposes evaluation into (1) constraint identification, (2) tool-execution planning over 21 tools that query the Unity scene (environment interaction, textual reasoning, multimodal reasoning), (3) argument selection, and (4) per-constraint binary validation. Paired with LEGO-BENCH (130 instructions, 1,250 constraints), it reports F1 = 0.81 / κ = 0.63 vs. VLM-as-judge (F1 = 0.40 / κ = 0.05), and benchmarks four scene generators that top out at ~10% holistic success.
+
+This paper introduces LEGO-EVAL, a tool-augmented evaluation framework for text-guided 3D scene synthesis that explicitly grounds scene components via a suite of 21 tools (environment interaction, textual reasoning, multimodal reasoning) to verify per-constraint instruction–scene alignment. The authors also contribute LEGO-BENCH, a benchmark of 130 fine-grained instructions (avg. 9.6 constraints each) spanning object/architecture attributes and spatial relations. LEGO-EVAL achieves a holistic F1 of 0.81 and Cohen's κ of 0.63 against human judgments, more than doubling the best VLM-as-a-judge baseline (F1=0.40, κ=0.05). Benchmarking existing generation methods reveals ≤10% holistic success rates, exposing severe limitations in current approaches.
 
 ## Strengths
-- **Large, well-documented headline gain in agreement with human judgments**: F1 = 0.81 / κ = 0.63 vs. best baseline F1 = 0.40 / κ = 0.05 (Table 1), measured on 260 instruction-scene pairs that include both well-aligned and intentionally non-aligned scenes.
-- **Concrete coverage gap in prior work demonstrated empirically**: SceneEval cannot express ~41% of LEGO-BENCH constraints (Section 4.1.2), giving an objective rationale for a more expressive framework rather than appealing to intuition.
-- **Useful ablation isolating which tool family matters**: removing environment-interaction + multimodal tools drops Holistic F1 by 24.9% (Table 2), confirming that grounding into the scene representation — not just better prompting — drives the gain.
-- **Compelling complexity-vs-success curve (Figure 6)**: all four generators collapse to ~0.5% holistic SR at ≥13 constraints, a credible and informative empirical observation about the state of 3D scene synthesis even after granting calibration concerns.
-- **End-to-end automation supported by Table 4**: replacing oracle constraints with automatically identified ones changes holistic/partial SR by at most ±0.03 across four generators, evidence that Step 1 is not the bottleneck in practice.
+
+- **Dramatic improvement in evaluation accuracy with robust evidence.** LEGO-EVAL achieves holistic F1 of 0.81 and Cohen's κ of 0.63, compared to 0.40/0.05 for the best VLM-as-a-judge baseline and 0.33/0.00 for SceneEval (Table 1). The use of three different VLMs (Gemini-2.5-Pro, GPT-4o-mini, GPT-4.1) all converging to κ≈0.05 strengthens the claim that the gap is not due to poor prompt engineering for a single model.
+
+- **Clean, well-motivated framework with validated design.** The four-stage pipeline (constraint identification → tool planning → argument selection → validation) is clearly articulated. The ablation study (Table 2) demonstrates that disabling environment interaction tools causes a 24.9% drop in holistic F1, while textual and multimodal reasoning tools also matter, confirming that all three tool types are necessary and that the gains are not merely from task decomposition.
+
+- **A useful, realistic benchmark that exposes real limitations.** LEGO-BENCH provides 130 instructions with 1,250 total constraints across diverse categories (Figure 4). Benchmarking four methods (LayoutGPT, Holodeck, I-Design, LayoutVLM) reveals that holistic success rates top out at 10%, convincingly demonstrating that current generation methods cannot satisfy fine-grained real-world instructions.
+
+- **Practical end-to-end utility demonstrated.** The framework operates effectively with automatically extracted constraints (Table 4, negligible difference from human-annotated constraints), and serves as a superior feedback signal for iterative refinement (Figure 7, LEGO-EVAL feedback improves Holodeck's success rate from ~8.5% to ~18.5% over 3 refinement rounds vs. ~14.5% for VLM feedback).
+
+- **Convincing qualitative evidence.** The case study (Figure 8) concretely shows how LEGO-EVAL avoids the hallucinated object localizations that plague both VLM-as-a-judge (which hallucinates a flashlight and laptop) and SceneEval (which misidentifies a painting as a laptop), correctly recognizing that neither object exists and therefore the constraint cannot be evaluated.
 
 ## Weaknesses
 
 ### Fatal
-None — the contribution is real and the evaluation, while imperfect, is not fundamentally broken.
+
+None.
 
 ### Major
-- **Asymmetric information in the headline comparison.** LEGO-EVAL's textual-reasoning tools return ground-truth Unity scene metadata (`armchair_0_pos: {x, y, z}`, object list, wall/door/window info), while VLM-as-judge sees only 4 rendered images (Section 4.1.1). The 0.41 F1 gap therefore conflates *tool orchestration* with *privileged symbolic scene access*. A baseline that feeds the same structured metadata to a VLM-as-judge as text is missing, which would actually isolate the contribution claimed by the paper.
-- **Refinement experiment uses LEGO-EVAL on both ends (Figure 7).** LEGO-EVAL is the feedback signal *and* the metric used to score the resulting scenes. Likewise VLM-as-judge serves both roles for its branch. The reported Holodeck improvement from 8.5% → 18.5% therefore demonstrates internal consistency, not that the refined scenes are objectively better — particularly because optimizers exploit their judge's blind spots. Independent human scoring of post-refinement scenes is needed to support the "superior feedback quality" claim.
-- **Gold standard underspecified.** The main text reports κ = 0.63 against human judgments but gives no annotator count, no inter-annotator agreement, and no protocol for disagreement. Without IAA there is no upper bound for what an evaluator could plausibly achieve, and the gold labels appear to come from the same group that designed the constraints — coupling evaluator to oracle.
+
+None.
 
 ### Minor
-- **No variance / CIs on n = 260.** Tables 1–5 are point estimates. The ablation in Table 2 includes a –0.04% Holistic F1 drop ("w/o M") which is then asserted to support "all three tools are indispensable" — that claim is not supported by the number actually reported. Bootstrap CIs are cheap and would clarify which deltas are real.
-- **Constraint-extraction accuracy not directly evaluated.** Table 4 measures only that downstream SR is similar with oracle vs. predicted constraints; it does not report precision/recall of the extracted constraint set against human annotation, so silent compensating errors are possible.
-- **Figure 8 labels the constraint as "Valid ✓" while the explanation says it cannot be satisfied.** Whether missing-object constraints are vacuously valid, automatically invalid, or unevaluable is not documented; this choice propagates to every holistic verdict involving absent objects and should be explicit.
-- **Heterogeneous-baseline augmentation in Table 3 not ablated.** Three of four generators are wrapped with Holodeck. The large I-Design vs. Holodeck gap on Object Selection (11.0 vs. 46.3) under nominally the same selection backbone is not explained.
+
+- **Per-constraint ground-truth annotation process is under-described in the main text.** The paper reports partial (per-constraint) F1, recall, precision, and κ in Table 1, which requires knowing which individual constraints are satisfied vs. violated in each of the 130 negative scenes. Section 3.3 states that constraints are annotated, and Section 4.1.1 says negative scenes were "manually curated" to "intentionally not fully satisfy" instructions. The inference that curators tracked which constraints they violated is reasonable, and details likely appear in Appendix B.2 (stripped by the parser), but a brief description of the annotation protocol for negative scenes in the main text would strengthen confidence in the partial-level metrics.
+
+- **No analysis of individual tool output accuracy.** The paper ablates entire tool *types* (Table 2) and measures tool *planning* accuracy (Table 5), but never directly measures how often individual tools (e.g., "get property description," "get spatial relation") return incorrect information. Since multimodal reasoning tools rely on VLMs that can err, understanding whether tool failures limit evaluation accuracy would strengthen the robustness claims. The high overall human agreement (κ=0.63) provides indirect validation, but a brief error analysis would be informative.
+
+- **CLIPScore threshold selection is post-hoc rather than principled.** Three fixed thresholds (15, 20, 25) are evaluated, but no validation split or threshold-sweep rationale is provided. Plotting F1 as a function of threshold would give a fairer picture of CLIPScore's best-case performance and make the comparison more rigorous.
 
 ### Trivial
-- Tool-planning "correlation" in Table 5 is across three LLMs, which is descriptive rather than statistical.
+
+- The exact prompt and output format for the VLM-as-a-judge baseline are not specified in the main text (details presumably in appendix). While the use of three VLMs with self-consistency already makes the comparison credible, providing the prompt in an accessible location aids reproducibility.
 
 ## Nice-to-Haves
-- Sensitivity analysis: at the constraint level, even a 3–5% false-negative rate would meaningfully shift the "10%" ceiling claim for generators on instructions averaging 9.6 constraints. Reporting this would strengthen rather than weaken the headline.
-- A failure-mode analysis of the ~20% of cases where LEGO-EVAL's holistic judgment disagrees with the human label.
+
+- **A constraint-by-constraint VLM baseline** (VLM prompted to evaluate each constraint individually without custom tools, using the same decomposition as LEGO-EVAL) would isolate whether gains come from decomposition alone or specifically from the tool suite. The current evidence (Table 2 ablation, Figure 1) already strongly suggests tools are critical, but this additional baseline would make the argument airtight.
+
+- **Tool-level error analysis with qualitative examples** showing where a specific tool returns incorrect information and how that propagates (or is corrected) in the final judgment, giving richer insight into framework robustness.
+
+- **Evaluation on scenes generated outside the Holodeck/Unity stack** to demonstrate generality. The current tool set is tied to Unity; extending to other simulators would broaden the framework's community utility.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- *Harsh critic's "tool-augmented access is structurally unfair" framed as invalidating the comparison.* Kept as a Major weakness, but the maximalist version — that the comparison is meaningless — is overstated. Tool access *is* part of the proposed method; what's missing is one information-matched baseline, not a full overhaul.
-- *Strengths from the Strength Finder about "addresses an important problem" / "rich benchmark design" / "practical end-to-end automation"* — these are either generic or already covered by Table 4 strength I retained.
+
+These points were flagged for removal; treat them with caution.
+
+- **"Unsubstantiated per-constraint ground truth" (Harsh Critic, Point 1):** The critic claimed per-constraint labels cannot be verified. However, the paper explicitly states constraints are annotated (Section 3.3) and negative scenes were manually curated to intentionally violate constraints (Section 4.1.1). The partial metrics reported in Table 1 presuppose that curators tracked which constraints were violated — this is a natural consequence of deliberately constructing scenes that "do not fully satisfy" instructions. The appendix (stripped by parser) contains further collection details. Kept as a minor documentation concern rather than an evidential gap.
+
+- **"VLM baseline is a strawman" (Harsh Critic, Point 2):** The critic argued the VLM baseline may be performing near chance due to poor prompting. But three different VLMs (Gemini-2.5-Pro, GPT-4o-mini, GPT-4.1) all converge to κ≈0.05 with self-consistency — this pattern across diverse models makes a prompt-engineering explanation implausible. The paper's Figure 1 directly demonstrates *why* VLMs fail (cannot ground small/scene components from images), providing a mechanistic explanation independent of prompt design.
+
+- **"No measurement of individual tool accuracy makes claims unsubstantiated" (Harsh Critic, part of Point 3):** The critic claimed the high human agreement "could simply reflect that the tools are sufficiently accurate for the specific constrained scenes." But the tools span diverse constraint types and 260 scene pairs; the benchmark's constraint diversity (Figure 4) and the strong ablation results (Table 2) make this concern overblown. Kept as a minor point (tool accuracy analysis would be informative but is not essential to validate the core claim).
+
+- **"Introduction overstates weakness of existing methods without acknowledging scene graphs could be provided to VLMs" (Harsh Critic, Section-by-Section):** The paper explicitly discusses SceneEval as an existing method that attempts structured evaluation, and the VLM baseline already provides 4 viewpoint images. Providing a full scene graph to a VLM would essentially be giving it the answer — the point of evaluation is to test whether models can *autonomously* assess alignment.
+
+- **"No discussion of tool-augmented approaches outside 3D scenes" (Harsh Critic, Section-by-Section):** The paper explicitly discusses VisProg and ViperGPT in Section 2 (Related Work, paragraph on tool-augmented language models), directly contradicting this claim.
+
+- **"No confidence intervals or significance tests" (Harsh Critic, Section-by-Section):** Confidence intervals are not standard practice in 3D scene evaluation benchmarks; none of the calibration anchor papers in this domain report them. The 260-pair dataset and consistent pattern across multiple metrics/models make the results interpretable without them.
+
+- **Various formatting/style nits and missing-appendix criticisms (Harsh Critic, multiple points):** These are parser artifacts or reflect the stripped appendix — the original submission includes the relevant details.
 
 ## Novel Insights
-None beyond the paper's own contributions. The empirical observation that current LLM-based scene generators collapse on instructions with ≥13 constraints (Figure 6) is the most interesting takeaway and is the paper's own claim.
+
+The paper's most novel empirical insight is that multi-hop grounding via explicit tool use — rather than end-to-end VLM judgment — is what drives evaluation accuracy for 3D scenes. This is supported by the stark contrast between VLM-as-a-judge (κ=0.05, near chance) and LEGO-EVAL (κ=0.63, substantial agreement), combined with the ablation showing that environment interaction tools alone account for a ~25% drop in F1. The finding is significant because it challenges the increasingly common practice of using off-the-shelf VLMs as evaluators for complex spatial tasks, and provides a concrete alternative architecture (tool-augmented constraint-by-constraint verification) that generalizes beyond the specific 3D scene domain.
 
 ## Suggestions
-- Add an information-matched VLM-as-judge baseline that receives the same textual scene metadata.
-- Run a small (e.g., 50-scene) blinded human study on the refined scenes in Figure 7 to break the circularity.
-- Report annotator count and IAA for the 260 gold judgments; include bootstrap CIs in Tables 1–3.
-- Document the semantics of constraints involving absent objects and fix the Figure 8 label inconsistency.
-- Report direct precision/recall of GPT-4.1 constraint extraction against human annotation.
 
-## Evaluation
-- **Originality**: moderate. The decomposition (constraint identification → tool planning → argument selection → validation) and the 21-tool taxonomy are sensible engineering rather than conceptually new; the novelty is in scope (architectural components, free-form spatial relations) over SceneEval.
-- **Importance**: real — fine-grained evaluation of 3D scene synthesis is a recognized bottleneck and CLIPScore/VLM-as-judge are demonstrably weak.
-- **Soundness**: mixed. Headline numbers are large but the comparison is information-asymmetric, and the refinement experiment is self-referential.
-- **Clarity**: clear writing; the figures support the method.
-- **Value to community**: the benchmark and the complexity-collapse finding will be useful regardless of the methodological gaps above.
+- Briefly describe the per-constraint annotation protocol for negative scenes in the main text (even one sentence clarifying that curators logged which constraints were violated when constructing the 130 negative scenes would address the documentation concern).
+- Include the VLM-as-a-judge prompt in an accessible location (main text or a clearly referenced appendix section).
+- Add a short paragraph or table in the analysis section characterizing the frequency and types of multimodal reasoning tool failures observed, perhaps on a small sample, to complement the strong end-to-end results.
 
 ## Score and Decision
 
-Anchors retrieved:
-- `LtuRgL03pI.md` (InstructScene, avg 7.50) — accepted scene-synthesis paper with strong benchmark contribution; LEGO-EVAL's framework is less novel methodologically than InstructScene's generative model.
-- `Yj6IdXSOZk.md` (CF-GISS, avg 5.00) — rejected scene-synthesis paper with mixed reviews; comparable in maturity to LEGO-EVAL.
-- `s3sJenvY5H.md` (Generative Robotic Simulations eval, avg 4.75) — rejected eval-framework paper for generative sims; similar topical fit, similar critique pattern (eval framework with unclear ground truth).
-- `rDLgnYLM5b.md` (ISG, avg 7.20) — accepted multi-level evaluation framework; better-validated than LEGO-EVAL.
-- `m8yby1JfbU.md` (Is your VLM a reliable judge, avg 6.50) — accepted, similar topic of judge reliability.
-- `87YOFayjcG.md` (JudgeLM rejected, avg 5.25) and `xsELpEPn4A.md` (JudgeLM accepted, avg 7.50) — same paper, two versions; bracketing.
-- `X1OfiRYCLn.md` (Dynamic Multimodal Eval, avg 7.50) — accepted, comparable scope.
-- `4ciEeIiIJ7.md`, `fSB95BWiBQ.md`, `glUf3YGcJQ.md` (avg 3.5–4.0) — clearly weaker than LEGO-EVAL.
-- `GDd5H92egZ.md` (ReFeR, avg 5.40) — rejected eval framework; closest analog in framing to LEGO-EVAL.
-- `mIl15VP7vt.md` (IRT eval, avg 6.50) — rejected-but-mid eval framework.
-- `1KLBvrYz3V.md` (Century, avg 7.50) — accepted benchmark with stronger validation than LEGO-EVAL.
-- `BXMoS69LLR.md` (4.50), `LDu822E45Q.md` (4.25), `kTjEPEy96Q.md` (3.00) — weaker than LEGO-EVAL.
+**Anchor comparison:**
 
-LEGO-EVAL sits above the 3–4 band (its experiments and benchmark are far more substantial), is comparable to ReFeR (5.40) and CF-GISS (5.00) — competent eval/synthesis papers with real methodological gaps — and below the 7+ anchors (ISG, InstructScene, Century) that have cleaner validation. The circular refinement experiment and the asymmetric headline comparison keep it from the 6+ band; the strong benchmarking and clear utility keep it above the 4 band.
+| Anchor | Avg Score | Decision | How LEGO-EVAL compares |
+|---|---|---|---|
+| T2I-CoReBench (`iqAFhWistW`) | 6.0 | Accept (Poster) | Similar: both introduce well-structured benchmarks with comprehensive evaluation. LEGO-EVAL adds a novel *evaluation framework* (not just a benchmark) with stronger human validation (κ=0.63 vs. checklist-based MLLM evaluation). Slightly stronger. |
+| Scenethesis (`SzhezVoaNB`) | 5.0 | Accept (Poster) | LEGO-EVAL is substantially stronger: better human validation, more thorough experiments, clearer novelty in evaluation methodology rather than system integration. |
+| SANEval (`Er9rKIjTkD`) | 4.0 | Reject | LEGO-EVAL is clearly stronger: genuine novelty in tool-augmented grounding vs. incremental extension, much stronger human validation, cleaner experimental design. |
+| Agentic 3D Scene Gen (`uiopHcWPRO`) | 4.4 | Reject | LEGO-EVAL is stronger: cleaner contribution, better ablations, stronger human evaluation. |
+| CHOrD (`xszAt23a17`) | 4.0 | Reject | LEGO-EVAL is stronger: more thorough experiments, clearer evaluation methodology, stronger human validation. |
+| RoomGen (`g7Kxs5NE7R`) | 2.0 | Reject | LEGO-EVAL is clearly far superior: genuine novelty, strong validation, comprehensive experiments. |
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+LEGO-EVAL sits above the 4.0–5.0 band and is comparable to or slightly stronger than the 6.0 anchor. The paper makes a genuine contribution with a novel framework, strong empirical results, a useful benchmark, and practical demonstrations. Weaknesses are minor and addressable.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

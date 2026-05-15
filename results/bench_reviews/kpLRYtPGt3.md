@@ -1,78 +1,82 @@
+Now I have all the information I need. Let me produce the final consolidated review.
+
 ## Summary
-The paper proposes Neon, a post-hoc weight-merge method that improves a generative model by fine-tuning it on its own synthetic samples and then *negatively* extrapolating away from the resulting degraded weights: θ_Neon = (1+w)θ_r − w θ_s. The authors prove that mode-seeking inference samplers (CFG, low temperature, top-k/top-p) induce a first-order anti-alignment between synthetic and real-data gradients, justifying the reversal. Empirically, Neon yields consistent FID gains across diffusion (EDM-VP), flow matching, autoregressive (VAR, xAR), and few-step (IMM) models on CIFAR-10, FFHQ-64, and ImageNet-256/512, including a SOTA 1.02 FID on ImageNet-256 with xAR-L at 0.36% extra compute.
+
+Neon (Negative Extrapolation from Self-Training) proposes a remarkably simple post-hoc parameter merge: briefly fine-tune a generative model on its own synthetic data (which predictably degrades it), then extrapolate *away* from the degraded checkpoint using θ_Neon = (1+w)θ_r - wθ_s. The paper proves that mode-seeking inference samplers (low temperature, CFG, top-k/p) create an anti-alignment between synthetic and real-data population gradients, making this reversal principled. Experiments span diffusion (EDM-VP), flow matching, autoregressive (xAR, VAR), and few-step (IMM) models on ImageNet, CIFAR-10, and FFHQ — achieving a new ImageNet-256 SOTA of FID 1.02 (xAR-L) with only 0.36% additional compute, as well as halving IMM inference steps.
 
 ## Strengths
-- **Universal, architecture-agnostic method with strong empirical results.** Neon improves FID on every tested combination (EDM-VP, flow matching, VAR, xAR, IMM) without auxiliary models, real data, or inference-time changes. Headline xAR-L 1.28→1.02 surpasses UCGM's 1.06 with only 0.36% additional training compute (Sec. 4.2, Fig. 5).
-- **Mechanistic precision–recall decomposition (Fig. 4).** The paper explicitly identifies the mechanism — Neon trades precision for recall, undoing CFG's over-precision bias — which is more honest than treating FID as a black-box gain.
-- **Theory connects sampler structure to the empirical effect.** Theorems 1–2 give a clean sufficient condition (mode-seeking samplers ⇒ cos φ < 0 ⇒ anti-alignment) that explains why CFG/temperature/top-k specifically enable Neon, going beyond pure empiricism.
-- **Useful robustness ablations.** Cross-architecture transfer (Fig. 8), CIFAR-10C null control, sensitivity to synthetic-data CFG scale γ (Fig. 10), and base-model-quality sweep (Fig. 9) collectively constrain what Neon is and isn't.
-- **1k-sample regime works (xAR-L → 1.05 with |S|=1k).** A genuinely surprising and practically valuable empirical fact.
+
+- **Simplicity plus universality across architectures**: Neon is a single-line parameter merge that works across diffusion, flow matching, autoregressive, and few-step models with no auxiliary models, no inference modifications, and no likelihood computations. This breadth is substantially more comprehensive than prior self-improvement methods (Discriminator Guidance, DDO, SIMS), which are architecture-specific.
+
+- **Strong and consistent empirical results**: The improvements are systematic across many settings. The xAR-L ImageNet-256 result (FID 1.02 vs. 1.28 baseline, surpassing UCGM's 1.06) is a legitimate SOTA, and the 4-step IMM result (FID 1.69 vs. 1.98 for 8-step base) halves inference cost. The ablation studies (transferability across architectures, robustness to synthetic data quality, compensation for real-data scarcity in Figure 9) significantly strengthen the paper's claims.
+
+- **Formal anti-alignment theory grounded in sampler properties**: The paper proves (Theorems 1–2) that mode-seeking samplers induce anti-alignment between synthetic and population gradients, with a sufficient condition for Neon to reduce true data risk. The toy Gaussian visualization (Figure 2) cleanly communicates the geometric intuition. The theory also correctly identifies the complementary interpolation regime for diversity-seeking samplers, which demonstrates theoretical sophistication.
+
+- **Mechanistic insight through precision-recall analysis**: Figures 4 and 6 show that Neon operates through a precision-recall trade-off (precision drops, recall rises), directly supporting the narrative that Neon redistributes probability mass from over-represented to under-represented modes. The joint (w, γ) optimization for autoregressive models (Figure 6) is particularly insightful, showing that Neon and CFG counteract each other's biases.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **Headline FID gains come from joint (w, γ) grid search reported on the metric being optimized.** Sec. 4.2 states results are "best FID after (γ, w) grid search," and Fig. 6 shows that γ alone yields 3.01 vs. 2.01 jointly — most of the gap is CFG retuning, not Neon. The baselines are taken at their published γ, so part of the reported gain is co-optimization of CFG that the baseline was not given. A fair comparison would re-tune γ for the base model on the same 10k-FID grid as Neon. Without that, the SOTA-vs-baselines deltas are partially confounded.
-- **Single-metric (FID) reporting for a method that explicitly shifts precision/recall.** The paper itself documents that Neon's mechanism is moving along the P/R frontier (precision ↓ to ~0.87, recall ↑ to ~0.63 at the VAR-d16 optimum). FID is known to be sensitive to this operating point. At least one FID-orthogonal metric (FD_DINOv2, CMMD, sFID) on the headline xAR-L 1.02 and VAR-d16 2.01 results would distinguish a genuine distributional improvement from a P/R re-balancing. This is a directly addressable gap given the central SOTA claim.
-- **Missing compute-matched baseline: continued fine-tuning without negative extrapolation.** The natural control — spend the same ~0.36–3% extra compute on continued training of θ_r (EMA, longer training, etc.) — is absent. Without it the attribution "negative extrapolation, not just more optimization" is incomplete, even though the cross-architecture transfer and CIFAR-10C controls argue against pure overfitting.
+
+- **No confidence intervals or multiple-seed results for any experiment**: All FID numbers are single-run. Improvements of 0.1–0.4 FID (e.g., EDM on CIFAR-10: 1.78 → 1.38; VAR-d16: 3.30 → 2.01) and especially the SOTA claim (1.02 FID, where the next best is 1.06) could fall within evaluation noise. While single-run FID reporting is common practice in generative modeling, a SOTA claim warrants higher rigor. The paper should report at least 3 runs with different synthetic data seeds and fine-tuning seeds for the main results.
+
+- **The theoretical guarantee for CFG-based samplers rests on an unverified assumption**: Theorem 2's application to diffusion/flow models with CFG relies on "curvature-density coupling (A-MONO)" (footnote 2, line 165), for which no empirical check is provided. The paper explicitly acknowledges this assumption, which is commendable, but leaves a gap between "mode-seeking samplers induce anti-alignment (Theorem 2)" and the concrete claim that CFG guarantees Neon's effectiveness. This does not undermine the empirical results — the method works regardless — but it means the theory does not fully explain CFG-based improvements.
 
 ### Minor
-- **Theory-to-experiments gap.** Theorems 1–2 are first-order results in ‖ε‖_{H_d} with an explicit smallness condition ‖ε‖_{H_d} < (mη₀/M(1+η₁))(−cos φ) and rely on the A-MONO assumption (footnote, p. 5). None of these quantities is estimated for the actual checkpoints (xAR-L, IMM). The theory should be framed as motivating rather than "guaranteeing" the empirical regime.
-- **Hyperparameter selection on the same FID statistic used for evaluation.** Using 10k FID for (w, γ) search and 50k FID for reporting does not give an independent validation split — both use the same fixed reference moments. Given the magnitude of gains (e.g., 3.30→2.01) this almost certainly does not explain all of the improvement, but the protocol is not cleanly separated.
-- **No multi-seed variance.** With sub-0.3 FID deltas on already-strong baselines, even a single seed for the synthetic-sampling step on one model would substantiate the gains.
-- **Comparison to a simple "lower CFG/raise temperature" alternative is not made.** Since Neon's mechanism is a P/R shift, the cheapest possible alternative — just retune the sampler — should be ruled out as a partial confound on at least one model.
-- **Fig. 9 "40% data reduction" claim leans on a single crossing point.** The text says Neon with 30k matches base at 50k, but the curves visibly overlap; seed variance would make this claim sturdier.
+
+- **No comparison to related weight-space interpolation/extrapolation baselines**: The operation θ_Neon = (1+w)θ_r - wθ_s is structurally identical to negating a "task vector" (Ilharco et al., 2021) where the task is self-training. The paper does not cite or compare against this line of work. Simple baselines would clarify novelty: e.g., negating a task vector from fine-tuning on a different task, or applying a random direction of equivalent norm. The paper's CIFAR-10C control experiment partially addresses this, but a direct task-vector baseline is missing.
+
+- **Hyperparameter w selection requires real validation data**: The paper states Neon "requires no new real data" but tuning w (and γ jointly for autoregressive models) uses FID computed on 10k real images (line 183). This is a modest practical qualification — the claim is about *training* data, which is technically correct — but the framing slightly glosses over the need for a held-out real set for hyperparameter selection.
+
+- **The "how good must the base model be" experiment (Figure 9) is somewhat overclaimed**: The paper states a model trained on 30k real samples + Neon "nearly matches" the 50k baseline (FID 1.87 → 1.85). While this is interesting for data efficiency, the improvement over the base model at 30k training data is modest. The text accurately reports this, but the framing as "compensating for 40% reduction in real data" is slightly stronger than the numbers warrant.
 
 ### Trivial
-- Algorithm 1 and Eq. (2) restate Eq. (1) verbatim; minor redundancy.
+
+- The paper could more clearly separate which theoretical claims apply to which model families (autoregressive theory is clean; CFG theory has the A-MONO caveat). Currently this is implicit in the footnotes and appendix references.
 
 ## Nice-to-Haves
-- Position Neon within the model-merging / task-arithmetic / weight-extrapolation literature, since Eq. (2) is exactly a negative-coefficient linear interpolation between two checkpoints.
-- Empirically verify A-MONO on at least one diffusion/flow model — even a sanity check would strengthen Sec. 3.1's "concrete instances" claim for non-AR models.
-- Report Pareto curves (FID at fixed precision) rather than FID-optimal points, to distinguish "shift along the frontier" from "Pareto improvement."
+
+- Error bars / multiple runs for the main results, especially for the SOTA claim (FID 1.02). This would substantially increase confidence.
+- A verification experiment for A-MONO on a representative diffusion/flow model, or a weakened theoretical claim that separates the autoregressive case (tight theory) from the CFG case (empirically motivated but theoretically heuristic).
+- A task-vector negation baseline and a "random direction" baseline to isolate whether the specific self-training direction is essential.
+- Qualitative failure cases where Neon degrades quality.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-- *"Theorem 1 mis-states the central quantity (s := ⟨r_s, P r_s⟩ vs. ⟨r_d, P r_s⟩)."* The text on p. 4 defines anti-alignment as s = ⟨r_d, P r_s⟩ < 0, and Theorem 1 bounds an upper bound; the form `s = ⟨r_s, P r_s⟩` in the theorem statement is most plausibly a parser/transcription artifact (under the preconditioner this would be ≥ 0, contradicting the entire framing). Per the formatting/parser rule, removed.
-- *"Missing discussion of model-merging / task-arithmetic literature (WiSE-FT, DARE, task vectors)."* I cannot independently verify those references; moved to Nice-to-Haves as a positioning suggestion rather than a missing-citation accusation.
-- *Strength: "Theorem rigorously guarantees Neon reduces true risk across all major model families."* Overstates what the first-order/small-ε theorems actually establish; conflicts with the verified Minor weakness above.
-- *Strength: "establishes that self-training degradation is not noise but a structured, harvestable signal."* Generic framing without specific evidence beyond what is already captured by the precision–recall strength.
+
+- **Criticism about missing appendix content**: The parser stripped the appendix (line 291: "Rest of paper (reference and Appendix) is removed"). Any criticism about missing proofs or appendix content is not attributable to the authors.
+- **Criticism that "no additional real data" framing is misleading**: The paper says "no additional real *training* data" (line 38), which is accurate — the 10k images used for tuning w are validation, not training data. This is a minor qualification, not a contradiction.
+- **Criticism about missing comparison to model soups**: This is related to the task-vector point above but is less specific; I subsume it into the task-vector baseline point.
+- **Several strength-finder strengths that are generic** (e.g., "This paper addressed an important problem") — these are dropped as they lack specific content.
 
 ## Novel Insights
-The genuinely novel observation is that the systematic *failure mode* of naïve self-training under mode-seeking samplers is itself a usable, low-cost gradient direction — and that the correction can be applied as a pure post-hoc weight merge rather than during sampling or via auxiliary networks. The precision–recall framing in Sec. 4.1 also offers a clean diagnostic: a model's CFG operating point is often over-precision/under-recall, and Neon is effectively a knob that moves it back. The cross-architecture transfer result (improving EDM using flow-matching samples) hints that the "over-precision" bias is a property of the *sampler family*, not the architecture, which is a non-obvious empirical claim worth following up.
+
+The reviews surface an interesting tension around the theoretical claims. The harsh critic reads the theory as overreaching for the CFG case (A-MONO assumption), while the strength finder reads it as rigorous. The truth sits in between: the autoregressive case (temperature < 1, top-k/p) has a clean theoretical justification (nondecreasing reweighting of log-probabilities → guaranteed anti-alignment). The diffusion/flow CFG case relies on an additional assumption (A-MONO) that, while physically plausible, remains unverified. This is not a fatal flaw — the empirical evidence across four model families is overwhelming — but it means the paper has two tiers of theory: one rigorous (autoregressive) and one heuristic-but-plausible (diffusion/flow CFG). The paper could more honestly segment its claims along this boundary. Conversely, what makes the paper genuinely novel is not the weight-space operation itself (which resembles task vectors) but the *identification* that self-training degradation is a structured, anti-aligned signal — an insight that connects sampler properties to gradient alignment in a way prior work (which focused on external verifiers or discriminators) did not.
 
 ## Suggestions
-1. Add a re-tuned-baseline column: for each model, sweep γ (and τ/top-k where applicable) on the same 10k FID grid as Neon and report the base model at its own FID-optimal γ. This is the single experiment most likely to settle the SOTA-claim concerns.
-2. Add FD_DINOv2 or CMMD on the headline xAR-L 1.02 and VAR-d16 2.01 results.
-3. Add a compute-matched "continue fine-tuning θ_r" control on at least one model.
-4. Report 3 seeds for the synthetic-sampling step on EDM-VP/CIFAR-10 (cheapest setting).
-5. Demote "guarantees" → "motivates" in Sec. 3.1 unless the smallness conditions are estimated for at least one real checkpoint.
 
----
+1. Add error bars (at least 3 seeds) for the main results, particularly the xAR-L SOTA claim (FID 1.02). Without this, the SOTA claim is plausible but not fully established.
+2. Add a brief empirical check of A-MONO (e.g., compute the conditional expectation in the A-MONO definition for EDM on CIFAR-10 across discretized time steps) or explicitly restructure the theory to separate the autoregressive case (clean) from the CFG case (empirically motivated).
+3. Discuss/cite the task-vector literature (Ilharco et al., 2021) and add at least one simple baseline: negating a task vector from fine-tuning on a held-out synthetic dataset from a *different* model, to show the effect is specific to the self-training direction.
 
-**Axis-by-axis assessment.** Originality: high — negative extrapolation from self-training as a post-hoc weight merge is a fresh and counterintuitive move. Importance: high — addresses a real bottleneck (data scarcity) with negligible compute. Claim support: mixed — the empirical universality across four model families is well-supported; the "guaranteed by theory" framing and the SOTA-by-grid-search number are over-sold. Soundness of experiments: above average for the area (multiple architectures, robustness ablations, transfer + null control), but missing matched-compute baseline, re-tuned-sampler baseline, FID-orthogonal metric, and seed variance. Clarity: good; the precision–recall framing is unusually honest about mechanism. Value to the community: substantial — the method is trivial to apply on top of arbitrary public checkpoints.
+## Score and Decision
 
-**Anchor comparison (calibration).**
-- `2o58Mbqkd2.md` (SuperDiff), avg 7.33 — combining pretrained diffusion models via theory + inference-time superposition. Comparable in originality and theoretical grounding; this paper has stronger headline empirical SOTA but weaker baseline rigor.
-- `wGVOxplEbf.md` (SaRA), avg 6.20 — efficient diffusion fine-tuning. This paper is broader in scope (4 model families) and has more striking headline numbers.
-- `UmMa3UNDAz.md` (EfficientDM), avg 6.50 — efficient diffusion fine-tuning; comparable empirical solidity, less conceptual novelty than Neon.
-- `BgYbk6ZmeX.md` (diffusion repurposing), avg 6.00 — solid empirical study; less novel than Neon.
-- `6p74UyAdLa.md` (Dynamic Negative Guidance), avg 6.25 — inference-time negative-guidance with theory; closely related framing, Neon is broader and cheaper.
-- `Q7jXHlWVLC.md` (Perp-Neg), avg 5.50 — sampling-time fix with theory + experiments; Neon has stronger empirical scope.
-- `t73rC2GJQJ.md` (DMM model-merging), avg 4.50 — comparable surface topic but weaker results.
-- `TJHB4ySVZM.md` (Data extrapolation T2I small datasets), avg 3.40 — low anchor; very different paper, weak presentation; Neon clearly above.
-- `NDMLjEJoLb.md` (Black-Scholes blending), avg 4.75 — speculative analogy; Neon far better grounded.
-- `sLregLuXpn.md` (GAN noise injection theory), avg 5.00 — theory paper with limited empirics; Neon is much stronger empirically.
-- `Bq3fEAGXUL.md` (Realistic eval of merging), avg 5.33 — different scope (eval rather than method).
-- `mKM9uoKSBN.md` (Linear diffusion / power iteration), avg 4.00 — narrower theory; Neon stronger overall.
-- `PpP6ALezeK.md` (Corruption stage few-shot fine-tuning), avg 5.00 — comparable in observation-driven methodology, but smaller-scope results.
-- `RcANissyP4.md` (SelfEval), avg 5.67 — different problem (evaluation); not directly comparable.
-- `FQaZeFGca2.md` (Few-shot DRL), avg 5.00 — weaker empirics than Neon.
-- `Eg32tDGgF5.md`, `DE7IVrk8Ks.md`, `SEvJfuCtPY.md` (avgs 3.00–3.50) — clearly weaker papers; Neon well above.
+**Calibration anchors** (retrieved by `calibration_search`; all 28 results inspected, key anchors listed):
 
-Neon's empirical breadth, SOTA on a competitive ImageNet benchmark at near-zero compute, transferable mechanism analysis, and clean if first-order theory put it above the 6.0–6.5 cluster (SaRA, EfficientDM, BgYbk6ZmeX) and closer to SuperDiff (7.33), though the SOTA-by-grid-search confound and absent FID-orthogonal metric prevent placing it above SuperDiff.
+| Path | Avg Human Score | Comparison to Paper Under Review |
+|------|----------------|----------------------------------|
+| ZX6XEfBidf.md (Exploring Image Gen) | 2.00 | Very weak paper with unclear theory, flawed proofs, and narrow experiments. Neon is incomparably stronger. |
+| HjLC5fEWcI.md (WhiteBox Gen) | 3.00 | Toy non-parametric model, very limited scope. Neon's comprehensive empirical validation is far superior. |
+| IYJKOBJeui.md (SFO) | 5.00 | Subject-driven generation method; mixed reviews on novelty. Neon has broader scope and clearer contributions. |
+| yfk6c39omW.md (Escaping Model Collapse) | 5.20 | Theory of verifier-guided training in linear regression; limited to toy experiments. Neon has much broader empirical validation on real models. |
+| 9RdhTvYbX0.md (Preventing Model Collapse) | 5.50 | Theoretical paper on mixing ratios in linear regression; no real image experiments. Neon's practical impact is greater. |
+| W2NINfoVtN.md (VSF) | 6.00 | Simple, effective negative guidance for few-step models. Neon matches this simplicity but with broader architecture coverage and a SOTA result. |
+| DM0Y0oL33T.md (Universal Verifier) | 8.00 | Groundbreaking multimodal verifier with comprehensive benchmarks. A different tier of contribution. |
 
-MY FINAL SCORE: <pineapple>7</pineapple>
+Neon is substantively stronger than the 5–6 range papers (broader experiments, SOTA result, cleaner theory for the autoregressive case) but has notable evidential gaps (no error bars) and a theoretical caveat for CFG that papers at the 8.0 level typically resolve more completely. The method's simplicity and breadth are genuine strengths that place it above VSF (6.0) and the model-collapse theory papers (5.2–5.5).
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

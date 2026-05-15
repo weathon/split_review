@@ -1,86 +1,90 @@
+Now I have all the information I need. Let me write the consolidated review.
+
+---
+
 ## Summary
-The paper performs an ablation of GRPO's loss components (negative feedback, group-relative advantage, PPO-style clipping) on small instruction-tuned models (Qwen2.5-0.5B/1.5B, Llama3.2-1B) fine-tuned with LoRA on 1,800 GSM8K problems. Based on the ablation, it proposes RGR — REINFORCE with group-relative advantages and KL but no clipping or policy ratios — and reports that RGR matches or exceeds GRPO on 17 of 27 (model × benchmark) cells.
+
+This paper systematically ablates the components of GRPO's loss function for LLM reasoning post-training. It tests three variants — positive-only advantages (GRPO-pos), clipping-free REINFORCE with group-relative advantage (RGR), and REINFORCE with raw rewards — across three small model families (Qwen2.5-0.5B/1.5B, Llama3.2-1B) trained on GSM8K. The key findings are that (1) PPO-style clipping is unnecessary when starting from strong policies, and (2) group-relative advantage estimation is essential for training stability. The proposed RGR simplifies GRPO by removing policy ratios and clipping while retaining group-relative advantage and KL regularization, matching or modestly exceeding GRPO across 9 math/STEM benchmarks.
 
 ## Strengths
-- Clean decomposition framing: the paper systematically defines and runs three explicit variants (positive-only GRPO, RGR-A, REINFORCE-raw) plus RAFT, and reports both training dynamics (Figure 1) and downstream accuracy on nine benchmarks (Tables 1–3), so the qualitative comparison structure is easy to follow.
-- Evaluation breadth across multiple model families (Qwen, Llama) and languages (English math, Chinese math, STEM in English/Chinese) is broader than typical small-scale GRPO ablation papers.
-- The training-curve evidence for "positive-only / raw-REINFORCE collapses, GRPO and RGR are stable" (Figure 1, especially for 0.5B) is a clear empirical observation, even if the explanation is partial.
+
+- **Clear, well-motivated research question and systematic decomposition.** The paper asks whether GRPO's complex loss function can be simplified, then executes a logically structured ablation: positive-only → clipping-free → advantage-free. This is a model of how to do controlled component analysis, and the sequential design makes the causal chain easy to follow.
+
+- **Convincing evidence that PPO-style clipping is unnecessary in this setting.** Across three model families and nine benchmarks, RGR (no clipping, no policy ratio) matches or modestly exceeds standard GRPO. This extends Ahmadian et al. (2024)'s argument about clipping being unnecessary for strong LLM policies into the GRPO/reasoning context with concrete empirical support — a useful practical finding for practitioners implementing RL-based post-training.
+
+- **Training dynamics plots (Figure 1) provide a clear visual separation of stable vs. unstable methods.** The contrast between GRPO/RGR (stable reward and length trajectories) versus REINFORCE with raw rewards and GRPO-pos/RAFT (collapse at 0.5B, stagnation at larger scales) directly and intuitively supports the claim that advantage estimation stabilizes training.
+
+- **Broad multilingual and cross-task evaluation.** Nine benchmarks spanning English math (GSM8K, MATH, Gaokao2023, OlympiadBench, AMC23), Chinese math (CMATH, CN-Middle-School), and STEM (MMLU-STEM, Gaokao2024) across three model families provide reasonable cross-validation that the patterns are not limited to a single setting.
 
 ## Weaknesses
 
-### Fatal
-None — the paper has structural problems but its empirical observations within scope are not fabricated or self-contradictory.
-
 ### Major
-- **The headline "PPO-style clipping is unnecessary" claim is tested in a regime where clipping is essentially inert.** The setup samples G=8 completions with π_θ_old and (per §3.1 / Eq. 2) takes a single gradient update; nothing indicates µ>1 inner PPO epochs. Under one inner update, π_θ/π_θ_old ≈ 1 token-by-token, so the clip in Eq. 1 almost never fires and GRPO reduces to RGR-A on the actually-applied gradient. The paper never reports the distribution of importance ratios or the fraction of clipped tokens, and never enters the multi-epoch / off-policy regime where clipping does work. Therefore the experiment cannot distinguish "clipping is unnecessary" from "clipping never triggered." This is the central methodological claim and it is not adequately supported.
-- **The novelty delta over Ahmadian et al. (2024) is not articulated and not measured.** The paper itself cites Ahmadian et al. as having argued that PPO machinery is unnecessary for strong LLM initializations, and RGR-A (REINFORCE log π · group-normalized advantage + KL) is essentially RLOO/REINFORCE-with-group-baseline. Yet RLOO is not included as a baseline in Tables 1–3. Without a direct RLOO comparison, the contribution collapses to "RGR-A ≈ Ahmadian-style REINFORCE works at small scale on GSM8K," which is a confirmation rather than a new finding.
-- **No seeds, no variance, no significance testing.** "17 of 27" comparisons is presented as the main evidence but: (a) under a naïve binomial null at p=0.5, ≥17/27 has p ≈ 0.12; (b) the 27 cells are not independent (shared models, shared training data); (c) many table gaps are <1–2 points on small evaluation sets (AMC23 has 40 problems, CN-Middle-School similar). No standard errors, no per-seed runs, no paired tests. The "RGR surpasses GRPO" claim is not statistically defensible from a single seed.
-- **Scale–claim mismatch for "emergence of reasoning."** Training uses ≤1.5B params, LoRA rank 128, 1,800 GSM8K examples, ~65 steps, max 512 generated tokens. The "emergent reasoning" claim in §4 is supported by a single qualitative example (Figure 2) from Countdown, which is not the training distribution, and the response-length analysis (Figure 1) shows lengths ≈150 tokens — far from the long-CoT regime motivating GRPO. The framing in the abstract and intro around DeepSeek-R1-style reasoning emergence is not supported in this scale.
+
+- **Limited scale restricts generality of conclusions.** All experiments use models ≤1.5B parameters, a single training dataset (GSM8K with 1,800 problems), fixed LoRA rank 128, and fixed group size G=8. The paper's core claims — that clipping is unnecessary and that RGR can match GRPO — are demonstrated only at this small scale. Prior work on PPO suggests clipping becomes more relevant with aggressive updates and larger policy shifts; it is plausible that clipping matters at 7B+ scales or with more diverse training data, and the paper provides no evidence either way. The authors acknowledge this as a limitation due to hardware constraints, which is fair, but it means the findings should be presented as suggestive rather than general.
+
+- **The "negative feedback is indispensable" claim is overstated.** The paper's conclusion states that omitting negative feedback leads to "instability, collapse, and consistently degraded performance" (Section 5). The results paint a more nuanced picture: on the 0.5B model, GRPO-pos indeed collapses catastrophically. But on the 1.5B model, GRPO-pos achieves 70.6 on GSM8K (vs. GRPO's 71.0), a Math-English average of 35.7 (vs. 37.3), and *outperforms* GRPO on STEM benchmarks (46.7 vs. 45.7). On Llama-1B, GRPO-pos matches or beats GRPO on Chinese math. The paper's own results section partially acknowledges this nuance ("avoid immediate collapse... still demonstrate reward stagnation"), but the conclusion drops all qualification. The evidence shows that negative feedback is important for smaller models and training health, not that it is universally "indispensable" in the strong sense claimed. This mismatch between evidence and rhetoric weakens the paper's credibility.
 
 ### Minor
-- **GRPO-pos has a magnitude confound.** Zeroing negative advantages roughly halves the effective gradient magnitude (and shifts the mean), so "positive-only collapses" entangles "no negative feedback" with "halved effective signal." A rescaled positive-only control would disentangle these. The text's "negative feedback is indispensable" conclusion is therefore overstated.
-- **KL retention is not actually ablated.** Eq. 1 keeps KL inside the per-token sum and RGR-A (Eq. 2) also keeps the KL term, so the paper does not test whether KL regularization is necessary — only clipping and the importance ratio. The framing of "simplifying GRPO" is narrower than the abstract implies.
-- **GRPO-pos numbers contradict the strong narrative.** For Qwen2.5-1.5B, GRPO-pos averages 35.7 on Math-English vs GRPO 37.3, and on Chinese math 65.3 vs GRPO 65.7 — i.e., the "collapse from removing negative feedback" is essentially a 0.5B phenomenon. The paper does not flag this asymmetry.
-- **The "REINFORCE with direct rewards" baseline is a strawman for "advantage estimation is crucial."** Raw-reward REINFORCE without any baseline has well-known high-variance / unbounded-scale collapse; reproducing this collapse is uninformative about the specific value of group-relative normalization vs. any baseline.
+
+- **No statistical validation of the "RGR surpasses GRPO" claim.** The reported advantage of RGR over GRPO in 17/27 comparisons rests on margins of 0.1–5.0 percentage points, many in the sub-1% range (e.g., Llama-1B Math-English avg: RGR 20.2 vs. GRPO 20.1). No standard errors, confidence intervals, or multi-seed replication are reported. While single-run evaluation is common in this subfield due to compute constraints, the paper's central claim that RGR *surpasses* GRPO requires more evidential weight than the data currently provides. The paper is on firmer ground claiming that RGR *matches* GRPO while being simpler — which is already a meaningful contribution.
+
+- **Ambiguity in the "REINFORCE with Direct Rewards" variant.** Section 3.2 states this variant "start[s] from RGR A, remove[s] the group-relative advantage estimation, and train[s] directly on the raw reward signal." It is not specified whether the KL penalty from RGR A (Eq. 2) is retained or removed. If retained, the collapse of this variant (Figure 1c-d) strongly underscores the importance of advantage estimation. If removed, the comparison confounds advantage removal with KL removal. This should be clarified.
+
+- **Efficiency claims are unmeasured.** The paper repeatedly describes RGR as a "more efficient alternative to GRPO" (Abstract, Section 5), but no wall-clock time, memory, or throughput measurements are provided. The loss is indeed simpler (fewer ops per token), which supports a "transparent" claim, but "efficient" implies measurable gains that are not demonstrated. This is a minor rhetorical overreach.
 
 ### Trivial
-- The advantage in Eq. 1 has the score function written as r_{i,t} · Â — the notation reuses r_{i,t} for both the importance ratio (Eq. for r_{i,t}) and earlier for the scalar reward r_i used in advantage normalization, which can confuse on first read.
-- Inconsistent name usage between "RGR," "RGR A," "RGR-A," and "RGRA" across §3.2, §4, and the conclusion.
+
+- **Figure 2 reasoning analysis is anecdotal.** The Countdown example showing reasoning emergence is a single qualitative illustration, not a systematic analysis. The paper would benefit from a quantitative measure (e.g., fraction of responses containing chain-of-thought) to support the claim that robust objectives foster reasoning behavior.
 
 ## Nice-to-Haves
-- Add a multi-epoch (µ=2,4) PPO-inner-loop run for both GRPO and RGR-A. This is the regime where clipping is supposed to matter; running both there would let "clipping is unnecessary" be tested.
-- Plot the empirical distribution of π_θ/π_θ_old and report the fraction of tokens whose ratio leaves [1−ε,1+ε] in this setup. This would either bolster or refute the central claim.
-- Include RLOO (Ahmadian et al., 2024) and at least one contemporary GRPO variant (e.g., DAPO, Dr.GRPO) as baselines, since the paper's contribution sits adjacent to both.
-- Run ≥3 seeds and report per-benchmark mean ± std, with a paired test across the 27 cells.
-- A quantitative reasoning-emergence proxy (e.g., response-length distribution, fraction of completions with intermediate-step tokens) would be much more convincing than the single Figure 2 example.
-- At least one run with a longer generation budget (≥2048 tokens) and more training steps, so the "reasoning emergence" claim is testable.
+
+- A comparison against REINFORCE with a simple moving-average baseline (rather than only raw-reward REINFORCE) would more cleanly isolate whether *group-relative* advantage specifically matters, or whether any reasonable baseline suffices. This would strengthen the mechanistic conclusions.
+- An ablation isolating the KL penalty (e.g., training RGR with β=0) would clarify whether the observed stability comes from advantage estimation, KL regularization, or both.
+- Testing on at least one non-math reasoning task (e.g., instruction following, code generation) would broaden the domain generality of the findings.
+- A sensitivity analysis on the GRPO clipping parameter ε would address the concern that GRPO's performance relative to RGR could be an artifact of suboptimal hyperparameter choice rather than an inherent limitation of clipping.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-- *Harsh critic's "missing related works / no RLOO comparison" was partially absorbed into Major.* The pure "missing related work" framing is removed per hard rules; the actionable "include RLOO as a baseline" survives because the paper itself names Ahmadian et al. as the closest method.
-- *Strength: "Reproducibility and transparency" with code released.* Generic and not a substantive strength specific to this paper; removed.
-- *Strength: "Motivated simplification relative to existing GRPO variants" (the "removal vs. addition" framing).* This is positioning rhetoric, not evidence, and it conflicts directly with the major weakness that the novelty delta over RLOO is unarticulated. Removed.
-- *Strength: "Clear diagnostic of training stability and reasoning emergence" via Figure 2.* The reasoning-emergence half is contradicted by the scale/budget weakness; only the training-stability portion is kept (folded into the strengths above).
+- **Harsh Critic #1 (statistical significance):** Partially retained above as a **minor** weakness, but the harsh critic's framing that this alone makes the evidence "unreliable" was weakened. Single-run evaluation is standard practice in this compute-intensive subfield (see calibration anchors: the 8gk7qmKSRv paper at score 3.0 was also single-run; the KBut2YCZ4g paper at 3.50 did 3 seeds and was *still* criticized on other grounds). The claim that the evidence is "not reliably supported" is too strong — the consistent pattern across 9 benchmarks and 3 model families provides reasonable support for the *matching* claim, though not for the *surpassing* claim.
+
+- **Harsh Critic #3 (KL term not isolated — full severity):** Retained above as a minor/trivial point. The harsh critic framed this as a "methodological gap" that "weakens the paper's mechanistic conclusions." In reality, the paper's core question is about clipping, not about KL regularization. Isolating KL is a nice-to-have, not a gap that threatens the contribution. The core finding — RGR without clipping matches GRPO — doesn't depend on isolating KL, since both methods include it.
+
+- **Harsh Critic #3 (REINFORCE with moving-average baseline as "fair evaluation"):** The harsh critic argued the paper should test "REINFORCE with a moving-average baseline or a trained value head." This is scope creep. The paper's goal is to simplify GRPO by removing unnecessary components, not to compare against all possible REINFORCE variants. The raw-reward REINFORCE comparison is a reasonable lower bound that demonstrates why *some* form of advantage is needed. I've moved the moving-average baseline suggestion to Nice-to-Haves.
+
+- **Harsh Critic, Section-by-Section Notes (out-of-distribution tasks, LoRA sensitivity, appendix):** These are scope-expanding requests. The paper explicitly scopes itself to mathematical reasoning tasks trained on GSM8K. Requesting out-of-distribution evaluation and hyperparameter sweeps is reasonable as future work but not a weakness of the current study. The "rest of paper (reference and Appendix) is removed" note is a parser artifact — the appendix exists in the original submission.
+
+- **Harsh Critic, Section-by-Section Notes ("introduction overstates... without substantiating"):** The claim that the introduction overstates based on GRPO variants is a matter of rhetorical judgment, not a factual error. The paper cites specific variants (Prefix Grouper, CPPO, DAPO, S-GRPO, GTPO) that each address different aspects of GRPO complexity. This is a reasonable framing, not a weakness.
+
+- **Strength Finder ("Comprehensive multilingual and cross-task evaluation" as a top-tier strength):** Retained as a strength but not emphasized as strongly as the Strength Finder suggested. The evaluation is broad for the paper's scale but limited by model size and training dataset.
 
 ## Novel Insights
-None beyond the paper's own contributions. The observations — that strong-initialization REINFORCE with a group-relative baseline behaves comparably to GRPO at small scale, and that fully removing negative feedback hurts small models — are consistent with what Ahmadian et al. (2024) and follow-ups already argued.
+
+The paper's most useful insight is not simply "clipping is unnecessary" (already argued by Ahmadian et al., 2024 in a different context) but rather the *differential* importance of GRPO's components in the reasoning fine-tuning setting: group-relative advantage estimation is the critical stabilizer, while clipping and policy ratios are dispensable. The training dynamics visualizations (Figure 1) make this point vividly — methods without advantage estimation collapse, while methods without clipping remain stable. This provides a clear design principle: when building RL objectives for LLM reasoning from strong base policies, focus engineering effort on the advantage formulation, not on trust-region mechanisms.
 
 ## Suggestions
-- Re-run with µ ∈ {2, 4} PPO inner epochs and explicitly report what fraction of tokens are clipped per step; without this, the clipping conclusion should be retracted or qualified.
-- Add RLOO and a positive-only-with-rescaled-magnitude control; these two baselines directly target the two largest evidential gaps.
-- Run ≥3 seeds and report variance; reframe "17 of 27" with a paired non-parametric test.
-- Either drop the "emergence of reasoning" framing or rerun with ≥2048-token generation budgets and a quantitative emergence metric.
-- Clarify that KL is retained throughout, and adjust the abstract's "simplifying GRPO" framing to "removing the clipped importance-ratio term."
 
-## Evaluation Axes
-- *Originality:* Low — RGR is methodologically a re-presentation of REINFORCE with a group-relative baseline (Ahmadian et al., 2024).
-- *Importance of the research question:* Reasonable — which GRPO components matter is a legitimate question.
-- *Support of claims:* Weak — the central "clipping unnecessary" claim is tested in a regime where clipping cannot fire; single-seed, no significance.
-- *Soundness of experiments:* Limited — small models, LoRA, 512-token cap, 1.8k examples, ~65 steps; informative for stability comparisons but not for reasoning-emergence claims.
-- *Clarity of writing:* Generally clear; structure is easy to follow; some terminology drift (RGR/RGRA).
-- *Value to the community:* Modest — confirms at small scale what prior work already argued; the strongest take-away is the training-stability curves.
+- **Tone down the "surpasses" and "indispensable" language.** The paper's strongest, most defensible contribution is that RGR *matches* GRPO while being simpler — this alone is valuable. The claims of superiority need statistical support; the claims of indispensability need qualification by model scale. The paper would be stronger with more precise, hedged language that matches the evidence.
+- **Clarify the KL status in the REINFORCE with Direct Rewards variant** with a single sentence (e.g., "the KL penalty from Eq. 2 is retained/removed").
+- **Add a quantitative measure of reasoning behavior** (e.g., chain-of-thought presence rate, average reasoning steps) to complement the anecdotal Figure 2.
+- **Remove or qualify the "efficient" descriptor** unless actual efficiency measurements can be provided.
 
 ## Score and Decision
 
-Anchor comparisons (from the single calibration_search batch):
-- /home/wg25r/.../F0GNv13ojF.md — avg 5.17 (RL reward design for LLM reasoning): more thorough empirical study with multiple reward models and richer analysis; this paper is weaker in novelty and statistical rigor → score below this anchor.
-- /home/wg25r/.../BGnm7Lo8oW.md — avg 5.50 (Learning to Reason at Pre-Training Scale): broader scope and clearer conceptual contribution; this paper is more narrow and less rigorous → score below.
-- /home/wg25r/.../cijO0f8u35.md — avg 5.25 (Scaling Relationship on Math Reasoning): more carefully scaled empirical study with cleaner takeaways; this paper is below.
-- /home/wg25r/.../gdzpnRBP4F.md — avg 4.50 (RLSF): a simple RL variant for reasoning, mixed reception; comparable in scope but the present paper has the worse "headline-claim-untestable-in-regime" issue → score slightly below.
-- /home/wg25r/.../ZK1NnjpjEs.md — avg 3.00 (LLM NLU via PPO/LoRA): clearly rejected for limited contribution; this paper is somewhat better positioned and observationally cleaner → score above.
-- /home/wg25r/.../fWRBheSJth.md — avg 6.67 (GReaTer): accepted with a clear novel technical contribution; this paper is well below.
-- /home/wg25r/.../MeGDmZjUXy.md — avg 6.33 (Moral Alignment for LLM Agents): accepted with a clearer framing and contribution; well above this paper.
-- /home/wg25r/.../38E4yUbrgr.md — avg 6.00 (LM self-improvement by RL contemplation): accept with novel mechanism; well above.
-- /home/wg25r/.../IEduRUO55F.md — avg 6.25 (Eureka): accepted, a substantially novel system; well above.
-- /home/wg25r/.../kHfIuagAq6.md — avg 4.00 (Empirical study of deep RL in continuing tasks): rejected empirical study with limited new insight; this paper is similar in character (empirical, ablation-style) and arguably comparable → similar score.
-- /home/wg25r/.../vueANsev2R.md — avg 3.75 (chaotic dynamics in deep RL controllers): rejected; this paper is somewhat above due to broader benchmark coverage.
-- /home/wg25r/.../x7Q0uFTH2a.md — avg 3.75 (weak bisimulation metric RL): rejected for limited rigor; this paper is roughly at this level.
-- /home/wg25r/.../ULGbw2URE3.md — avg 5.50 (L3Ms Lagrange LLMs): accepted with clearer methodological contribution; above this paper.
-- /home/wg25r/.../D9GoWJJxS5.md — avg 5.00 (Bypass back-prop pruning via policy gradient): borderline reject; this paper is below due to weaker novelty over Ahmadian.
-- /home/wg25r/.../d98CzL5h0i.md — avg 4.75 (Learning to Generate Better than your LLMs): rejected RL-for-LLM exploration; this paper is at a similar level but slightly below due to the untestable-headline-claim issue.
+**Anchor comparison:**
 
-Net positioning: the paper sits between the clear-reject 3.0–3.75 cluster and the borderline 4.0–4.5 cluster. The strongest negative is that the central "clipping unnecessary" claim is methodologically unfalsifiable by this experimental setup; combined with single-seed evaluation and unarticulated novelty over Ahmadian/RLOO, this is below the 4.5 RLSF anchor and comparable to the 4.0 empirical-RL-study anchor.
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| `1spOYCVPPg` — "It's Not You, It's Clipping" | 2.00 | Closest topical match. Same models, same dataset. Current paper has far broader evaluation (9 vs. 4 benchmarks), cleaner ablation design, and more compelling results. Substantially stronger. |
+| `8gk7qmKSRv` — "Demystifying optimization landscape" | 3.00 | Also analyzes GRPO components. Current paper offers a clearer practical contribution (RGR method) and broader empirical validation. |
+| `KBut2YCZ4g` — "Scaling Behaviors of LLM RL" | 3.50 | Empirical study at larger scale (up to 14B) but criticized for lacking unifying insights. Current paper is more focused with clearer takeaways but at much smaller scale. Comparable overall. |
+| `RNkErKpCAp` — "MATH-Beyond" | 4.00 | New benchmark contribution. Different type of contribution; current paper's empirical analysis is more systematic. Roughly comparable quality. |
+| `qJLKOryYeR` — "Off-Policy Token Clipped SFT" | 5.00 | Technical contribution with mixed reviews (2–8). Current paper is cleaner but narrower. Slightly weaker. |
+| `rRB1bYErbL` — "R-Horizon" | 6.00 | New benchmark + comprehensive evaluation across 25 models. Current paper is significantly narrower in scope and novelty. |
+| `IaEqjWXd1d` — "AceReason-Nemotron" | 6.50 | Comprehensive SFT+RL recipe at 7B scale with thorough ablations. Current paper is much smaller scale and less comprehensive. |
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+The current paper has genuine strengths (clear question, systematic ablation, useful practical finding) and real limitations (small scale, overclaiming on negative feedback, no statistical validation). It is clearly stronger than the 2.0–3.0 anchors and clearly weaker than the 6.0+ anchors. Among the 3.5–5.0 range, it sits solidly in the middle: more focused than the 3.50 scaling paper, less technically deep than the 5.0 paper, with a contribution that is real but scope-limited.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

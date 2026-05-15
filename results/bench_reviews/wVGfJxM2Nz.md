@@ -1,10 +1,20 @@
+Now I have everything I need. Let me compose the final consolidated review.
+
+---
+
 ## Summary
-The paper is a position-style case study arguing that geometry-aware inductive biases let smaller ML models generalize better than structurally naive ones, illustrated on two systems: (i) a 2-state lumped LSSM of 1D heat conduction whose discrete state matrix Φ_A is estimated via Riemannian optimization on the SPD manifold, and (ii) an 18-dimensional FPUT chain modeled with an off-the-shelf Symplectic HNN (David & Méhats, 2023). Comparisons are made against RF/XGBoost/LSTM (dissipative) and LSTM/NeuralODE (conservative), with rollout MSE and energy drift as primary metrics.
+
+This paper investigates how geometry-informed inductive biases (SPD constraints via Riemannian optimization for dissipative systems; symplectic structure via SHNNs for conservative systems) can reduce model size while improving generalization. On an 18-dimensional FPUT system, a small SHNN (1,441 params) achieves dramatically lower rollout error and energy drift than a 97k-param LSTM. On a 2D heat transfer system, Riemannian optimization with SPD constraints outperforms Euclidean optimization and naive baselines on out-of-distribution test data.
 
 ## Strengths
-- The energy-drift diagnostic (drift_RMS over autoregressive rollouts) and the level-set visualizations in Figs. 2 and 4 are a clear, pedagogically useful way to distinguish structural faithfulness from one-step accuracy.
-- The parameter-count vs. rollout/drift sweep in Fig. 3 / Table 2 is the right axis to compare on, and the SHNN's drift advantage (e.g., 1.3e-3 with 1,441 params vs. LSTM 5.9 with 97k params) is a substantively large, structurally interpretable gap.
-- The dissipative case uses real EnergyPlus-generated data with a meaningful geographic OOD shift (London → Chicago), and the RieOpt vs. EucOpt comparison (Table 1: 1.36 vs. 3.35 on Chicago T_ext1) isolates the manifold constraint as a clean ablation.
+
+- **Conservative-case experiment is rigorous and convincing.** The paper systematically varies model size (L, W) across SHNN, NeuralODE, and LSTM, and evaluates on one-step MSE, rollout MSE, and energy drift RMS (Table 2, Figure 3). The result that a 1,441-param SHNN achieves ~3 orders of magnitude lower energy drift than a 97k-param LSTM (0.0013 vs 5.914) directly and quantitatively supports the "smaller models" thesis.
+
+- **Energy drift is a well-chosen diagnostic that explains why structure-naive models fail on long roll-outs.** The drift_RMS metric (Table 2) reveals that even the best NeuralODE (drift 1.194) and LSTM (drift 5.914) are orders of magnitude worse than every SHNN configuration, directly linking energy non-conservation to rollout degradation. Figure 4 visually reinforces this by showing the LSTM trajectory visibly crossing energy level sets.
+
+- **RieOpt vs EucOpt comparison cleanly demonstrates the benefit of the SPD constraint.** Both methods start from the same physics-derived initial A, so the performance gap (e.g., Chicago T_ext1: 1.36 vs 3.35) is attributable to the Riemannian optimization enforcing SPD structure, not to initialization. This is the paper's cleanest evidence for the dissipative case.
+
+- **OOD generalization gap is stark and well-illustrated.** On Chicago (unseen forcing), RieOpt achieves MSE 1.36–1.79 while RF, XGBoost, and LSTM range from 7.85 to 40.1 (Table 1). This convincingly shows that structure-naive models fail under distribution shift.
 
 ## Weaknesses
 
@@ -12,69 +22,65 @@ The paper is a position-style case study arguing that geometry-aware inductive b
 None.
 
 ### Major
-- **Limited methodological novelty.** Both case studies apply existing methods: Riemannian optimization on SPD via geoopt (Kochurov et al.) for a 2-parameter linear system, and an off-the-shelf SHNN architecture (David & Méhats, 2023) on FPUT. The paper itself frames the contribution as "reinforce[ing] this claim with a comparative study" (§1), not introducing new methodology. The two case studies do not generalize a thesis so much as restate two well-known facts (manifold-constrained SID stabilizes linear ID; symplectic integrators conserve energy).
-- **The SPD-as-stability argument in §2.1.1 is muddled and partly incorrect.** A dissipative continuous-time A has eigenvalues with Re(λ)<0, so Φ_A=e^{Aτ} has eigenvalues in (0,1) — strict contraction. SPD only requires eigenvalues >0, which permits unstable (>1) eigenvalues. The paper's prose ("wrapping ... within the unit circle in the s-plane where Re(λi)>0") conflates positive eigenvalues with eigenvalues inside the unit disk; these are different. The SPD constraint as stated is *neither necessary nor sufficient* for discrete-time stability. Because the SPD parameterization is the entire technical motivation of §2.1, the section needs a correction (e.g., constraining eigenvalues to (0,1)).
-- **Evidence base is narrow relative to the "general principle" framing.** The conservative case is a single trajectory of one FPUT system at a single α=0.25 with a single normal-mode initial condition, chronologically split 80/20 (so train and test share the same orbit). "Unseen initial conditions" (Figs. 4b/c) are unspecified perturbations of that orbit. With one seed, one α, and no varied excitation, claims about "robust generalization across operating conditions" (abstract) are not actually tested.
-- **Baseline choice somewhat tilts the conservative comparison.** Comparing SHNN against a NeuralODE that uses a non-symplectic integrator and a vanilla LSTM means the gap measured is largely the integrator/parameterization, not architecture choice in a controlled sense. A NeuralODE with a symplectic integrator would be the right control. The dissipative-case baselines (RF, XGBoost, LSTM) are also not state-of-the-art structured-dynamics baselines (e.g., DMD with stability constraints, N4SID, Koopman/SINDy) — and RF/XGBoost in fact beat RieOpt on in-distribution London T_ext2 in Table 1 (0.232/0.106 vs 0.507), which the paper does not discuss.
+- **The dissipative case lacks model-size scaling, leaving the "smaller models" narrative only half-supported.** Despite the title and abstract emphasizing reduced dependency on model size, the heat-transfer experiment uses a fixed 2-state LSSM. There is no variation of the number of states or baseline capacity to show that structure allows smaller models to match larger naive ones. The conservative case does this properly (Figure 3), but without equivalent evidence for the dissipative case, the paper's overarching claim rests on only one of the two use cases.
+
+- **No statistical significance or variance reporting anywhere in the paper.** All results (Tables 1 and 2) are reported as single MSE values with no confidence intervals, error bars, or repeated runs. For a comparative study with random seeds (LSTM, NeuralODE) and potential sensitivity to data splits, this makes it impossible to assess whether observed differences are meaningful.
 
 ### Minor
-- **No multiple seeds, no error bars.** NeuralODE drift in Table 2 varies by orders of magnitude with size (e.g., L=1,W=36→377; L=1,W=72→1.79; L=2,W=36→1.8e3). Without seed averaging, ranking comparisons in Fig. 3 are unreliable.
-- **The "OOD" framing for Chicago is a forcing-distribution shift, not an initial-condition shift** as repeatedly stated in §3.1; the dynamics operator is shared by construction. The conclusion is more accurately "a linear model generalizes better than nonlinear regressors on a near-linear physical system," which is a milder claim than the abstract.
-- **Eq. (2) symmetry premise is unstated.** The off-diagonal entries are equal only if C_ext1=C_ext2; this assumption underlying A∈Sym_n should be made explicit.
-- **No quantitative rollout-error-vs-time curves in the conservative case** — only static snapshots and an aggregate drift RMS. A trajectory-error plot vs. horizon would substantiate the qualitative phase-portrait claims.
+- **The structure-preserving models in the dissipative case benefit from a physics-derived initialization that the baselines do not receive.** RieOpt and EucOpt start from an A matrix "derived from Physics but misspecified" (Section 2.1.2), while RF, XGBoost, and LSTM are trained from scratch. This confounds the effect of geometric inductive biases with the advantage of a good initial guess. The RieOpt vs EucOpt comparison controls for this and remains valid, but the comparison against black-box baselines is weakened. An ablation with random SPD initialization for RieOpt would strengthen the claim.
+
+- **XGBoost substantially outperforms RieOpt on London T_ext2 (0.106 vs 0.507, Table 1), yet this is not discussed.** Structure preservation does not uniformly improve in-distribution performance, and this result deserves analysis—is the difference due to the physics initialization biasing RieOpt toward a particular dynamics, or does the linear LSSM simply lack expressivity for this output channel?
+
+- **The generality of the dissipative approach is limited by its assumptions.** The heat-transfer system is 2-dimensional, linear, and has a symmetric continuous-time A matrix (Equation 2) that guarantees the discrete-time Φ_A is SPD. Many real dissipative systems (nonlinear, non-symmetric A, higher-dimensional) do not naturally yield SPD discrete-time matrices. The paper does not discuss when this geometric structure holds and when it does not.
 
 ### Trivial
-- Eq. (7) appears to write Φ_B T_i where Φ_B U_i is intended.
+- In Section 3.1.1, the paper states that baselines "seem to roll-out the test segments accurately" on London data but "their training convergence is significantly slower" — this is somewhat at odds with the narrative that structure-naive models fundamentally fail on this task. The sentence is not incorrect, but the framing could be clarified.
 
 ## Nice-to-Haves
-- A correctly stated discrete-time stability parameterization (e.g., Φ_A = U diag(σ(λ_i)) U^T with σ mapping into (0,1), or a Cayley/exponential parameterization).
-- A NeuralODE-with-symplectic-integrator ablation to isolate the parameterization effect from the integrator effect.
-- Extend FPUT experiments across α, energy levels, and multiple seeds; ideally one additional system (e.g., a chaotic Hamiltonian or a higher-D dissipative PDE) to substantiate the generality claim.
+- An ablation of RieOpt starting from a random SPD matrix (rather than the physics-derived A) to decouple initialization quality from structure preservation.
+- Model-size scaling in the dissipative case (e.g., varying LSSM states from 2 to 4 to 8) to directly support the "smaller models" narrative for dissipative systems.
+- Error bars over 5–10 random seeds for all experiments.
+- Phase-portrait visualizations (as in Figure 1a) comparing the learned vector fields from RieOpt vs EucOpt vs the true system for the dissipative case.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution.*
-- Harsh critic's "missing structured baselines (S4/S5, SINDy, Koopman, etc.)" — kept partially in Major as motivation, but a demand to add the full menu is scope-creep for a case-study paper.
-- Generic "no compute / wall-clock" complaint — not standard for this kind of paper.
-- Strength Finder's "principled geometric motivation bridges physics and ML" — generic and partly undercut by the §2.1.1 issue; not a concrete strength.
-- Strength Finder's claim that the paper "validates that structure-aware small models can outperform large black-box ones" as a *general* result — this conflicts with the verified weakness that experiments are narrow.
+
+These points are flagged to be removed; treat them with caution:
+
+- **Criticism about s-plane/z-plane confused language in Section 2.1.1:** Removed per hard rule — garbled text in this passage may be a PDF-parsing artifact, and the original submission may not contain this error.
+- **Criticism about Figure 6 being referenced but not shown:** Removed per hard rule — the appendix (which likely contains this figure) was stripped by the parser from all papers.
+- **Criticism that the initialization confound "invalidates the central claim" in the dissipative case:** Removed as an overstatement — the RieOpt vs EucOpt comparison (same physics initialization, different optimization geometry) already demonstrates the benefit of the SPD constraint without this confound.
+- **Criticism that Section 3.1.1 contradicts the paper's own claims:** Removed — the paper acknowledges that baselines work on in-distribution London data but fail on OOD Chicago data, which is a nuanced finding, not a contradiction.
+- **Strength Finder strengths that were generic or superficial** (e.g., "clear geometric exposition"): Retained in condensed form but deprioritized, as they do not directly support the paper's core claims.
+- **Criticism about training on a single trajectory:** Removed — single-trajectory training is standard practice in dynamical system learning, and the unseen-IC experiment partially addresses this.
 
 ## Novel Insights
-None beyond the paper's own contributions. The phase-space level-set visualization is a clean way to *display* energy drift, but the underlying claim (symplectic integrators conserve energy; manifold-constrained SID stabilizes linear identification) is well-established.
+
+None beyond the paper's own contributions. The reviews surface the key insight that the paper's two use cases provide asymmetric evidence for its central thesis: the conservative case cleanly supports the "smaller models" claim, while the dissipative case shows strong OOD generalization benefits but with confounds (physics initialization, no size scaling). The reviews also highlight that the dissipative experiment would benefit from an ablation separating initialization quality from geometric inductive bias.
 
 ## Suggestions
-- Rewrite §2.1.1 to state the correct stability condition for Φ_A (spectral radius <1) and parameterize Φ_A accordingly; clarify when SPD coincides with stability and when it does not.
-- Run 3–5 seeds and at least 3 (α, initial-condition) pairs for FPUT; report mean ± std for Table 2.
-- Add a symplectic-integrator NeuralODE control and at least one stable-LSSM SID baseline (e.g., N4SID with stability constraint) to make the "structure beats no-structure" claim controlled.
-- Rephrase the abstract to scope the contribution to "two case studies illustrating a principle" rather than a tested general result; remove "robust generalization across operating conditions" unless operating conditions are actually varied.
 
-## Evaluation
-- **Originality:** Low. Both methods are off-the-shelf; the contribution is empirical and illustrative.
-- **Importance:** The thesis (structure beats scale) is important and topical, but the paper does not advance it methodologically.
-- **Claim support:** Partial. SHNN-vs-LSTM/NODE gap on drift is real; the "generalization across operating conditions" claim is not actually tested.
-- **Soundness of experiments:** Weak — single seed, single trajectory, single α, weak baselines, math motivation partly incorrect.
-- **Clarity:** Reasonable; figures aid understanding, though §2.1.1 is muddled.
-- **Value to community:** Modest pedagogical value; limited as a research contribution.
+1. **Add a randomized-initialization ablation for RieOpt** — run RieOpt starting from identity or a random SPD matrix, not the physics-derived A. This would separate the effect of the SPD constraint from the effect of the initial guess.
+2. **Add model-size scaling for the dissipative case** — vary the number of states (2, 4, 8) in the LSSM and compare against baselines of similar capacity. Without this, the "smaller models" claim only applies to the conservative case.
+3. **Report means and standard deviations over 5+ runs** for all models and metrics.
+4. **Discuss the XGBoost result on London T_ext2** — explain why a structure-naive method beats the geometry-aware one in-distribution.
+5. **Clarify the scope of the SPD assumption** — state explicitly that Φ_A being SPD depends on A being symmetric (as in Equation 2) and that this holds for certain discretized PDEs but not all dissipative systems.
 
 ## Score and Decision
 
-Anchor comparisons (every anchor returned in the batch):
-- `uL1H29dM0c.md` (avg 7.00, accept) — "Neural Metriplectic Systems": comes with approximation theory and a new parameterization; the paper under review has neither.
-- `U1DjXQeJRx.md` (avg 6.60, accept) — "Poisson-Dirac NN": unifying framework across domains; substantively more novel than the paper under review.
-- `03EkqSCKuO.md` (avg 7.00, accept) — "Port-Hamiltonian Deep Graph Networks": new architecture with theory; far above the paper under review.
-- `XqDM97DtMf.md` (avg 4.67, reject) — "Embedded Dissipativity for Chaotic Dynamics": new architecture with empirical chaos benchmarks; still rejected for limited scope. The paper under review is even narrower.
-- `vAuodZOQEZ.md` (avg 6.50, accept) — "Physics-Informed Neural Predictor": real PDE benchmarks; substantively more complete than the paper under review.
-- `CrmUKllBKs.md` (avg 4.33, reject) — "Pseudo PINO": new framework but weak validation; comparable rejection profile.
-- `SYiOxXWlKU.md` (avg 2.50, reject) — "EPINN": narrow contribution on stiff ODEs; the paper under review is broader in framing but similar in narrowness of validation.
-- `R5FzCFR5yU.md` (avg 3.33, reject) — Hybrid Numerical PINNs: methodological but ad hoc; comparable severity to the paper under review.
-- `ZNnmcddaB3.md` (avg 6.20, accept) — Robust SID with finite-sample guarantees; far more rigorous than the paper under review.
-- `saFH7zTtQs.md` (avg 5.17, reject) — Sparse LDS learning; closer methodologically, rejected for limited improvement — comparable.
-- `EyWKb7Ltcx.md` (avg 5.00, reject) — SPD manifold classifiers framework; more novel methodology than the paper under review yet still borderline.
-- `a8XwgTZzE0.md` (avg 2.00, reject) — Grokking via dynamical systems; far weaker than the paper under review.
-- `7sMR09VNKU.md` (avg 3.50, reject) — Koopman-style system ID with control; comparable empirical depth.
-- `vfHISoWo2m.md` (avg 4.00, reject) — Meta-learning latent force models; similar profile of "interesting framing, narrow evidence."
-- `tpqMR73GzS.md` (avg 4.25, reject) — Reservoir-inspired LfD; comparable empirical narrowness.
+**Calibration anchors (from batch retrieval):**
 
-Relative positioning: The paper under review applies two existing techniques to two toy systems, with a partly incorrect motivating argument and one-seed evidence. It is more polished than the 2.0–2.5 anchors but clearly below the 5+ accept-borderline papers, which carry either new methodology, theory, or substantially broader experiments. Closest peers are in the 3.5–4.5 reject band (Pseudo PINO 4.33, Chaotic Dissipativity 4.67, Latent Force 4.00, LfD 4.25).
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/review_agent/human_reviews_2026/VaS6xcDrTb.md` | 8.50 | Strong clean theory + experiments, all high scores. This paper is clearly weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/xZNoeX0z9f.md` | 6.50 | Riemannian optimization via denoising; similar experiment quality but deeper theoretical contribution. This paper is somewhat weaker. |
+| `/home/wg25r/review_agent/human_reviews_2026/Zunww3FHPU.md` | 6.50 | Novel perspective on latent dynamics, accepted as Oral. This paper has weaker novelty. |
+| `/home/wg25r/review_agent/human_reviews_2026/B02EqvyiF3.md` | 5.50 | Dynamical systems metric via optimal transport, accepted Poster. Similar quality to this paper. |
+| `/home/wg25r/review_agent/human_reviews_2026/Be72SJOCjJ.md` | 5.00 | Adversarial dynamical systems analysis, rejected. Comparable quality — both have genuine contributions but notable experimental limitations. |
+| `/home/wg25r/review_agent/human_reviews_2026/T65jHpSX7i.md` | 4.50 | Linear dynamics learning analysis, rejected. This paper is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/JfNkiril3c.md` | 4.00 | HNN extension (RO-HNN), rejected. This paper has cleaner experiments and is stronger. |
+| `/home/wg25r/review_agent/human_reviews_2026/SA5XBWOoZr.md` | 3.00 | Energy-constrained operator learning, withdrawn. This paper is clearly stronger. |
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+The paper's conservative-case experiment is well-executed and provides compelling evidence that structure-preserving SHNNs dramatically outperform larger naive baselines on long-horizon prediction. However, the dissipative case is comparatively weak: it lacks model-size scaling (undermining the "smaller models" narrative), uses a physics-informed initialization that the baselines do not receive, and reports no statistical significance measures. The paper's core claims are partially but not fully supported across both use cases. Relative to the calibration anchors, this paper sits between the 4.00–5.00 range typical of rejected HNN-adjacent work and the 5.50+ range of accepted papers: it has a genuine empirical contribution but presents it in a qualified form.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

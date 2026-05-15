@@ -1,80 +1,92 @@
+Now I have sufficient context from all anchor reviews. Let me synthesize my final consolidated review.
+
+---
+
 ## Summary
-The paper proposes three one-step diffusion-based ILP solvers (CMILP, SCMILP, MFILP) inspired by consistency, shortcut, and meanflow training, an Iterative Integer Projection (IIP) layer (x − sin(2πx)/(2π)) to handle non-binary variables without binary expansion, and a momentum-augmented objective-guided sampling procedure. Experiments cover binary ILP (SC, CF, CA), inventory management, and synthetic non-binary ILP datasets.
+
+This paper proposes three one-step diffusion-based solvers (CMILP, SCMILP, MFILP) for integer linear programming, adapting consistency, shortcut, and mean-flow models to the ILP domain. A novel Iterative Integer Projection (IIP) layer—a differentiable, recursively applied function `x - sin(2πx)/(2π)`—enables handling non-binary integer variables without binarization. The paper also reframes objective-guided sampling as gradient descent and introduces a momentum variant (MGD). Experiments on binary and non-binary ILP benchmarks demonstrate gains in inference speed and feasibility, though optimality gaps on binary problems remain large.
 
 ## Strengths
-- **Tackling non-binary ILP directly via the IIP layer is a substantive direction.** Table 4 makes the cost of binarization concrete: IP-Guided DDPM on binarized IM-(50,5,2) reports NaN gap / 0% dataset feasibility at 101 minutes, vs. the native non-binary variant solved in seconds by the proposed methods.
-- **Order-of-magnitude wall-clock speedups over IP-Guided DDPM/DDIM are consistent across tables.** E.g., Table 3 IM-(50,50,2): SCMILP 1.9s at 4.9% gap vs. IP-Guided DDIM 14m at 5.6% gap.
-- **High dataset feasibility on binary ILP without solver post-processing.** Table 1: all three proposed methods reach 100% dataset feasibility and ≥88% sample feasibility on SC/CF/CA, exceeding both Neural Diving and IP-Guided DDPM.
-- **Momentum-augmented guided sampling is empirically validated.** Table 5 shows MGD reduces the gap and raises dataset feasibility over plain GD at fixed inference steps.
+
+- **The IIP layer is a genuinely novel, cleanly motivated contribution** for handling non-binary integer variables. The function `x - sin(2πx)/(2π)` is differentiable, defined over the full real domain, and converges to integer values within a few iterations (Fig. 2). This is a reusable mechanism for integer-constrained neural methods beyond this paper. The non-binary results (Tables 2–6) demonstrate its practical effectiveness, particularly on synthetic Random datasets where gaps approach 0% while avoiding the exponential blowup of binarization.
+
+- **One-step diffusion architecture substantially reduces inference time compared to prior diffusion-based ILP solvers.** On binary benchmarks (Table 1), the proposed methods solve instances in 21–51 seconds versus 65 minutes to 30 hours for IP Guided DDPM/DDIM, while achieving 100% dataset feasibility. On synthetic non-binary datasets (Table 6), MFILP achieves a 0.0% gap on Random-(2000,20,2) in 19.4s versus 46 minutes for IP Guided DDIM at 0.3% gap—a clear speed-quality win.
+
+- **The momentum-based objective-guided sampling (MGD) provides measurable, if modest, improvements.** Table 5 shows MGD reduces the optimality gap by 2–4 percentage points and raises dataset feasibility by up to 4% over standard GD, with negligible time overhead. The reframing of guidance as gradient descent (Section 3.3) is a conceptually clean insight.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **The headline claim of outperforming learning-based methods on binary ILP is contradicted by Table 1.** The abstract says "our approach outperforms existing learning-based methods on both binary and non-binary instances," but on the binary benchmarks the optimality gap of CMILP/SCMILP/MFILP is dramatically worse than IP-Guided DDIM: 90.2/91.6/88.4% vs. 68.5% on SC; 79.2/82.9/76.1% vs. 54.6% on CF; 80.2/85.3/79.2% vs. 25.4% on CA. The contribution is a speed/feasibility trade-off, not solution-quality dominance, and the narrative needs to be rewritten accordingly. Section 4.2's own description ("IP Guided DDIM consistently produces the lowest gap") concedes this but the abstract/contributions do not.
-- **Gap is computed only over instances where the method finds a feasible solution, which biases all gap comparisons when sample/dataset feasibility is low.** Section 4.1 explicitly states "The gap is only calculated among problems to which the solvers can get a feasible solution." Table 4 reports "0.0% gap" for SCMILP/MFILP on binarized IM-(50,5,2) at 3% dataset feasibility and 0.3–0.6% sample feasibility; Table 6 has MFILP at 0.0% gap on Random-(2000,20,2) with 85% dataset feasibility while DDIM's 0.3% sits on 70%. These "0% gap" numbers and Gurobi's "0% gap on 100%" are not comparable rows. A joint reporting of (gap, dataset feasibility) — or a worst-case penalty assignment — is needed for the comparisons to mean what the paper claims they mean.
-- **Tables 2, 3, and 4 contain two rows both labeled "SCMILP (Ours)" with different numbers.** One is almost certainly CMILP (which is otherwise absent from these non-binary tables despite being a headline contribution). As a result, the non-binary results — the paper's central claim — cannot be unambiguously attributed to a method, and any per-model comparison or ablation conclusion drawn from these tables is unverifiable. This must be corrected.
+
+- **The CMILP training loss (Eq. 6) targets a Dirac point mass at the single optimal solution `δ(x − x*)`, contradicting the paper's stated goal of learning the solution distribution `p(x|P)`.** The loss pushes both `f_θ(x'_{t_n}, t_n, P)` and `f_θ(x_{t_{n+1}}, t_{n+1}, P)` toward the same `x*`. While the training set is said to include sub-optimal solutions (line 77), the loss function does not use them to model a distribution—it trains the model to output a single optimal solution per instance. Any diversity in generation then arises solely from initial noise and the post-hoc objective-guided sampling in latent space (Section 3.3), not from the generative model itself. The paper's framing as learning a "solution distribution" and the claim that "the consistency function is the mapping to the solution distribution" (line 138–139) are therefore misleading. This does not invalidate the method as a fast neural solver—it still produces feasible solutions—but it undermines the generative-model narrative and means the comparisons with diffusion baselines are methodologically mismatched, since the proposed method functions more like a denoising regressor than a true generative model.
+
+- **On binary ILP benchmarks (Table 1), the proposed methods achieve 76–92% optimality gaps, substantially worse than IP Guided DDIM (25–69%)**, contradicting the abstract's unqualified claim of "outperforms existing learning-based methods." While the paper demonstrates speed and feasibility advantages, the objective value—the primary metric in integer programming—is markedly worse on these standard benchmarks. For example, on CA, SCMILP achieves 85.3% gap vs. DDIM's 25.4%. The abstract and introduction overstate the performance by emphasizing feasibility/speed while downplaying the gap. The conclusion's characterization of gaps as "relatively big" (line 336) understates severity: gaps exceeding 80% mean the predicted objective is nearly double the optimum, which is disqualifying for many practical applications.
 
 ### Minor
-- **"One-step" framing oversells the contribution.** Table 5 evaluates SCMILP at Tᵢ=10 and Tᵢ=20, and §4.3.2 notes Random-(1000,20,2) needs 5 steps and 57s to reach "comparable performance." Combined with iterative MGD guidance on top of inference, the realized pipeline is few-step diffusion + gradient post-processing. The speed claim is still real, but "one-step" should be qualified.
-- **IIP layer is under-analyzed.** f(x)=x−sin(2πx)/(2π) has zero derivative exactly at integer fixed points, which is the regime where the network is succeeding; the paper neither addresses this vanishing-gradient pathology nor compares to alternative differentiable rounding operators (straight-through estimators, sinusoidal STEs, Tang et al. 2025's integer correction layer the paper cites). "Approximates integers within a few iterations" is asserted rather than analyzed.
-- **CMILP loss collapses the consistency formulation into supervised regression toward x\***. Eq. 6 uses a Dirac on the ground-truth optimum as the target rather than enforcing self-consistency between two trajectory points; this departure from the standard consistency-model formulation is not acknowledged or analyzed, and weakens the motivational link to consistency models.
-- **No direct head-to-head against Tang et al. (2025)**, the only cited prior work that handles non-binary ILP without binarization — they are mentioned in related work but absent from the experimental tables, so the IIP-vs-correction-layer trade-off is unmeasured.
-- **No variance/multi-seed reporting** for any generative method, despite 30-sample draws per instance and small percentage-point differences being used to argue superiority.
+
+- **The IIP training/inference mismatch is claimed but not ablated.** The paper states (line 93) that using one IIP iteration during training and multiple during testing "leads to better performance," but no experiment varies the number of training IIP iterations or demonstrates that this discrepancy is benign. Given that `f_proj^(1)` is a smooth deformation rather than an integer projection, the model is trained on signals that differ from those evaluated at test time. An ablation would substantiate the claim and increase confidence in the non-binary results.
+
+- **The Table 4 binarized comparison is not a meaningful demonstration of IIP's superiority.** On binarized IM-(50,5,2), the proposed methods achieve 0% gap but with only 3% dataset feasibility (i.e., feasible solutions are found for just 3 of 100 instances). This is a trivial outcome: the model almost never finds a feasible solution, and when it does, the instance is easy enough that the optimum is reached. This does not demonstrate IIP's practical advantage.
+
+- **Missing key ablations.** The contrastive pre-training (Section 3.1, CLIP-style) is described as important for alignment but never ablated. The feasibility penalty coefficient `λ_penalty` (Eq. 2) is not studied—its effect on the gap-vs-feasibility tradeoff is unexamined. The number of samples (30) is fixed without justification; a comparison with fewer samples would illuminate whether the model generates genuinely diverse solutions or whether the 30-sample loop simply provides more chances for the post-hoc gradient search to succeed.
 
 ### Trivial
-- Several method-name rows in Tables 2, 4 (e.g., "ris", "feasupn") are inconsistent with the prose and reference list.
-- λ_penalty sensitivity is not reported.
+
+- Run-time measurement protocol is underspecified. It is unclear whether reported times include the full 30-sample loop, IIP iterations, and decoder overhead, or only model inference. For Gurobi, the time limit is stated as 100s for binary trials but not for non-binary experiments (Tables 2–3, 6).
 
 ## Nice-to-Haves
-- Per-instance scatter plots of (gap, runtime) conditioned on instance difficulty would be more informative than dataset-average aggregates given the feasibility-conditioning issue.
-- Decompose the speed-up into one-step inference vs. shorter MGD search vs. smaller problem size from IIP vs. backbone choice.
-- Report DDPM/DDIM baseline configuration (steps, batch, hardware) explicitly to make the wall-clock numbers comparable.
+
+- A direct comparison with a non-diffusion regression baseline (e.g., a GNN that predicts integer solutions directly, trained with the same feasibility penalty) would help determine whether the diffusion/consistency machinery adds value beyond the architecture and the IIP layer.
+- Demonstration on a few MIPLIB instances or problems with thousands of constraints (rather than just 20) would better support the scalability claim.
+- Histograms of predicted objective values across the 30 samples for representative instances would reveal whether the model captures any distributional diversity.
 
 ## Removed Points
-*Flagged as removed — treat with caution.*
 
-- **Harsh reviewer claim that baseline DDPM/DDIM times are "inflated."** This is speculation that requires external validation (comparing to Zeng et al.'s reported numbers, which we cannot verify here). The reviewer correctly notes that baseline-config disclosure would help, but the inflation claim itself is conjecture.
-- **Harsh reviewer claim about Section 3.3's variational derivation having an "undefined y\* term."** This is a derivation that follows Li et al. (2024); without working through the appendix derivation (which may have been stripped by the parser) we cannot confirm it is malformed.
-- **Strength Finder claim of "competitive optimality gaps on binary ILP."** Removed because it directly contradicts the verified major weakness — gaps on binary are 20–55 absolute points worse than DDIM.
-- **Strength Finder claim that "end-to-end training achieves high feasibility without post-processing."** Kept (under Strengths) but pruned of the "surpassing IP-Guided DDPM 44% sample feasibility" framing — the more honest characterization is feasibility-comparable-or-better at vastly lower wall-clock, not unambiguous dominance.
+These points are flagged to be removed; treat them with caution.
+
+- **"Tang et al. 2025" / missing related work claim** — The harsh critic claims the paper omits related work on neural correction for non-binary ILP. Per instructions, I cannot evaluate missing-related-work claims since I lack external sources to confirm their relevance. REMOVED.
+
+- **"The appendix is missing" / "exact training losses for SCMILP and MFILP are deferred to the appendix, but the appendix is missing"** — The paper explicitly states (line 110): "The detailed introduction of shortcut and mean flow models are put in the appendix." The parser strips appendix sections from all papers; the original submission likely contains these details. REMOVED.
+
+- **"No statistical uncertainty (variance, confidence intervals) is reported"** — While technically true, single-run evaluation is standard practice for large-scale ILP benchmarks. WEAKENED and moved to Nice-to-Haves rather than listing as a weakness.
+
+- **Formatting/spelling issues** — The harsh critic noted various section-by-section presentation concerns. These are either parser artifacts or minor presentation issues that carry no weight in evaluation. REMOVED.
+
+- **"The paper never discusses what gap is acceptable"** — This is a scope-creep criticism. The paper's job is to report results, not to define industry standards for acceptable optimality gaps. REMOVED.
+
+- **Strength Finder: "100% dataset feasibility" and "orders-of-magnitude speed improvements"** — These strengths are valid but must be contextualized against the large optimality gaps on binary problems. Retained in the main Strengths section with appropriate qualification.
+
+- **Strength Finder: "The reformulation of diffusion guidance as single-step gradient descent"** — This is a modest conceptual contribution. Retained as part of the momentum strength.
 
 ## Novel Insights
-None beyond the paper's own contributions. The IIP layer (a smooth iterative rounding via the sinusoidal residual) and the framing of objective-guided sampling as a special case of gradient descent (with MGD as the natural extension) are interesting, but the experimental issues prevent the reviews from extracting a clean broader insight.
+
+The IIP function `x - sin(2πx)/(2π)` is the paper's most genuinely novel contribution. It is elegantly simple—a single sine-based correction that, when iterated, produces integer-convergent behavior. Unlike sigmoid-based relaxations (which saturate near 0/1), this function is periodic and defined over the entire real line, making it suitable for general integer domains. Figure 2 provides compelling visual evidence of convergence behavior. This could find reuse in other integer-constrained learning settings (e.g., integer neural architecture search, quantized network training).
 
 ## Suggestions
-1. Rewrite the abstract/contribution claims to scope the empirical message as a speed/feasibility-vs-gap trade-off on binary problems, and as a more genuine quality win on (some) non-binary problems.
-2. Report gap and feasibility jointly: either (a) assign a large worst-case penalty for infeasible instances when averaging gap, or (b) tabulate gap conditioned on feasibility = 100% subsets across methods.
-3. Fix the duplicate "SCMILP (Ours)" rows in Tables 2–4 and clearly label CMILP.
-4. Add a head-to-head with Tang et al. (2025) on non-binary ILP.
-5. Add multi-seed std/CI on all generative results.
-6. Either re-title to "few-step" or split the one-step vs. few-step results cleanly with one-step-only numbers in the main table.
-7. Discuss and empirically probe the zero-gradient-at-integers behavior of IIP.
 
-## Axis Evaluation
-- **Originality:** Moderate. Adapting consistency/shortcut/meanflow to ILP and proposing the IIP layer are novel combinations, though each ingredient is borrowed.
-- **Importance of question:** High. Fast end-to-end solvers for non-binary ILP are genuinely under-explored.
-- **Claims well supported:** Weak. The binary-superiority claim is contradicted by the paper's own table, and the gap-on-feasible-only methodology biases the non-binary comparisons.
-- **Soundness of experiments:** Weak. Duplicate row labels in three tables, no variance, no controlled decomposition of the speedup.
-- **Clarity:** Mixed. Methodology section is readable; the result tables and abstract are misleading relative to the underlying data.
-- **Value to community:** Modest. The IIP idea and speed numbers are useful directionally; current presentation makes them hard to trust.
+1. **Revise the training objective to incorporate sub-optimal solutions.** If the goal is truly to learn `p(x|P)`, the loss should target diverse solutions rather than a single `x*`. A multi-target variant of Eq. 6 (e.g., using a mixture of Diracs or a score-matching formulation over the solution set) would align the method with the distributional framing.
 
-## Calibration Anchors
-- `joMMM9eadc.md` — avg 6.25 (Reject). "Effective Generation of Feasible Solutions for IP via Guided Diffusion" — very similar problem (diffusion ILP solver, contrastive instance encoder); reviewers split 8/5/6/6. The paper under review has weaker headline-claim support than this one, similar problem framing.
-- `FPfCUJTsCn.md` — avg 7.20 (Accept). DiffILO — clean unsupervised formulation, no broken tables. Considerably stronger than the paper under review.
-- `D3vD7ZFIor.md` — avg 3.50 (Reject). GuideCO — diffusion+guidance for CO; rejected for limited experimental rigor. Comparable level of concern to the paper under review but our paper has the additional broken-table issue and an unsupported binary-superiority claim.
-- `6JDpWJrjyK.md` — avg 5.75 (Reject). DISCO efficient diffusion solver — similar speed-vs-quality angle; ended up at 5.75.
-- `peNgxpbdxB.md` — avg 6.00 (Accept). Scalable discrete diffusion samplers — methodologically cleaner.
-- `pbDqZBn2X2.md` — avg 5.75 (Reject). CADO — cost-aware diffusion + RL.
-- `McfYbKnpT8.md` — avg 6.50 (Accept). L2P-MIP presolving — orthogonal but a similar MILP-ML topic with clean empirics.
-- `mFY0tPDWK8.md` — avg 6.25 (Accept). Apollo-MILP — predict-correct framework.
-- `Y3haavNdBX.md` — avg 3.75 (Reject). Robustness of CO solvers; lower than the paper under review.
-- `vVoWRFV5Y4.md` — avg 3.75 (Reject). QAP with DRL.
-- `km2nHt2YoD.md` — avg 3.50 (Reject). Bilevel neural+specific solver.
+2. **Add an IIP training-iteration ablation.** Vary K during training (e.g., K=1,2,3,5) and report gap/feasibility at test time to validate the claim that K=1 during training is sufficient.
 
-Placement: the paper has a real contribution direction (non-binary diffusion, IIP, momentum guidance) and clear speed wins, but (a) the abstract overclaims superiority that the binary results contradict, (b) the gap metric is structurally biased against fair comparison, and (c) duplicated "SCMILP (Ours)" rows make the centerpiece non-binary tables unverifiable. This is materially worse than joMMM9eadc (6.25) and clearly below DiffILO/Apollo-MILP/L2P-MIP. It sits near D3vD7ZFIor (3.5) but with somewhat more substantive contributions. Approximate score: 4.0.
+3. **Temper the abstract's claims on binary problems.** Replace "outperforms existing learning-based methods" with a qualified statement acknowledging the speed-feasibility tradeoff against optimality gap, and highlight where the method actually wins (non-binary, speed, and feasibility).
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+4. **Add a single-sample baseline.** Report gap and feasibility using only 1 sample (vs. 30) to reveal how much the 30-sample loop and gradient search contribute versus the generative model itself.
+
+## Score and Decision
+
+**Anchor comparison:**
+
+| Path | Paper | Avg Score | Comparison |
+|------|-------|-----------|------------|
+| Jti8ZbC7kM | PDDQP (Diffusion for QP) | 2.50 | Current paper is stronger—IIP is genuinely novel, experiments are broader, results are better contextualized. |
+| ztCVzRbnvQ | HiPO-MILP | 3.00 | Current paper is stronger—more technical novelty (IIP, one-step diffusion, momentum) and more extensive experiments across problem types. |
+| pejtgHH7Eh | VRG (Lagrangian+Diffusion for MILP) | 4.00 | Comparable. Both have creative core ideas (IIP vs. image encoding) with significant weaknesses (poor binary gaps vs. representation concerns). Current paper's IIP is better motivated. |
+| SFgXPipvXw | RL-SPH (RL for ILP feasibility) | 5.00 | RL-SPH has stronger feasibility results and better evaluation rigor. Current paper has a more novel core mechanism (IIP) but weaker empirical validation on binary problems. Slightly below. |
+| kyvW6S0u3z | FMIP (Flow Matching for MILP) | 5.20 | FMIP has more polished experiments, better ablation, and clearer contribution framing. Current paper is below this level. |
+| vqNg2Vl8o1 | Constraint Matters (MILP reduction) | 5.50 | Clearly stronger than current paper in experimental depth, theoretical grounding, and practical impact. |
+| 084SvT55yk | NEXCO (Masked Diffusion for CO) | 6.67 | Much stronger—excellent results, clear framework, thorough ablation. Current paper is far below. |
+
+The paper has genuine technical novelty (IIP layer, one-step diffusion adaptation) and shows strong results on synthetic non-binary datasets (Table 6). However, the binary ILP results are weak (76–92% gaps), the distributional-learning framing is undermined by the point-mass training loss, and key design choices (IIP training iterations, contrastive pre-training, feasibility penalty) are unablated. The paper falls between the 4.0 and 5.0 anchors—above VRG but below RL-SPH and FMIP. Given the overstated claims in the abstract and the severity of binary gaps, I score it at 4.5, Reject.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

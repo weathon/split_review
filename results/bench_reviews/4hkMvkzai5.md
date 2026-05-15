@@ -1,78 +1,80 @@
+Now I have sufficient calibration data. Let me compose the final review by cross-referencing every claim against the paper.
+
+---
+
 ## Summary
-DeCodec is a neural audio codec that decouples mixed audio into orthogonal speech/background-sound subspaces (via a Subspace Orthogonal Projection module and a Representation Swap Training procedure) and further splits speech into semantic/paralinguistic components via HuBERT-guided RVQ. The authors claim a single codec usable as a front-end for reconstruction, speech enhancement, one-shot voice conversion, ASR robustness, and TTS background control.
+
+DeCodec proposes reframing neural audio codecs as universal disentangled representation learners. It introduces three technical components: a Subspace Orthogonal Projection (SOP) module that factorizes audio embeddings into orthogonal speech and background-sound subspaces; a Representation Swap Training (RST) procedure that ensures those subspaces correspond to the correct modalities; and Semantic Guidance (SG) that hierarchically decomposes speech into semantic and paralinguistic codes within the speech quantizer. The resulting model supports audio reconstruction, speech enhancement (by discarding the background branch), and one-shot voice conversion (by swapping paralinguistic codes) within a single codec. Speech enhancement results on the DNS Challenge are competitive with specialized models, and ablations confirm that SOP+RST jointly enable the disentanglement.
 
 ## Strengths
-- **Joint SOP+RST is the load-bearing combination, and the ablation honestly exposes it.** Table 4 shows SOP alone (SDR-B = −13.15 dB) and RST alone (SDR-B = −10.67 dB) fail individually, while jointly they reach SDR-B = 0.49 / SDR-S = 7.90 dB. This is concrete and informative evidence about which design choices matter.
-- **Single-model coverage across reconstruction, SE, VC, ASR-front-end and TTS** is broader than typical codec papers and supports the "universal front-end" framing. Causal and non-causal variants are both reported (Tables 1, 2).
-- **SE BAK improvement is real and consistent.** Causal DeCodec on DNS-Challenge real recordings reaches BAK 3.94 vs. SELM 3.44 (Table 2), suggesting background-sound suppression via representation replacement is more than a curiosity.
+
+- **Genuinely novel architecture for representation-level disentanglement**: The combination of the SOP module (enforcing orthogonal subspaces) with the RST procedure (swapping representations across different mixed inputs during training) is a creative attempt to achieve speech-background factorization within a codec. Ablation results (Table 4) clearly show that neither SOP nor RST alone works — only SOP+RST (Ablation-3) yields usable SDR-B (0.49 dB) and SDR-S (7.90 dB), while each alone collapses to SDR-B < –10 dB. This is a clean, well-controlled demonstration of the joint mechanism.
+
+- **Competitive speech enhancement without a dedicated SE front-end**: Table 2 shows DeCodec achieving the highest DNSMOS scores across both simulated (OVL 3.39, BAK 4.13) and real recordings (OVL 3.13, BAK 3.99), outperforming specialized models including SELM, StoRM, and Inter-SubNet. This is a strong result that demonstrates practical utility from the representation-swap mechanism — replacing the background branch with a blank-audio encoding effectively suppresses background sound.
+
+- **Clean ablation of semantic guidance**: Table 4 shows that adding SG to the SOP+RST setup reduces downstream ASR WER* from 41.9% to 25.8% (causal) while maintaining competitive overall SDR. This isolates the value of hierarchical semantic-paralinguistic decomposition within the speech branch.
+
+- **Unified multi-task capability**: The model supports reconstruction, enhancement, and voice conversion within a single architecture, which is an ambitious and practically appealing goal.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **The headline reconstruction comparison in Table 1 is at unequal bitrate.** DeCodec uses 4+4 = 8 kbps total, while baselines run at 2.0 (HiFi-Codec), 4.0 (SpeechTokenizer), 4.5 (DAC), 6.0 (EnCodec). The paper then declares "the highest SDR for speech reconstruction" without any bitrate-matched run. Capacity is the obvious confound, and the §4.2.1 reconstruction claim cannot be settled without a 4-kbps DeCodec or an 8-kbps baseline. This undermines the very first empirical claim.
-- **The §3.6 "proof" that RST forces Zs to be independent of background is a non-sequitur.** From Dec(Zs₁+Zn₂) − Dec(Zs₁+Zn₁) ≈ n₂ − n₁ and the mean value theorem the paper concludes "the left side depends on Zs₁ through ξ, while the right side is independent of Zs₁, therefore Zs₁ must be independent of n₁." The Jacobian ∂Dec/∂Zn|_ξ can depend on Zs without violating the equation, and the argument conflates a population independence statement with an approximate per-sample equality. The theoretical pillar advertised for RST is not established. Empirically RST-alone yields SDR-B = −10.67 dB, also inconsistent with the proof's strong claim. The contribution would be more honest reframed as an empirical training procedure.
-- **The "subspace orthogonal projection" framework is largely decorative relative to the implementation.** Eqs. (2)–(6) posit projectors with P_S + P_N = I and P_S² = P_S, but the implementation is two trainable linear maps with a soft correlation penalty L_⊥ = ‖⟨S, N⟩‖₂. Idempotence and completeness are never enforced, and Eq. (6) silently assumes YY^T is "angular" (diagonal) — an assumption never imposed by a loss term and never empirically checked. Combined with Ablation-1 showing SOP alone produces no decoupling (SDR-B = −13.15 dB), the SOP framing overstates what the module mechanically guarantees.
-- **One-shot VC results are weak in absolute terms.** DeCodec achieves WER = 50.46 on noisy VC (Table 3); the converted speech is largely unintelligible. The paper frames this as "competitive advantage" because StoRM-SpeechTokenizer reaches WER = 52.73, but the comparison only shows it is less broken than an obviously broken cascade; absolute intelligibility is not demonstrated. A comparison to FACodec / DualCodec / NaturalSpeech-3 on clean + noisy VC would be far more convincing.
+
+- **Reconstruction comparison is confounded by unequal bitrate**: Table 1 compares DeCodec at 8 kbps total (4.0 speech + 4.0 background) against baselines operating at substantially lower total bitrates — DAC at 4.5 kbps, HiFi-Codec at 2.0 kbps, SpeechTokenizer at 4.0 kbps, EnCodec at 6.0 kbps. The paper's headline claim that DeCodec "maintains advanced signal reconstruction" while adding disentanglement is undermined because the SDR advantage (7.61 vs. baselines' 0.60–6.86 on clean speech) could be explained entirely by the higher bandwidth allocation. The paper provides no matched-bitrate comparison. This does not invalidate the disentanglement contribution, but it means the reconstruction-quality framing is not properly supported. The paper would need to evaluate DeCodec at a total bitrate comparable to baselines (e.g., 4.0–6.0 kbps) to fairly assess the reconstruction-disentanglement trade-off.
 
 ### Minor
-- **SE evaluation relies on copied numbers and non-intrusive metrics only.** §4.1 states baseline SE numbers are taken from Wang et al. 2024; only DNSMOS (OVL/SIG/BAK) is reported. PESQ/STOI/SI-SDR would be the natural intrusive complement, especially since SIG on real recordings drops below SELM (3.45 vs 3.59).
-- **SE is performed by replacing BGS code with that of "blank audio."** What "blank audio" is (silence? zeros at the encoder? Gaussian?) is not specified, and the design choice is not characterized — yet it determines the entire SE pipeline.
-- **L_⊥ = ‖⟨S, N⟩ − 0‖₂ is under-specified for tensor S, N.** Whether the inner product is Frobenius, per-frame, or per-channel materially changes what "orthogonality" means.
-- **Cross-corpus noise generalization is not evaluated.** The held-out noise comes from the same DNS-Noise family used in training; SOP/RST could be fitting the noise distribution rather than a generic speech/non-speech axis.
-- **Ablation-4 trade-off (SG row) is unaddressed.** Adding SG drops SDR-B from 0.49 → −1.11 and SDR-S from 7.90 → 5.70 while reducing WER\*; the text discusses only the favorable column.
+
+- **Voice conversion WER is too high for practical use**: Table 3 reports WER of 50.46% for one-shot VC on noisy speech — half of all words are unrecognizable after conversion. While the paper acknowledges this limitation (attributing it to mismatched voicing times) and the result does beat the StoRM-SpeechTokenizer baseline (52.73%), this level of intelligibility collapse makes it difficult to describe the VC capability as "effective." The paper would benefit from a more candid discussion of this limitation and analysis of failure modes.
+
+- **Disentanglement evaluation relies on reconstruction metrics without independent information-leakage probes**: The paper measures decoupling quality through SDR-B and SDR-S — metrics computed by reconstructing the expected sources from quantized representations. While standard for source separation, these metrics do not directly verify that the speech subspace is free of background information or that the background subspace carries no phonetic content. Independent probes (e.g., running ASR on the background branch output, or a sound-event classifier on the speech branch output) would provide stronger evidence for the core claim of orthogonal, non-overlapping subspaces. The current evaluation is partly circular.
+
+- **The "theoretical proof" in Section 3.6 is informal**: The argument applying the mean value theorem to vector functions (Eq. 15–16) does not constitute a rigorous proof that RST forces clean separation. It is an intuitive consistency argument showing why the loss should work under idealized conditions. The paper should not present this as a formal guarantee, and the claim of theoretical rigor is overstated.
+
+- **The biological motivation is decorative**: The analogy to A2 cortical organization (Section 3.4) and "neural developmental feedback mechanisms" (Section 3.6) adds no technical substance. The method works or fails on its engineering merits, not on neuroscientific metaphor. This does not harm the contribution but inflates the framing unnecessarily.
 
 ### Trivial
-- The A2 left/right-hemisphere analogy is rhetorical and does not constrain any architectural choice.
-- Train/test SNR ranges mismatch (train −5–40 dB vs. test −5–20 dB); not wrong, but worth disclosing.
+
+- SDR-B and SDR-S computation details are not described (e.g., whether decoupled background is compared against the original clean background signal or against a version extracted through the same pipeline). This is a minor reproducibility concern.
 
 ## Nice-to-Haves
-- Bitrate-matched reconstruction table (DeCodec at 4 kbps total and/or baselines run at 8 kbps).
-- Intrusive SE metrics on a controlled, re-run baseline pipeline.
-- t-SNE / spectrogram visualizations of S vs. N under unseen noise types.
-- Honest empirical justification of RST in place of the §3.6 derivation.
+
+- Bitrate-matched reconstruction comparison against baselines.
+- Information-leakage probing of both subspaces using external classifiers.
+- Analysis of VC failure modes beyond the voicing-time hypothesis (e.g., whether swapping only a subset of SRVQ layers improves WER).
+- Spectrogram visualizations of separately decoded speech and background components to qualitatively assess artifacts.
 
 ## Removed Points
-These points are flagged for removal; treat them with caution.
-- *"Missing comparisons to NaturalSpeech-3 / DualCodec / FACodec on one-shot VC"* — partially genuine, but verges on demanding methods outside the paper's stated scope; kept as nice-to-have above rather than as a major weakness.
-- *Strength: "Theoretical grounding via the mean value theorem"* (from Strength Finder) — removed because the proof is invalid (see Major #2); the strength and weakness disagree and the weakness wins.
-- *Strength: "Comprehensive comparison against diverse baselines providing a broad and fair assessment"* — partially removed because the comparison is not bitrate-fair (see Major #1).
-- *Strength: "Causal/non-causal practical options"* — kept implicitly under Strength 2; standalone it is generic.
+
+These points were flagged by reviewers but are removed from the main review with justification:
+
+- **"Core downstream results are relegated to appendices and missing from the main paper"**: Per the review instructions, the parser strips appendix sections from all papers. The original submission includes Appendix F (ASR robustness) and Appendix G (controllable TTS), and the paper body explicitly states where these results can be found (Section 4.2). This is not an author error.
+
+- **"Missing Parts and Places to Improve — Missing Experiments" section about including ASR/TTS results in the main paper**: Same justification as above — the appendices exist in the original submission and were stripped by the parser.
+
+- **"Unfair bitrate comparison invalidates reconstruction claims" — softened from fatal to major**: The bitrate mismatch is a real issue, but the harsh critic's framing that it "invalidates" reconstruction claims entirely overstates the case. The paper's core contribution is disentanglement, not compression efficiency, and the SE/VC results do not depend on this comparison. The concern is retained as a major weakness but not as fatal.
 
 ## Novel Insights
-None beyond the paper's own contributions. The ablation finding that neither SOP nor RST individually decouples speech/background, but their composition does, is the main non-trivial empirical observation; everything else follows standard codec-design moves (RVQ, semantic distillation from HuBERT, swap training).
+
+None beyond the paper's own contributions. The idea of performing disentanglement within a codec's representation space (rather than as a preprocessing step) is the paper's own insight. The reviews did not surface a fundamentally new perspective on this work.
 
 ## Suggestions
-- Replace Table 1 with bitrate-matched conditions, or explicitly cap DeCodec at 4 kbps.
-- Reframe §3.4 / §3.6 as empirical training mechanisms; either provide a correct independence argument or drop the proof.
-- Report PESQ/STOI/SI-SDR for SE; re-run at least one baseline under your pipeline.
-- Test on a held-out noise corpus (WHAM!, CHiME) to demonstrate the decoupling is not specific to DNS-Noise/ESC-50.
-- Add a clean-speech VC table; analyze the WER ≈ 50 failure mode (voicing mismatch vs. semantic loss).
 
-## Evaluation by Axis
-- **Originality:** Moderate. Joint speech/BGS + semantic/paralinguistic decoupling in a single codec is a meaningful framing, but UniCodec and the FACodec/SpeechTokenizer family cover overlapping ground.
-- **Importance:** Moderate-high. A codec-as-feature-front-end is a useful idea.
-- **Soundness of claims:** Weak. Both the headline reconstruction claim and the theoretical justification do not hold as written.
-- **Soundness of experiments:** Mixed. The ablation is informative; the SE copy-numbers and unequal bitrates are not.
-- **Clarity:** Adequate, though the SOP formalism oversells the implementation.
-- **Value to the community:** Moderate. The demo page and applications are interesting; the empirical case still needs tightening.
+- Report results at a matched total bitrate by reducing RVQ layers in the speech or background branch. Even if reconstruction quality drops, this would honestly characterize the trade-off between compression and disentanglement that DeCodec makes, and would let readers fairly compare against baseline codecs.
+- Add a simple information-leakage experiment: pass the background-branch output through a Whisper ASR model and report WER; pass the speech-branch output through a sound-event classifier. This would directly test the central claim of orthogonal subspaces.
+- Tone down the theoretical claims in Section 3.6 — present the argument as an intuitive motivation for the RST loss rather than as a proof.
 
-## Score and Decision
+## Anchor Comparison
 
-Anchors retrieved:
-- `Id2JMVSQHZ.md` — *USC: Universal Semantic Disentangled Privacy-preserving Speech Repr.* — avg **4.80**. Closely topical (speech codec decoupling semantic vs acoustic, multi-task); was rejected for limited novelty and evaluation gaps. The paper under review is similar in ambition but has a more concrete decoupling target (BGS) and a more honest ablation, while also having a bitrate-unfair headline and a broken proof.
-- `KCVv3tICvp.md` — *Codec-LM Co-design* — avg **5.00**. Engineering codec paper with mixed novelty/evaluation; comparable execution quality.
-- `LfDUzzQa3g.md` — *RepCodec* — avg **5.50**. Semantic speech tokenization, well-scoped; cleaner experiments than the paper under review.
-- `C53xlgEqVh.md` — *Vec-Tok Speech* — avg **5.20**. Codec for speech generation, scope close to DeCodec's TTS/VC framing.
-- `UFwefiypla.md` — *DM-Codec* — avg **3.00**. Distillation speech tokenizer rejected for shallow contribution. The paper under review is clearly stronger in scope and ablation than DM-Codec.
-- `xJc3PazBwS.md` — *Disentangling Textual and Acoustic Features* — avg **3.75**. Disentanglement paper rejected; weaker empirical breadth than the paper under review.
-- `BVsFp5rQxd.md` — *VoiceNoNG* — avg **3.50**. Speech-editing codec LM, rejected for limited scope; less ambitious than DeCodec.
-- `DsMxVELk3K.md` — *TextEconomizer* — avg **3.00**. Out-of-topic compression paper; not directly comparable.
-- `IqGVIU4rvM.md` — *VQ-VAE+Diffusion image tokenizer* — avg **2.50**. Out-of-topic.
+All anchors retrieved from calibration search:
 
-DeCodec is closest to Id2JMVSQHZ (4.80) and KCVv3tICvp (5.00) in ambition and execution but has two materially soft pillars (unfair bitrate, invalid proof) that an attentive reviewer will flag. It is above DM-Codec/VoiceNoNG (3.0–3.5) and below RepCodec / Vec-Tok (5.2–5.5). Net position: just under the USC anchor.
+- **MelCap** (`2nr6FVNOtu.md`, avg 1.50, Withdrawn): Fundamentally incomplete — no bitrate reported, missing experiments, very limited novelty. DeCodec is substantially stronger in both contribution and execution.
+- **CodecSep** (`MDHVDfUrDz.md`, avg 4.00, Reject): Similar domain (codec-based audio processing). CodecSep had presentation issues, limited novelty, and missing comparisons. DeCodec has more architectural novelty and broader task coverage.
+- **FuseCodec** (`RILri9w9IW.md`, avg 3.50, Withdrawn): Semantic-contextual fusion for codecs. Similar ambition level but withdrawn. DeCodec has stronger experimental validation.
+- **Self-Guidance** (`lCaU7NlZ1I.md`, avg 5.00, Reject): A simple training trick with marginal improvements, evaluated on one codec. DeCodec has substantially more novelty (SOP+RST+SG architecture vs. an auxiliary loss) and broader evaluation.
+- **FlexiCodec** (`kYkfCs4ZAH.md`, avg 5.67, Accept Poster): Novel dynamic frame-rate codec with thorough experiments. Cleaner evaluation than DeCodec, but narrower scope (no SE, no VC). DeCodec has comparable novelty but weaker evaluation rigor.
+- **Gogo** (`JbLmIoWwDC.md`, avg 6.00, Accept Poster): Novel granularity-ordered codec with strong results. Better evaluation than DeCodec, though both share some baseline fairness concerns. DeCodec's evaluation weaknesses pull it below Gogo.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+DeCodec sits between Self-Guidance (5.00) and FlexiCodec (5.67). Its architectural novelty and multi-task scope exceed Self-Guidance, but its evaluation rigor (bitrate mismatch, informal proof, circular disentanglement metrics) falls short of FlexiCodec's standard. A score of 5.0 reflects genuine contributions that are not yet sufficiently validated.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

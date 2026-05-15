@@ -1,13 +1,18 @@
+Now I have a thorough understanding of the paper and the calibration anchors. Let me produce the consolidated review.
+
 ## Summary
 
-This paper introduces the first time–space tradeoff for high-dimensional Gaussian Kernel Density Estimation (KDE) data structures. By plugging the asymmetric LSH of Andoni–Laarhoven–Razenshteyn–Waingarten (2017) into the level-set / density-constrained ANN framework of Charikar et al. (2020), the authors obtain a parameterized family of data structures with space $1/\mu^{1+\delta}$ and query time $1/\mu^{\xi(\delta)}$ (numerically evaluated). Notable instantiations: query time $1/\mu^{0.05}$ at space $1/\mu^{4.15}$, and a simpler data-independent analysis matching nearly the data-dependent linear-space exponent of Charikar et al. ($0.1865$ vs $0.173$).
+This paper addresses the Kernel Density Estimation (KDE) problem in high dimensions using locality-sensitive hashing. The main contribution is applying the **asymmetric LSH** construction of Andoni et al. (2017) — which allows trading query time for space via parameters (ρ_q, ρ_s) — to the KDE framework of Charikar et al. (2020). The paper derives an optimization problem whose solution yields the query-time exponent ξ(δ) as a function of the space exponent 1+δ. The headline numerical results are a **query exponent of ≈0.05** (at space exponent ≈4.15) and, in the linear-space regime (δ=0), a query exponent of **≈0.1865**, improving over the data-independent bound of 0.25 from Charikar et al. (2020) and nearly matching their data-dependent bound of 0.173 with a simpler analysis. The paper also provides the **first known query-time vs. space tradeoffs for KDE**, parameterized by δ.
 
 ## Strengths
 
-- The optimization in Eq. (10) and Lemma 15 cleanly captures how $(\rho_s, \rho_q)$ interact with the worst-case intermediate-scale $y$, producing an explicit Pareto curve (Figure 1) that is, as far as I can tell, the first articulation of the space–query frontier achievable via Charikar-style reductions for KDE.
-- The data-independent linear-space exponent $0.1865$ improves over the previous data-independent bound $0.25$ and nearly matches the more involved data-dependent $0.173$, with a materially simpler analysis. This is a real pedagogical/expository win.
-- The Section 1.2 analysis isolating *why* asymmetric LSH cannot give constant-query KDE (the maximum over intermediate scales does not vanish at $\rho_q=0$) is a useful conceptual point and motivates the open problem honestly.
-- The "exact recovery via $(c,r)$-ANN under density constraints" decoupling (Lemma 31) cleanly separates ANN parameter choice from the KDE reduction, making the framework reusable.
+- **Novel application of asymmetric LSH to KDE yields first tradeoffs.** Prior KDE data-structures (Charikar & Siminelakis 2017; Charikar et al. 2020) used symmetric LSH, forcing ρ_s = ρ_q and thus a single point on the time-space curve. The paper correctly identifies that the bottleneck in the Charikar et al. framework occurs at different distance scales for time vs. space, and asymmetry can exploit this imbalance. Theorem 16 provides the first family of KDE data-structures parameterized by a space-query tradeoff — this is a genuinely new capability.
+
+- **Clear formulation of the min-max optimization problem (Equation 10).** The paper reduces the KDE query-exponent computation to a well-defined optimization over parameters (ρ, x, y). Even if one wanted to dispute the numerical values, the problem is precisely stated and can in principle be re-solved independently.
+
+- **Analytic insight about the impossibility of constant-query KDE.** Section 1.2 gives a clean argument (using the case ρ_q = 0 and analyzing intermediate-scale collisions) that current ANN technology cannot yield a KDE data-structure with constant query time in polynomial space. This clarifies a fundamental limitation and is posed as an open problem — good scientific practice.
+
+- **Honest positioning relative to prior work.** The paper transparently compares to both the data-independent bound (0.25) and the data-dependent bound (0.173) of Charikar et al. (2020), acknowledges the space cost of its best query time (exponent 4.15), and does not overclaim.
 
 ## Weaknesses
 
@@ -15,52 +20,72 @@ This paper introduces the first time–space tradeoff for high-dimensional Gauss
 None.
 
 ### Major
-- **Headline framing understates the space cost.** The abstract and §1.1 bill an improvement from $1/\mu^{0.173}$ to $1/\mu^{0.05}$ at "somewhat higher space $\approx 1/\mu^{4.15}$." Under the paper's own setup (Definition 5: $\mu^* = n^{-\Theta(1)}$), $1/\mu^{4.15}$ is polynomial in $n$ with exponent $> 4$ — orders of magnitude more than the linear-in-$n$ regime of Charikar et al. (2020). The contribution is the tradeoff curve, not a same-regime improvement; the paper should present these as two distinct Pareto points rather than as one "significantly improved" result. (Mitigated somewhat by Theorem 17 and Footnote 2, but the abstract phrasing remains misleading.)
-- **In the apples-to-apples (linear-space) regime, the result does not beat SOTA.** At $\delta=0$, the paper's exponent ($0.1865$) is worse than Charikar et al.'s data-dependent exponent ($0.173$). The defense "our analysis is simpler" (§1.1, §5) is legitimate but the contribution in that regime is expository, not Pareto-improving — this should be stated plainly.
+
+- **Numerical claims (0.05, 0.1865, 4.15) lack specification of the computation that produced them.** The paper states these figures in Theorem 17 as consequences of "numerical evaluations" of the optimization in Equation (10), but provides no description of the numerical method (grid search, convex solver, gradient descent?), no precision estimates, and no error bounds. For a paper whose headline results are specific numeric exponents presented as theorems, this is a significant reproducibility gap. The optimization problem is indeed well-posed, so the gap is not fatal — but it is the single largest weakness, and the authors should provide (at minimum) the algorithmic details and ideally code or a table of ξ(δ) for multiple δ values.
+
+- **The core collision-probability analysis is sketched but not worked out in the main text.** The paper states (Section 4, line 233) that "We formally analyze it in the our main technical lemma in the appendix, Lemma 31" and the key expressions in Lemma 15 are stated without derivation. While deferring technical lemmas to appendix is standard for theory papers, the main text provides no sketch of how the quadratic exponents in Equation (6) arise from the asymmetric LSH of Theorem 7, making it difficult for a reader to assess whether the optimization problem is correctly derived from the LSH properties. A one-paragraph intuitive derivation in the main text would substantially strengthen the paper.
 
 ### Minor
-- **Numerical-only headline exponents lack auditability in the body.** The numbers $0.05$, $4.15$, $0.1865$ all come from a numerical solver (§5). The main text does not describe the solver, the precision, or any optimality check (e.g., KKT verification). For a theory paper whose contribution exponents come from numerics, a one-line description in the body would help.
-- **The "first tradeoff for KDE" claim should acknowledge the modest delta more openly.** The reduction, geometric level sets, density-constrained analysis, and Algorithms 1–2 are largely inherited from Charikar et al. (2020); the asymmetric LSH and its $(\rho_s,\rho_q)$ constraint are from Andoni et al. (2017). The new technical content is the optimization in Definition 14 / Lemma 15 / Eq. (10) and the numerical evaluation. The §3 phrasing "we generalize the framework" oversells what is closer to a parameter substitution.
-- **The plateau at $0.05$ is not supported by a lower bound.** §1.2 spends substantial space arguing that $\rho_q = 0$ is "natural" and that the optimum plateaus near $0.05$, framing this as a near-fundamental phenomenon. But this is the optimum of *this specific* optimization derived from *this specific* ANN data structure. No conditional lower bound (under OVH/SETH/known ANN tradeoffs) is given. The paper itself flags this as open, which is fine — but it should not be leaned on rhetorically as a "barrier."
-- **Geometric meaning of $\theta(\delta)$ is underdeveloped.** Definition 14 hands the reader a piecewise $(\rho_s,\rho_q)$ rule with a threshold function whose geometric content (which worst-case $y$ achieves the max in Eq. (10), in which regime) is hidden in numerics.
+
+- **The claim of "simpler analysis" is asserted without substantiation.** The paper says (Abstract, Section 1.1, Section 5) that the linear-space result (0.1865) "nearly matches" the data-dependent bound of Charikar et al. (2020) "with a significantly simpler analysis." No evidence for this claim is provided — no comparison of proof length, no side-by-side of the key lemmas. The asymmetric LSH construction itself (Andoni et al. 2017) is at least as complex as the symmetric LSH used in prior work. The "simplicity" claim appears to refer to the avoidance of data-dependent learning, but this is never made explicit.
+
+- **No experimental validation of any kind.** The paper is entirely theoretical. For a pure-theory submission at ICLR, this is not a fatal weakness, but some numerical simulation (even synthetic) demonstrating that the tradeoff curve from Figure 1 actually manifests in a concrete small instance (e.g., computing the actual space and query time for a fixed n and μ) would greatly increase confidence that the o(1) terms and log factors do not qualitatively alter the exponents.
 
 ### Trivial
-- A plot of the optimal $(\rho_s(x),\rho_q(x))$ and the worst-case $y(x)$ as functions of $x$ for fixed $\delta$ would make Definition 14 actionable.
+
+- **Figure 1 is an embedded image with no axis scale ticks or gridlines** — the caption describes the curves, but a table of numeric values for ξ(δ) at several δ would be strictly more informative and verifiable.
 
 ## Nice-to-Haves
-- Combine the asymmetric LSH with the data-dependent LSH of Charikar et al. (2020) to see whether the $0.173$ linear-space exponent can actually be beaten — the most interesting open question the paper raises but does not address.
-- A small numerical/empirical simulation (constants hidden in $\tilde{O}(\cdot)$, $o(1)$ in the exponents) to locate the crossover against random sampling at moderate $\mu$.
-- A conditional lower bound formalizing the $0.05$ plateau.
+
+- A brief discussion of what numerical optimization method was used (even a sentence: "We discretized [0,1] at step size 10⁻⁴ and used Brent's method for the inner max over y") would resolve the main reproducibility concern.
+- A sensitivity analysis showing how the exponents change when the "nice range" constants c₀, c₁ are varied away from arbitrarily small values.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
-- "Comparison with not-yet-available systems / cannot independently verify exponents" — not raised here, but adjacent reproducibility-style concerns about the numerical solver are limited to what the body chooses to expose; this is normal for theory papers and not disqualifying.
-- "No experiments" — for this subcommunity, papers of this style are routinely accepted without experiments; this is not a substantive weakness.
-- Strength Finder's "first systematic time–space tradeoffs for KDE" is kept but tempered: it is true but partly a mechanical lifting of an existing ANN tradeoff into an existing KDE framework.
+
+**These points are flagged as removed — treat with caution.**
+
+1. **Harsh critic's Issue 2 (derivation deferred to appendix):** REMOVED per instructions. The parser strips appendix content from all papers. The paper explicitly states the analysis is in Lemma 31 in Appendix C; this exists in the original submission.
+
+2. **Harsh critic's Issue 3 (misleading comparison):** REMOVED. The paper clearly distinguishes between data-independent (0.25) and data-dependent (0.173) baselines and states it "improves" the former and "nearly matches" the latter. The claim is accurate, not misleading.
+
+3. **Harsh critic's complaint about Figure 1 readability:** WEAKENED to trivial. The figure has caption text describing each curve — the harsh critic's claim that curves are "not labeled clearly" is an overstatement.
+
+4. **Strength Finder claim about "simpler analysis" as a supported strength:** DEMOTED to minor weakness territory (the claim is asserted but not evidenced).
+
+5. **Strength Finder Strength #5 about "rigorous handling of exact recovery with ANN":** This is valid as a description of what the paper does but would be stronger if the appendix were accessible; it is a reasonable claim given what's stated in the main text.
 
 ## Novel Insights
-None beyond the paper's own contributions. The conceptual observation that the worst-case scale $y$ in the Charikar reduction differs from the space-binding scale, which is what makes the asymmetric construction beat the symmetric one, is genuinely the paper's own insight.
+
+The reviews surface an interesting tension: the paper's conceptual contribution (asymmetric LSH → KDE tradeoffs) is genuinely novel and the optimization framework is clean, yet the paper presents its headline numerical results as theorems without disclosing the computation that produced them. This is not a typical "missing experiments" problem — it is a "missing methodology for the numerical optimization" problem. The reviewers correctly converge on the fact that the main text's derivation of the collision exponent is too terse, though one reviewer's criticism about the appendix being missing is a parser artifact, not a paper flaw. The strength finder correctly identifies the key contribution (first tradeoffs) but overstates the "simpler analysis" claim, which the paper asserts rather than demonstrates. The paper would benefit from treating the numerical optimization as a first-class methodological component rather than a black box.
 
 ## Suggestions
-- Rewrite the abstract and §1.1 to lead with "we present the first space–query tradeoff curve for KDE" and present the $1/\mu^{0.05}$ point and the linear-space $1/\mu^{0.1865}$ point side-by-side, without the rhetorical asymmetry.
-- State in §1.1 that the data-dependent $0.173$ of Charikar et al. (2020) is *not* beaten in linear space, and frame the $0.1865$ result as a simplified data-independent recovery.
-- Add a body-text paragraph describing the optimization solver, precision, and optimality verification used to obtain $0.05$, $4.15$, $0.1865$.
-- Add a geometric explanation of $\theta(\delta)$ and a plot of the maximizing $y(x)$ in Eq. (10).
 
-## Calibration
+1. **Provide the numerical optimization details.** Add a paragraph or a short subsection describing how ξ(δ) and the specific values (0.05, 0.1865, 4.15) were computed — method, discretization, precision. Even better, include a small table of ξ(δ) for a range of δ values (e.g., δ = 0, 0.5, 1, 2, 3, 4, 5) so readers can reproduce the tradeoff curve from the paper alone.
 
-Anchors retrieved (all from the batch):
-- `wLnls9LS3x.md` (Improved KMV; avg 7.00, accept) — same subcommunity (Charikar-style KDE/LSH theory motivated by attention). That paper has a clearer same-regime improvement (first subquadratic KMV for unrestricted vectors) plus experiments validating its assumption; the present paper is more incremental and presents only a tradeoff. The present paper sits below this anchor.
-- `HMe5CJv9dQ.md` (DP similarities to private datasets; avg 7.50, accept) — broader technical novelty, multiple kernels, and empirical results. Present paper is narrower and has no experiments; sits below this anchor.
-- `tra8ktyk0E.md` (Dynamic similarity graph via KDE; avg 5.50, reject) — also a direct extension of Charikar et al. (2020), accepted by some reviewers as solid incremental theory but rejected overall. Very close analogue: builds on the same framework, modest delta, decent technical execution. Present paper is comparable: a clean but modest extension; the framing concerns push it toward this anchor.
-- `BvQkjCnXXr.md` (FastLSH; avg 4.50, reject) — LSH theory paper considered too incremental. Present paper has stronger contribution than this anchor (a real tradeoff curve and matching prior best with simpler analysis); sits above this anchor.
-- `iQtz3UJGRz.md` (Bi-metric NNS; avg 4.00, reject) — ANN theory paper considered too narrow. Present paper sits above.
-- `a2eBgp4sjH.md` (Multi-filter ANN; avg 4.25, reject) — present paper sits above.
-- `oRNus243R6.md` (Diverse graph NNS; avg 5.67, reject) — comparable subcommunity, similar borderline judgment.
-- `N4rYbQowE3.md` (Learning-augmented data structures; avg 7.00, accept) — clearer novelty (new model + algorithms + theory). Present paper sits below.
-- `lnVPfgRnIV.md`, `OZVTqoli2N.md`, `wN9HBrNPSX.md` — off-topic anchors (segmentation/incremental learning); not used.
+2. **Add a sketch of the collision-probability derivation in the main text.** The jump from Theorem 7 (the (c,r)-ANN tradeoff) to Equation (6) (the collision exponent for intermediate scales) is the technical heart of the paper. A 2-3 sentence derivation showing how the quadratic term (y-x)²/(y(1-x)) emerges would greatly improve accessibility.
 
-The closest anchor in spirit and contribution shape is `tra8ktyk0E.md` (avg 5.50, reject): an incremental but clean extension of the Charikar et al. (2020) framework. The present paper is slightly stronger because the tradeoff curve plus simplified data-independent analysis are genuinely useful objects, but weaker than `wLnls9LS3x.md` (7.00) because the new technical delta is smaller, the headline framing is misleading, and there are no experiments. Position: between $5.5$ and $6.0$, leaning $5.5$.
+3. **Substantiate or soften the "simpler analysis" claim.** Either add a sentence comparing the proof complexity (e.g., "Our proof avoids the data-dependent LSH learning phase of Charikar et al. (2020), reducing the analysis from 10+ pages to a single optimization problem") or drop the claim.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+4. **Consider adding a small synthetic experiment.** For a fixed n and μ, compute the actual space and query time predicted by the formulas, and show that the exponents from Theorem 17 approximately hold. This would verify that the o(1) terms and log factors do not dominate.
+
+## Score and Decision
+
+### Calibration Anchors
+
+| Anchor (avg score) | How it compares to the paper under review |
+|---|---|
+| **nCsF3Bsn2n** (8.0) — Probabilistic Kernel for Angle Testing | Stronger overall: has both theory and extensive experiments with code release. The current paper is weaker because it lacks any empirical validation. |
+| **PSaJZktut7** (6.0) — Subquadratic Attention (Poster) | Stronger theoretical contribution: matching upper and lower bounds that resolve an open problem. The current paper's tradeoff framework is novel but more incremental. |
+| **dbaGyviiYF** (5.6) — Dynamic Low-Rank FGT (Reject) | Similar profile: pure theory, interesting ideas, no experiments. The current paper has a cleaner theoretical framing but similar lack of empirical support. The dbaGyviiYF rejection suggests ICLR may be skeptical of pure-theory KDE papers without some validation. |
+| **h4hIuid0HY** (3.0) — SRP-LSH Performance Model (Reject) | Significantly weaker: the SRP-LSH paper's contributions are less fundamental. The current paper is substantially stronger. |
+| **hi6opqxk5X** (2.8) — LSH-based DBSCAN (Reject) | Weaker: the DBSCAN paper suffered from missing baselines and unclear novelty. The current paper has clearer novelty and positioning. |
+| **4MTFyYOsWJ** (4.0) — Streaming Lower Bounds (Withdrawn) | Similar score band: clean theory but narrow scope. The current paper is more applied (KDE is a core ML task) but has the numerical-verification gap. |
+
+### Score Assessment
+
+The paper makes a legitimate theoretical contribution — the asymmetric-LSH-based tradeoff framework for KDE is novel, the optimization problem is cleanly formulated, and the numerical results (while underspecified) are plausible and interesting. However, two issues prevent this from being a strong paper: **(a)** the headline numerical exponents are presented as theorems without any description of how they were computed, violating reproducibility norms even for a theory paper; **(b)** there is no empirical verification of any kind, which is a liability at a conference like ICLR where most papers include experiments. The paper's core framework is sound, but the presentation of the numerical results as established facts without methodological support weakens the overall contribution.
+
+Relative to the calibration anchors, the paper is clearly stronger than the rejected papers scoring 2.8–4.0, comparable to the borderline paper scoring 5.6 (dbaGyviiYF, rejected), and weaker than the accepted theory papers scoring 6.0–8.0.
+
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

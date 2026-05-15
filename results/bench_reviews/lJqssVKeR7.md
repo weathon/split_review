@@ -1,82 +1,102 @@
-## Summary
+Now I have all the context I need. Let me write the consolidated review.
 
-The paper proposes HiSo, a federated zeroth-order (ZO) optimization method that extends DeComFL's scalar-only communication protocol to support a diagonal "Hessian-informed" preconditioner (in fact, an RMSProp-style second-moment estimator over preconditioned updates) reconstructed identically at server and clients from the already-communicated scalars. The authors prove convergence rates that, under a "well-approximated Hessian" assumption, become independent of both model dimension $d$ and Lipschitz constant $L$, and extend the analysis to $\tau>1$ local steps. Empirically, HiSo achieves 1.4–5.4× round speedups over DeComFL on OPT-125M/350M/1.3B/2.7B fine-tuning across SST-2, QQP, SQuAD.
+## Summary
+2-3 sentence summary of the paper's contribution.
+
+The paper proposes HiSo, a Hessian-informed zeroth-order federated optimization method that accelerates convergence via diagonal Hessian approximation while strictly preserving scalar-only (dimension-free) communication. The authors first decouple the scalar-only communication framework from vanilla ZO-SGD, enabling integration of curvature information, and then show theoretically that under a "well-approximated" Hessian condition, HiSo achieves convergence rates independent of model dimension d and Lipschitz constant L — the first such result for ZO methods in FL. Empirically, HiSo achieves 1.4–5.4× speedup over DeComFL across LLM fine-tuning on SST-2, QQP, and SQuAD with OPT-350M/1.3B/2.7B models, cutting communication from TB to KB levels.
 
 ## Strengths
-- **Clean engineering observation (§3.3, Algo. 1).** Generalizing the scalar-only DeComFL communication scheme so that any update of the form $g\cdot v(\text{seed, shared state})$ qualifies is a useful and concrete contribution; it cleanly motivates how a preconditioner can be added without breaking dimension-free communication.
-- **Preconditioner reconstructed with zero communication overhead (Eq. 12).** Maintaining the diagonal $H$ from $\Delta x$ values already implied by transmitted scalars genuinely preserves the MB-scale communication budget, and is the central engineering insight.
-- **$\tau>1$ analysis (Cor. 3).** Extending DeComFL's convergence analysis to multiple local updates is a real theoretical advance independent of the Hessian framing, addressing an explicitly stated open question.
-- **Empirical convergence improvement is real.** Across all reported LLM tasks, HiSo reaches DeComFL's best accuracy in fewer rounds (Table 2), at matched per-round cost.
-- **$\nu$ robustness (Fig. 5 left).** The ablation supports the practical claim that the smoothing hyperparameter is not finicky.
+
+- **Generalized scalar-only communication framework decoupled from ZO-SGD (Section 3.3, Algorithm 1).** The paper explicitly separates the scalar-only communication mechanism from the specific choice of ZO-SGD, allowing Hessian-informed updates (or other optimizers) to be integrated without any additional communication overhead. This is a clean architectural contribution that goes beyond DeComFL's tight coupling with vanilla ZO-SGD.
+
+- **Hessian-informed acceleration with zero extra communication cost (Section 4.2, Eq. 12).** HiSo learns a diagonal Hessian approximation from the gradient scalars already being communicated — the same scalars used for model reconstruction. This means curvature information is obtained for free, without transmitting any second-order information. The Adam/RMSProp-style update rule (Eq. 12) is practical and scalable.
+
+- **Consistent and substantial empirical speedup across multiple LLM fine-tuning tasks.** Table 2 shows 1.4–5.4× communication-round speedup over DeComFL for OPT-350M, OPT-1.3B, and OPT-2.7B on SST-2, QQP, and SQuAD, with 29%–80% communication cost savings. Table 3 shows HiSo achieves higher test accuracy than all ZO baselines (FedZO, DeComFL) while maintaining the lowest communication cost, and up to ~90M× savings versus first-order methods.
+
+- **Theoretical analysis that extends convergence guarantees to multiple local updates (τ > 1).** Corollary 3 shows that HiSo maintains dimension-independent convergence even when τ > 1, resolving a limitation of DeComFL which cannot provide a convergence rate under the low-effective-rank assumption for τ > 1. This is a genuine theoretical advance over the prior state-of-the-art.
+
+- **Novel variance analysis via the whitening trace ζ (Section 5.1, Definition 17).** The paper introduces the concept of a "well-approximated" Hessian and the whitening trace ζ as a formalism for analyzing Hessian-informed ZO methods. Figure 4 provides an illustrative numerical simulation showing how ζ can be much smaller than Lκ and Ld, offering intuition for potential acceleration.
+
+- **Hyperparameter robustness and Hessian distribution visualization (Figure 5).** The smoothing parameter ν (0.9, 0.95, 0.99) has negligible impact on convergence, and the learned Hessian entries exhibit a long-tail distribution consistent with the low-effective-rank assumption that underpins the theory.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The paper does not contain errors that invalidate its core claims.
 
 ### Major
-- **The "Hessian-informed" framing is not earned by the update rule (§4.2, Eq. 12).** The diagonal update $H_{r+1} = (1-\nu)H_r + \nu\,\text{Diag}(|\Delta x_r|^2+\epsilon I)$, with $\Delta x_r = g_r H_r^{-1/2} u_r$, is the RMSProp second-moment of the *preconditioned* ZO update, not an estimator of the Hessian diagonal $\text{Diag}(\Sigma)$. The paper concedes the RMSProp resemblance in footnote 2, but the entire marquee theoretical claim (Cor. 1) depends on $H$ being a "well-approximated Hessian" in the sense of Eq. 17 — a property the update rule does not provably deliver and which the paper does not directly verify on real LLMs (Fig. 4 is a synthetic 200-eigenvalue log-normal simulation; Fig. 5 right shows long-tailed $H$ but long-tails are equally consistent with squared gradients). The gap between the algorithmic mechanism and the assumption needed by the theorem is the structural weakness.
-- **The "$d$- and $L$-independent" rate is conditional, not unconditional (Cor. 1, Eq. 17, Assumption 4).** The rate $\mathcal{O}(\sqrt{\zeta/mR})$ requires $\text{Tr}(H^{-1/2}\Sigma H^{-1/2})\le\zeta$ with $\zeta$ taken as $d$-independent *by assumption*, plus bounded $H$ (Assumption 4). The paper does state ("hard to determine if this approximation holds in the context of LLMs") that verification is open, but still markets the corollary as "the first such result for ZO methods in FL" and as an explanation of empirical acceleration. As written it is an implication, not an explanation, and the abstract overstates this.
-- **Communication-cost claim has a counterexample in the paper's own Table 3.** The text claims HiSo "maintains the lowest communication cost in almost all tasks", but for OPT-1.3B + QQP, HiSo costs 96.67 KB vs DeComFL's 43.95 KB — more than 2× DeComFL. The authors do parenthetically note "only a little higher than DeComFL on OPT-1.3B+QQP", so this is acknowledged, but "a little higher" understates a >2× regression on the largest non-2.7B model tested. The accuracy gains over DeComFL are also typically within or only marginally above the reported std (e.g., OPT-1.3B SST-2: 90.22±0.10 vs 90.34±0.12), so the "consistently outperforms" claim is borderline.
+
+- **The dimension-independent convergence rates (Corollaries 1–3) are conditional on the "well-approximated condition" (Definition 17), and the paper provides no guarantee — theoretical or empirical — that HiSo's Hessian update (Eq. 12) actually satisfies this condition for the Hessians encountered during training.** The update rule is essentially an RMSProp accumulator on preconditioned gradient squares; there is no mechanism ensuring it tracks the true loss Hessian's eigendirections with the accuracy needed to make ζ dimension-independent. The paper is transparent about this in the remarks ("Although it is hard to determine if this approximation holds in the context of LLMs, the assumption offers a plausible explanation for the rapid convergence"), and notes that failure degenerates to DeComFL rates. However, because the abstract and introduction present the dimension-free rate as a headline contribution ("the first such result for ZO methods in FL"), the conditional nature risks misleading readers. The theoretical advantage over DeComFL is not proven — it is a conditional statement under an unverified assumption.
 
 ### Minor
-- **Stale-Hessian / fixed-point coupling not analyzed.** $H$ is refreshed only at round boundaries (per text: "We only update the Hessian at the beginning of one communication round"), while $\Delta x_{r,k}$ during local steps uses the frozen $H_r$ that was itself built from past $\Delta x$ generated under prior $H$. The discrepancy is absorbed into Assumption 4's bounded-$H$ condition; an explicit analysis or empirical sensitivity study would tighten the picture.
-- **$L$-dependence is buried, not eliminated (Theorem 1).** The client-drift term contains $(\tau-1)^2 L/\beta_\ell$ and the step-size constraint includes $\sqrt{1/L(d+2)}$. The dimension- and $L$-independent rate only emerges after specific $\eta,\tau$ choices and assumption stacking. The abstract should make this conditionality explicit.
-- **No ablation isolating the preconditioner mechanism.** A natural baseline is DeComFL+diagonal preconditioner built from $g^2$ (i.e., a true RMSProp-on-ZO control). Without it, the contribution of curvature interpretation vs. plain adaptive scaling is hard to attribute.
-- **No reported variance for Table 2 speedup numbers**, while Table 3 does report std for accuracy/cost.
+
+- **The experiments do not include an ablation that isolates the effect of anisotropic (Hessian-informed) perturbations from adaptive scalar scaling.** HiSo uses perturbations z ~ N(0, H_r^{-1}) which are anisotropic. A comparison against a variant that retains isotropic perturbations u ~ N(0, I) but applies the same per-coordinate adaptive scaling (e.g., dividing each coordinate update by sqrt(H_r)) would clarify whether the speedup comes from the anisotropic search directions (the "Hessian-informed" claim) or primarily from RMSProp-style adaptive scaling. The comparison against DeComFL (isotropic + no adaptive scaling) shows the combined benefit but does not disentangle these mechanisms.
+
+- **The number of local update steps τ is not reported for the LLM experiments.** The paper defines τ in Algorithm 1 and discusses the τ=1 simplified case extensively, but Section 6 does not state what τ value was used for the OPT-350M/1.3B/2.7B experiments. Corollary 3 specifically analyzes the τ > 1 regime, so reporting τ is important for connecting theory to practice.
+
+- **The MNIST experiment (Figure 5) shows a long-tail distribution of learned H entries, but this does not directly validate that H approximates the true Hessian of the loss.** A direct comparison (e.g., computing the true diagonal Hessian via finite differences for the small CNN) would strengthen the claim that H captures curvature. The paper mentions more direct evidence is in Appendix F.7.2 (which was stripped here), but a brief in-main-text validation would be helpful.
 
 ### Trivial
-- The "up to 5×" headline is essentially driven by one OPT-350M/SQuAD cell; the typical LLM speedup is closer to 1.5–2×. Reporting the median speedup alongside the maximum would be more honest.
+
+- The Hessian update equation appears twice (as Eq. 12 on page 5 and again with slightly different indexing on line 187); the second version uses a cleaner form but the relationship between the two could be clarified.
+- The value τ is not reported for the LLM experiments.
 
 ## Nice-to-Haves
-- Direct empirical estimate of $\text{Tr}(H^{-1/2}\Sigma H^{-1/2})$ (e.g., via Hutchinson) at a few checkpoints on one OPT model would let Cor. 1 actually "explain" the observed acceleration.
-- Trajectory plot of effective rank $\zeta$ (or its proxy) across training.
-- LLM-scale ablations on $\nu$, $\epsilon$, and the implicit $\beta_\ell,\beta_u$ clipping that Assumption 4 invokes.
-- A control experiment with $H$ built from $g^2$ vs. $|\Delta x|^2$ to test whether the "Hessian-informed" interpretation is doing real work beyond Adam-style scaling.
+
+- An RMSProp-style ablation that keeps isotropic perturbations but applies per-coordinate scaling to match HiSo's effective step sizes.
+- For a small model, a direct comparison of the learned H entries against the true diagonal Hessian (computed via second-order finite differences).
+- Convergence curves (accuracy vs. rounds) for all LLM tasks and model sizes, not just the speedup table and the MNIST figure.
+- A brief study of sensitivity to τ (e.g., τ ∈ {1, 5, 10}) on a smaller task.
 
 ## Removed Points
-*These points were considered but removed; treat them with caution.*
-- Harsh critic's complaint that the "Generalized framework" is inflated as a separate contribution: this is a judgment call — the framework is genuinely useful as scaffolding for the rest of the paper, and the authors do not oversell it.
-- Strength Finder's "Strong empirical acceleration" with up-to-5.4× framing: kept only with caveats above; the maximum-speedup framing is partly selective.
-- Generic strength about "addresses an important problem" — superficial, dropped.
+
+These points were flagged by the harsh critic but are removed per review guidelines:
+
+- **Missing appendix / "full algorithm is relegated to the appendix"**: The parser strips appendix content from all papers; this content exists in the original submission and is not a valid weakness.
+- **Critique that the abstract overclaims without highlighting the conditional nature**: The abstract explicitly says "under some Hessian approximation assumptions" — this is a proper qualification. The paper is transparent about the conditional nature of the rate claims (Section 5.2 remarks), so the accusation of "overclaiming" is not supported by the actual text.
+- **Several claims about missing implementation details** (e.g., "how many local update steps τ are used" partially removed — the specific value is genuinely missing, but other details the critic cites as missing are in fact present in the paper; see the remaining Minor weakness about τ.)
+- **Formatting/style nitpicks and complaints about parser-stripped content.**
 
 ## Novel Insights
-None beyond the paper's own contributions. The key novel insight is the paper's own: that any update of the form $g\cdot v(\text{seed, shared state})$ is compatible with scalar-only FL, which permits server- and client-side reconstruction of a shared diagonal preconditioner without any extra bytes on the wire.
+
+None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself does not already articulate. (The harsh critic's observation that the theoretical rates are conditional is already acknowledged in the paper's own remarks section, and the missing ablation is a standard request.)
 
 ## Suggestions
-- Reframe the contribution as "adaptive (RMSProp-style) preconditioning under scalar-only FL communication, with a $\tau>1$ convergence analysis," and treat the Hessian-approximation reading as motivation rather than as the basis of the headline rate.
-- Add an empirical Hutchinson-style check that $\text{Tr}(H^{-1/2}\Sigma H^{-1/2})$ is small relative to $Ld$ for one LLM at one checkpoint.
-- Acknowledge in the abstract that the $d,L$-independent rate is conditional on the well-approximation assumption (Eq. 17).
-- Address the OPT-1.3B+QQP communication regression explicitly in Table 3's text rather than parenthetically.
 
-## Axis Evaluation
+1. **Add a clear ablation** comparing HiSo against a variant that keeps isotropic N(0,I) perturbations but applies the same per-coordinate adaptive scaling. This would directly test whether the anisotropic Hessian-informed sampling matters or if adaptive scaling alone drives the speedup. It is the single most impactful experiment the paper could add.
 
-- **Originality:** Moderate. The framework generalization is a clean composition of DeComFL (Li et al., 2025b) and HiZOO-style preconditioning (Zhao et al., 2025). The $\tau>1$ ZO-FL convergence result is genuinely new.
-- **Importance:** Real — communication is the binding constraint for federated LLM fine-tuning.
-- **Support for claims:** Mixed. Empirical claims of "1–5× speedup" are real but the headline framing is selective. The marquee theoretical claim is a conditional implication marketed as an explanation.
-- **Soundness:** Theorem 1 looks correct as stated; the issue is the mismatch between Eq. 12 and Eq. 17.
-- **Clarity:** Generally good; Theorem 1's hidden $L$-dependence in the drift term should be stated more transparently.
-- **Value to community:** A useful engineering recipe and a real $\tau>1$ analysis, but the "Hessian-informed" branding will likely cause confusion.
+2. **Report τ explicitly** for all LLM experiments and, if feasible, include a brief ablation showing convergence sensitivity to τ.
+
+3. **Tone down the theoretical claims slightly** — or, alternatively, add experimental evidence that the well-approximated condition approximately holds (e.g., by computing ζ on a small model via Hessian-vector products). Currently the gap between the conditional theory and the unconditional empirical claims is the paper's weakest point.
+
+4. **Add convergence curves** (test accuracy vs. communication rounds) for each LLM task and model size to the main text or a supplementary figure. The speedup table (Table 2) is informative but convergence trajectories would better illustrate the acceleration.
 
 ## Score and Decision
 
-Anchors (all retrieved):
-- `omrLHFzC37` (DeComFL) — avg **6.25**, Accept. The base paper HiSo extends; HiSo is a clear but incremental follow-up, similar polish, narrower scope.
-- `ZAMoxm86KV` (Trajectory-informed federated ZO) — avg **3.67**, Reject. HiSo is clearly stronger: real LLM-scale experiments, $\tau>1$ analysis, working dimension-free protocol.
-- `DJRd4IQHGQ` (FeedSign 1-bit federated FT) — avg **5.25**, Reject. Comparable scope and empirical maturity; HiSo has marginally better theoretical scaffolding but similar overclaiming.
-- `9H1uctBWgF` (Ferret federated full-parameter FT) — avg **4.67**, Reject. Similar scope, similar criticisms; HiSo is slightly more polished theoretically.
-- `kH5nNlgT52` (One-round federated FM FT) — avg **4.50**, Reject. Less rigorous than HiSo.
-- `bEqI61iBue` (HiZOO; non-federated Hessian-informed ZO) — avg **5.67**, Accept. The direct single-node analog of HiSo's preconditioner; HiSo's federated extension is reasonable on top of that.
-- `9BiVepgmWW` (Low-rank ZO for LLM FT) — avg **7.00**, Accept. Cleaner contribution and tighter empirical story than HiSo.
-- `Oqk1Ui6m0n` (Hessian-Free NGD for PIML) — avg **5.00**, Reject. Similar over-promised theory vs. mechanism gap.
-- `FK8tl47xpP` (Greedy L2O with convergence guarantees) — avg **6.25**, Reject. More original theory than HiSo.
-- `fMTPkDEhLQ` (Tight lower bounds Hölder smooth) — avg **8.00**, Accept. Pure theory paper, not comparable in domain; included only as a high-anchor calibration point — HiSo is well below this tier.
-- `xJ5N8qrEPl` (Bi-Level Optimization, Hessian-free) — avg **6.40**, Accept. More original theoretical contribution than HiSo.
-- `kWsJkH1tNi`, `Ob0UafH2YI`, `Jl0aEFrp11`, `EcetCr4trp`, `WM4xiEDz2N`, `9TSv6ZVhvN`, `Cnn60wwTe1` — FL theory anchors at 2.75–5.75; HiSo is comparable to the upper half of this cluster (~5).
-- `zfeso8ceqr` (Deconstructing optimizers) — avg **6.00**, Accept. Stronger empirical depth than HiSo.
-- `IDxZhXrpNf` (SOAP) — avg **6.25**, Accept. Cleaner methodological contribution than HiSo.
+### Calibration Anchors
 
-HiSo sits between DeComFL (6.25, accepted) — which it directly extends — and the cluster of rejected federated-LLM fine-tuning works at 4.5–5.25. The work has real contributions (the scalar-only protocol generalization, the $\tau>1$ ZO-FL analysis) but the headline "Hessian-informed, $d/L$-independent" claims outrun the mechanism and the empirical evidence on real LLMs. Net: borderline below the DeComFL bar, above the rejected federated-FT cluster.
+| Path | Avg Score | Comparison to this Paper |
+|------|-----------|--------------------------|
+| Meerkat (2DuMBKVbX2) | 5.00 (Accept Poster) | Similar-tier ZO FL paper. This paper has cleaner algorithmic contribution (framework decoupling) but slightly weaker theoretical verification. Comparable overall quality. |
+| FN-NOW (eX8qI83Z2z) | 3.00 (Reject) | Significantly weaker: convex-only theory for non-convex experiments, small-scale experiments (MNIST/CIFAR-10), serious proof concerns. This paper is clearly stronger. |
+| HERON-SFL (H4okZ5imHB) | 3.20 (Reject) | Weaker: very small client counts (3–5), GPT-2 scale only, conditional theory without the same level of empirical validation. This paper is stronger. |
+| Cost-Aware FL (FnaDv6SMd9) | 5.50 (Accept Oral) | Stronger theoretical depth but weaker experiments. Comparable overall quality in different sub-areas. |
+| Polar Express (yRtgZ1K8hO) | 8.00 (Accept Oral) | Much deeper theoretical contribution with optimality proofs. This paper is not at that level. |
+| Byzantine FL (bzHrNdiD4T) | 3.20 (Reject) | Significantly weaker. |
+| Painless FL (27P8pzeYVE) | 3.33 (Reject) | Significantly weaker. |
+| FL L0 constraint (8nY8qJdeQS) | 4.00 (Reject) | Weaker. |
+| ZO VFL (DgSpW6JZSK) | 3.00 (Reject) | Significantly weaker. |
+| Byz FL VFL (VcrR4VMxz9) | 4.67 (Reject) | Weaker. |
+| Social FL (uZWbPNVBUU) | 3.50 (Reject) | Weaker. |
+| Client Selection (QWvrz4qzqU) | 2.50 (Reject) | Weaker. |
+| Faster Convex FL (IqImIIMGbJ) | 2.00 (Reject) | Much weaker. |
+| Selective FL (dbSnvNuNzj) | 3.00 (Reject) | Weaker. |
+| WingsFL (UJYhBfKuBE) | 3.00 (Reject) | Weaker. |
+| Multi-turn LLMs (VKGTGGcwl6) | 8.00 (Accept Oral) | Unrelated topic, far stronger. |
 
-MY FINAL SCORE: <pineapple>5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Relative positioning:** This paper sits firmly in the 5–6 range. It is stronger than the ZO FL papers with avg scores of 3–4 (HERON-SFL, FN-NOW) because it has larger-scale LLM experiments, a cleaner algorithmic framework, and honest treatment of its theoretical limitations. It is comparable to Meerkat (5.00) and the cost-aware FL paper (5.50), though the latter has stronger theoretical novelty. It is clearly not at the 8+ level of Polar Express.
+
+### Score
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

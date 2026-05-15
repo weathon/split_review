@@ -7,12 +7,12 @@ cd "$(dirname "$0")/.."
 
 export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="claude_sdk:claude-opus-4-7"
-export MERGER_MODEL="claude_sdk:claude-opus-4-7"
+export HARSH_MODEL="deepseek-v4-pro"
+export MERGER_MODEL="deepseek-v4-pro"
 export NEUTRAL_MODEL="deepseek-v4-pro"
-export OUTPUT_CSV="bench_scores_deepreview_cal_opus.csv"
-export MERGE_LOG="pipeline_whole_deepreview_cal_opus.log"
-export CONCURRENCY=5
+export OUTPUT_CSV="bench_scores_deepreview_cal_pro.csv"
+export MERGE_LOG="pipeline_whole_deepreview_cal_pro.log"
+export CONCURRENCY=50
 export MAX_PAPERS=200
 export CALIBRATION_SET="2026"
 

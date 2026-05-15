@@ -1,76 +1,85 @@
+Now I have thoroughly analyzed the paper and all reviewer inputs. Here is my consolidated review:
+
+---
+
 ## Summary
-The paper introduces GMD-25, a benchmark for compositional generalisation in Machine Learning Force Fields (MLFFs) with four tasks (length extrapolation, functional-group composition, duplication, and combination). Five popular MLFFs (SchNet, PAINN, DimeNet++, GemNet, EquiFormerV2) are evaluated, and all show one-to-two-orders-of-magnitude error blow-ups OOD; the authors release a configurable toolkit (RDKit + FlashMD + GFN2-xTB + ASE).
+
+This paper introduces GMD-25, a benchmark for evaluating compositional generalization of machine learning force fields (MLFFs) across four tasks: length extrapolation, functional group composition, functional group duplication, and functional group combination. The benchmark uses controlled train/test splits where training and test molecules differ, with training molecules designed to cover the atomic motifs needed for generalization. Five structurally diverse MLFFs (SchNet, PAINN, DimeNet++, GemNet, EquiFormerV2) are evaluated. The key finding is that all models exhibit substantial performance degradation on out-of-distribution examples, and—importantly—model rankings invert between ID and OOD performance.
 
 ## Strengths
-- A clean four-task taxonomy that operationalises Hupkes et al.'s notion of compositional generalisation in a molecular setting (Section 3.1), which is a genuinely useful conceptual decomposition for MLFFs.
-- The compositional cross-molecule split is distinct from prior MLFF benchmarks (MD17, MD22, Transition1x, ANI-1) that primarily split by configuration within a molecule (Section 2.3), so the gap targeted is real.
-- A reproducible, extensible data-generation pipeline (Section 3.2) and dataset of 118 molecules / 296,534 frames that enables others to construct similar splits.
-- The empirical observation that ID and OOD model rankings diverge (e.g., EquiFormerV2 lowest force MAE but worst energy MAE OOD; Section 4.3, Figure 2) is a useful diagnostic finding if it survives more rigorous evaluation.
+
+- **Systematic decomposition of compositional generalization into interpretable probe tasks**: The four tasks (length extrapolation, composition, duplication, combination) isolate distinct aspects of generalization that go beyond what existing MLFF benchmarks (MD17, WS22, Transition1x) test. The task design is clean: training data covers all required atomic motifs, so generalization failures can be attributed to the model's inability to recombine learned primitives rather than to missing chemical knowledge. The consistent OOD performance gap across tasks (Figures 2–4) demonstrates that this is a fundamental architectural limitation.
+
+- **Empirical finding that model rankings invert between ID and OOD**: The paper documents a striking result—the best model on in-distribution data is often not the best on out-of-distribution data. For instance, EquiFormerV2 achieves the lowest force MAE on Length Extrapolation but exhibits among the worst energy MAE in OOD regions; GemNet performs best on Duplication but not on Combination. This rank reversal challenges the common assumption that ID accuracy implies robust generalization and is a concrete, actionable finding for the field.
+
+- **Extensible toolkit for reproducibility**: The four-step pipeline (RDKit → FlashMD → GFN2-xTB → ASE output) is clearly specified, and the commitment to release curated splits under a fairchem-compatible framework lowers the barrier for adoption. The 296,534 geometries across 118 molecules provide a substantial evaluation corpus.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. No identified weakness invalidates the paper's core claims.
 
 ### Major
-- **Total-energy MAE used across splits with systematically different system size.** Equation in Section 4.2 defines $\mathrm{MAE}_{\text{energy}}$ per molecule with no division by atom count. Task 1 trains on $C_2$–$C_6$ alkanes and tests on $C_7$–$C_{13}$ (up to ~3× more atoms). Because energy is extensive, even a model with constant per-atom error will show a roughly linear rise in total-energy MAE across the ID→OOD boundary. Some fraction of the "orders of magnitude" gap in Figures 2(a) and 3(a,c) is therefore a metric artefact rather than a generalisation failure. Per-atom or extensivity-corrected reporting is needed to support the headline claim for Task 1, and is recommended for all tasks given that OOD molecules in Tasks 2–4 also vary in atom count.
-- **Reference labels are GFN2-xTB, but the framing repeatedly appeals to DFT-level physics.** Section 1 motivates MLFFs as replacements for DFT, but Section 3 reveals all labels are semi-empirical tight-binding. Apparent compositional failures on Tasks 2–4 (carboxylic acids, dicarboxylic acids, mixed donor/acceptor molecules) can be partly attributed to xTB's own parameterised behaviour rather than to physical principles. The benchmark therefore cannot cleanly distinguish "fails to learn physics" from "fails to interpolate xTB's parameter surface." At minimum the framing should be tightened, or a subset re-labeled with DFT for cross-validation.
-- **MACE / NequIP / Allegro class models are not evaluated.** The paper claims to "represent the current frontier of equivariant architectures" (Section 4.1) but tests only EquiFormerV2 from that frontier. MACE is even cited in Section 2 but not evaluated. The conclusion that "current MLFFs fail to learn transferable representations" cannot be sustained without the higher-body-order equivariant models that define the current SOTA and that have explicit physics priors plausibly relevant to compositional generalisation. The stated reason for excluding foundation models (memorisation confound) does not apply to MACE-class models trained from scratch on this benchmark.
-- **No seeds / variance reported.** Figures 2–4 appear to show single runs, yet many headline qualitative claims rest on small relative orderings of models (e.g., "EquiFormerV2 worst on energy OOD, SchNet and DimeNet++ stable"). With per-molecule training sets of only ~10k frames and architectural conclusions resting on cross-model comparisons, seed variance could plausibly shift the rankings. Multi-seed runs with error bars are needed to support the comparative architectural claims in Section 4.3.
+
+- **Energy MAE is not normalized by system size, inflating OOD error gaps for Tasks 1 and 3**. The energy MAE is computed as total energy per molecule (MAE_energy = (1/M) Σ|Êⱼ − Eⱼ|). For Task 1 (Length Extrapolation), ID molecules have 2–6 carbons while OOD molecules have 7–13 carbons—roughly 2–5× more atoms. For Task 3 (Duplication), OOD dicarboxylic acids have approximately twice the atoms of ID monocarboxylic acids. Since total energy scales with system size, larger molecules will naturally have larger absolute energy errors even if per-atom error is constant. This means some portion of the reported "orders of magnitude" OOD gap in energy is an artifact of molecule size, not generalization failure. This is the most important issue to fix.
+
+  Importantly, this does **not** affect the paper's force MAE results (which are correctly per-atom), and it does **not** affect relative model rankings within the same molecule. But it weakens the energy-based quantitative claims in the abstract and Section 4.3, and the claim in Section 4.3 that "EquiFormerV2 fails [on energy]" for the base variant of Length Extrapolation needs re-examination with size-normalized metrics.
+
+- **No error bars or multi-run statistics**. All results appear to come from single training runs. Given the small training sets (~2000 snapshots per molecule) and the stochastic nature of neural network training, the reader cannot assess whether observed differences between models (e.g., EquiFormerV2 vs. PAINN on Task 4, or SchNet vs. GemNet on Task 3) are statistically significant. This is especially problematic when the paper draws fine-grained conclusions about which model performed best on each metric.
 
 ### Minor
-- **Very small training sets in the base variants.** Task 1 base uses only five trajectories (~10k frames). Several evaluated models (especially EquiFormerV2) are designed for substantially larger data regimes. Without a data-scaling study, the paper cannot separate "architectural failure to compose" from "data-starved high-capacity model." This is part of the same evidentiary gap as the missing seeds.
-- **Composition framing for Task 2 is chemically loose.** Describing a carboxylic acid as a composition of alcohol + aldehyde elides the emergent conjugation/acidity at the C(=O)OH group. Failure here may partly reflect that the chemistry is not strictly compositional in the sense the paper presupposes. The paper does note ("we do not expect the model to learn the chemical reaction pathway, but rather to infer the properties of the composite group from the learned effects of its constituent parts"), which is reasonable, but a more explicit caveat would sharpen interpretation.
-- **Task 4 framing as pure "symbolic recombination" is incomplete.** Training on bis-acid and bis-amine, then testing on mixed acid/amine, introduces a polarity / charge-transfer shift (symmetric → asymmetric electronic structure) on top of the symbolic recombination. The paper presents it cleanly as the latter; both effects should be acknowledged.
-- **Possible selection bias from FlashMD configuration sampling.** Configurations are sampled by a learned MD surrogate and then re-labeled with xTB. This could bias the configuration distribution toward regions FlashMD finds plausible. The paper does not discuss whether this selection effect could systematically flatter or harm the evaluated MLFFs.
+
+- **The abstract's "orders of magnitude" claim is somewhat overbroad**. The abstract states that OOD errors are "often being orders of magnitude higher than for in-distribution examples." However, for the augmented variant of Length Extrapolation, the paper itself notes that "DimeNet++ and SchNet generalise effectively, maintaining stable and low error across both ID and OOD regions" for energy MAE. Similarly, for Task 4 (Functional Group Combination), the generalisation gap is "notably smaller." The claim holds strongly for Tasks 2 and 3, but "often" overstates the pervasiveness. The conclusion's phrasing ("often one to two orders of magnitudes higher") is more measured. The abstract should be qualified to specific tasks or settings.
+
+- **Task 2 (Functional Group Composition) is not a test of compositional systematicity in the strict sense**. The paper frames carboxylic acid (–COOH) as a "composition" of alcohol (–OH) and aldehyde (–CHO). Chemically, –COOH is a distinct functional group with different electronic structure, not a simple recombination of –OH and –CHO. The task is still a valid and challenging OOD generalization probe—models must predict properties for an unseen functional group—but the claimed connection to Hupkes et al.'s (2020) compositional systematicity is not well justified. The task should be reframed as a "novel functional group" generalization test rather than "composition of learned primitives."
 
 ### Trivial
-- The introduction's claim that MLFFs are "typically trained and tested on the same molecules" is somewhat overstated relative to MD22, Transition1x, and SPICE, which include various cross-molecule splits. Tightening to "controlled compositional splits" would be more accurate.
+None.
 
 ## Nice-to-Haves
-- Add a classical force-field (UFF/GAFF/MMFF) reference as a compositional-by-construction baseline to calibrate what "good compositional generalisation" looks like on each task.
-- Decompose force error by atom type and distance to the functional group to show whether failure is localised at the novel chemistry or pervades the molecule.
-- Re-label a small subset with DFT (e.g., ωB97X-D) and check whether rankings and generalisation gaps reproduce.
-- A data-scaling sweep on Task 1 to show how OOD error responds to training-set size.
+
+- **Include a simple baseline** that predicts energy as a sum over atom-type contributions (e.g., a linear model). This would help disentangle whether the benchmark is trivially solvable by local decomposition and would contextualize the GNN results.
+- **Error per atom as a function of distance from the functional group** for the duplication and composition tasks. This could reveal whether models fail locally (near the new group) or globally.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-- **"PBE0 listed as a model in Figure 2 caption."** This appears only in the parser's alt-text reconstruction; the body of Section 4.3 consistently lists the five MLFFs. Likely a parser artefact, not an author error. Removed.
-- **Missing related works (e.g., specific MLFF benchmark/method citations).** Not verifiable here; per the rules, omitted.
-- **Strength: "important problem"-style statements.** Generic strengths (e.g., "addresses a real and important gap") were dropped; the kept strengths are tied to specific design or empirical content.
-- **Strength: "comprehensive empirical validation across SOTA models."** This conflicts with the verified weakness that MACE / NequIP / Allegro are absent. The weakness wins; this strength is dropped here.
+- **"m4s" model name artifact**: Removed — this is a parser error from figure OCR, not a paper issue. The original submission does not contain this.
+- **Foundation model exclusion**: Removed — the paper explicitly scopes this out (Section 4.1: "we did not include any foundation models... The latter have been pre-trained on large and diverse sets of molecules, making it harder to untangle memorisation and generalisation effects"). This is a deliberate and defensible design choice.
+- **Unreproducibility due to "complex carbonyls" not being defined**: Removed — definitions likely appear in the appendix, which is stripped by the parser.
+- **Demand for per-atom energy MAE vs. relative error as a weakness**: Weakened from a standalone criticism to being subsumed under the energy MAE normalization issue above.
+- **Call for ablation experiments explaining why specific models generalize better**: Weakened to a nice-to-have — the paper is a benchmark, not a mechanistic analysis paper, and the scope of explaining architectural differences is beyond what a benchmark paper needs to deliver.
+- **Criticism that Task 2 (augmented) amide composition logic is chemically wrong**: Removed — the paper correctly notes that the augmented variant introduces amides as a composition of aldehydes and amines to *demonstrate how functional groups can be composed* in the training data. The carboxylic acid test remains the primary evaluation. The point about strict chemical accuracy is valid but tangential to the benchmark design; it is subsumed under the broader Task 2 framing concern above.
 
 ## Novel Insights
-None beyond the paper's own contributions. The ID/OOD ranking disagreement among MLFFs is interesting but needs corroboration under per-atom metrics and multi-seed runs before it can be treated as a robust finding.
+
+The most novel insight that emerges across the reviews is that the standard practice of evaluating MLFFs only on held-out configurations of training molecules systematically overestimates their capabilities. The paper shows that this overestimation is not uniform: different architectures generalize different quantities (energy vs. forces) to different degrees, and no single model dominates OOD performance. This suggests that the "physically-informed" architectural designs that drive ID performance may encode dataset-specific inductive biases rather than universal physical principles. The observation that models with the strongest ID performance (e.g., EquiFormerV2 on forces) can simultaneously exhibit the worst OOD generalization on other quantities (energy) is a specific, non-obvious finding that directly challenges the field's reliance on ID accuracy as a proxy for model quality.
 
 ## Suggestions
-- Replace total-energy MAE with per-atom energy MAE (and report the size-dependent residual separately) for every task. Re-interpret Tasks 1–4 in light of the corrected metric.
-- Add MACE (and ideally NequIP or Allegro) to the model suite; the omission directly weakens the central claim about state-of-the-art MLFFs.
-- Run ≥3 seeds per (model, task) and report error bars; without this the architecture-level conclusions are not adequately supported.
-- Tighten framing: explicitly state that labels are xTB and that conclusions are with respect to that PES; reserve "physical principles" claims for a DFT cross-check on a subset.
-- Add a data-scaling study and a classical force-field baseline.
+
+1. **Fix the energy MAE normalization**: Report per-atom energy MAE (total energy error divided by number of atoms) for Tasks 1 and 3, where molecule sizes differ between ID and OOD. Re-examine whether the "EquiFormerV2 fails on energy" claim still holds under this normalized metric.
+2. **Add multiple seeds**: Report results from at least 3 random seeds with standard deviations or interquartile ranges. This is critical for assessing whether observed between-model differences are robust.
+3. **Qualify the abstract**: Replace "often being orders of magnitude higher" with a more precise statement tied to specific tasks, e.g., "with errors increasing by one to two orders of magnitude for functional group composition and duplication tasks."
+4. **Reframe Task 2**: Drop or soften the claim that carboxylic acid is a "composition" of alcohol and aldehyde. Instead, present it as a "novel functional group" generalization test while keeping the task itself unchanged.
+5. **Add a simple linear baseline** (sum of atom-type energy contributions) to help interpret whether the benchmark poses genuine compositional challenges.
 
 ## Score and Decision
 
-**Evaluation by axis.** Originality: moderate — the four-task taxonomy is a meaningful refinement of compositional-generalisation analysis for MLFFs, but the benchmarking-OOD-for-molecular-models idea is not new (GDL-DS, BOOM, AU-GOOD). Importance: clear — MLFF generalisation across molecules is genuinely under-tested. Claim support: weak — the central "current MLFFs fail compositional generalisation" claim is materially weakened by non-size-normalised energy MAE, semi-empirical labels, single seeds, and a model suite that excludes the strongest physics-priored SOTA. Soundness: middling — methodology is reasonable but several decisions (metric, label fidelity, model selection) directly compromise the headline. Clarity: good. Community value: real if the issues above are addressed; toolkit and split design are reusable.
+**Calibration anchors** (all retrieved from human-review corpus):
 
-**Anchors retrieved.**
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/NvJxTjTQtq.md` — *EGraFFBench* (avg 6.00). Most similar comparable: also a benchmark of equivariant MLFFs, but with broader model coverage (NequIP, Allegro, MACE) and more datasets; GMD-25 is narrower and uses semi-empirical labels, suggesting a lower score.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ItPYVON0mI.md` — CG potentials paper (avg 3.00). Methods paper, lower quality; not directly comparable, but a useful low anchor.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/CkozFajtKq.md` — *LiFlow* flow matching for MD (avg 6.33). A methods paper, broader empirical scope; GMD-25 has narrower empirical depth.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/kKXIYUi8ff.md` — DynamicsDiffusion (avg 3.00). Lower anchor; clearer methodological concerns.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7Jer2DQt9V.md` — *Unreasonable Effectiveness of Pretraining in Graph OOD* (avg 4.50). Comparable in that it's a benchmark/analysis paper on graph OOD; reviewers found limited novelty/insight, similar tier.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/qFZnAC4GHR.md` — AU-GOOD framework for biochemical OOD (avg 6.67). Higher anchor: more methodological depth, conceptually novel metric; GMD-25 is below this.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LixGd92Wri.md` — *GDL-DS* benchmark for geometric DL under distribution shifts (avg 5.67). Closest peer in scope; broader domain coverage; GMD-25 is more focused but narrower and methodologically thinner.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/QPVK1ne9gI.md` — *MPFBench* (avg 5.00). A dataset benchmark paper with mixed reviewer scoring; comparable tier.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/gNOW7ch3Ye.md` — *FAMMA* finance benchmark (avg 5.67). Off-topic; weak comparison.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/A23C57icJt.md` — *Open-CK* combustion benchmark (avg 6.25). Larger-scale dataset paper, more empirical depth.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/iRYExPKnxm.md` — *AcademicEval* (avg 4.00). Lower anchor; weaker benchmark contribution.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Dj1PVLU8fK.md` — ∞-benchmarks (avg 3.50). Lower anchor; controversial methodology.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ly10tMV6cD.md` — Structure-Rich Text Benchmark (avg 3.25). Lower anchor; weak technical contribution.
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `Ri9FViINBU.md` (PEROV-H3) | 2.00 | Much weaker: shallow experiments, no model differentiation, limited dataset. Current paper is substantially stronger. |
+| `QihJMqm2aX.md` (Pushing limits of unconstrained MLIPs) | 2.00 | Much weaker: limited conceptual novelty, incremental. Current paper is a clear contribution. |
+| `UVmMNagKvK.md` (StructEval) | 4.00 | Weaker: limited materials, missing property prediction tasks. Current paper has better task decomposition and more thorough analysis. |
+| `ftANj24sfU.md` (Large-Scale MD) | 5.00 | Similar score but paper had more severe issues (suspicious results, lack of novelty). Current paper's core contribution (benchmark) is solid. |
+| `9ZogcRkhoG.md` (Local protein env. with MLFFs) | 5.00 | Similar quality. Accepted. Current paper addresses a broader question about generalization in MLFFs. |
+| `JAb0y8lkqL.md` (3DCS benchmark) | 5.50 | Similar benchmark paper with comparable weaknesses (xTB accuracy concerns). Accepted as poster. Current paper is roughly comparable in quality. |
+| `TRErr3HucA.md` (PES smoothness) | 5.50 | Mixed benchmark+architecture submission that was rejected due to split focus. Current paper is a cleaner, more focused benchmark contribution. |
+| `RDerF20JYT.md` (La-Proteina) | 8.00 | Much stronger: novel method with strong empirical results. Current paper is a benchmark (not a method) and doesn't reach this tier. |
 
-Positioning: GMD-25 is below EGraFFBench (6.0) — same general category but EGraFFBench has broader model coverage and clearer methodology. It is comparable to or slightly below GDL-DS (5.67) and the *Unreasonable Effectiveness* graph-OOD paper (4.5). The metric and label-fidelity issues are non-trivial but the benchmark idea and toolkit are real contributions. Settles between 4 and 5.
+The paper introduces a thoughtfully designed benchmark that addresses a genuine gap in MLFF evaluation. The task decomposition is well-motivated, the models are diverse, and the core finding (universal OOD failure + rank inversion) is important for the field. However, the unnormalized energy MAE inflates some quantitative claims, the absence of error bars limits interpretability, and the abstract overstates the pervasiveness of the gap. These are all fixable with revisions and do not undermine the paper's central contribution. Relative to the calibration anchors, the paper sits alongside accepted benchmarks like 3DCS (5.5) and the MLFF protein representation paper (5.0), and is clearly stronger than papers scoring 2.0–4.0.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

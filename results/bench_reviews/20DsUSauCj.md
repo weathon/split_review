@@ -1,83 +1,84 @@
 ## Summary
-The paper introduces an automated pipeline that, from only a natural-language trait description, extracts a linear "persona vector" in an LLM's residual stream and applies it to four tasks: (1) deployment-time monitoring of prompt-induced behavioral shifts, (2) inference-time steering, (3) "preventative steering" during finetuning that adds the undesired direction during training so the model need not learn it, and (4) pre-finetuning data screening via a "projection difference" metric. Experiments on Qwen2.5-7B and Llama-3.1-8B across evil/sycophancy/hallucination (plus appendix traits) show strong correlations between activation shifts along persona vectors and post-finetuning trait expression, and a fact-acquisition case study where preventative steering preserves new-fact recall while suppressing hallucination.
+
+The paper introduces an automated pipeline for extracting *persona vectors*—linear directions in activation space—from natural-language trait descriptions, and demonstrates their utility across four applications: (1) monitoring prompt-induced personality shifts via activation projection, (2) steering behavior at inference time, (3) a novel *preventative steering* method that adds undesired persona directions during finetuning to prevent drift, and (4) pre-finetuning data screening by projecting training data onto persona vectors. Experiments on Qwen2.5-7B-Instruct and Llama-3.1-8B-Instruct across three traits (evil, sycophancy, hallucination) show strong correlations between persona-vector-projected activation shifts and post-finetuning trait expression (r=0.76–0.97), and demonstrate that preventative steering preserves general capabilities better than inference-time steering.
 
 ## Strengths
-- **Cleanly specified, fully automated pipeline.** Given only a trait name + description, the pipeline auto-generates contrastive prompts, evaluation questions, and a rubric, then extracts a layer-specific direction. The artifact is reusable across traits (Sec. 2, validated in Appendix D, replicated on additional traits in Appendix I).
-- **Practical, falsifiable utility result in Section 5.2 / Figure 6.** Preventative steering preserves new-fact accuracy and MMLU while suppressing hallucination to baseline, whereas inference-time steering destroys both. This is the paper's most concrete and useful contribution.
-- **Strong predictive correlations between training-data projection difference and post-finetuning trait expression** (r=0.88–0.95, Fig. 7), enabling proactive data screening — a genuinely new application beyond standard activation steering.
-- **Replication across two models and multiple datasets** (trait-eliciting + EM-like), plus comparison to CAFT and regularization baselines (Appendix L.4/L.5).
-- **Honest reporting of negatives:** the paper explicitly concedes that monitoring correlations "arise primarily from distinguishing between different prompt types" and that single-layer preventative steering does not fully prevent acquisition on aggressive datasets.
+
+- **Automated, practical extraction pipeline.** Given only a trait name and description, the pipeline (Section 2) generates contrastive prompts, evaluation questions, and rubrics via Claude 3.7 Sonnet, then extracts a usable persona vector with no manual curation. This lowers the barrier to applying activation-engineering methods to new traits.
+
+- **Finetuning shift correlations are the paper's strongest result.** Figure 4 shows r=0.76–0.97 (p<0.001) between the projection of finetuning-induced activation shifts onto persona vectors and post-finetuning trait expression, across two models and three traits. Cross-trait baselines are lower (r=0.34–0.86), confirming trait-specificity. This provides a mechanistic account of *when* and *how* finetuning changes behavior.
+
+- **Preventative steering is a genuinely novel idea with compelling evidence.** Steering *toward* an undesirable persona direction during training, then removing the intervention at inference, reduces trait expression while preserving MMLU accuracy and new-fact recall far better than inference-time steering (Figures 5 and 6). The fact-acquisition case study (Section 5.2) is particularly clean: preventative steering suppresses hallucination to baseline while degrading new-fact accuracy only slightly, whereas inference-time steering degrades both.
+
+- **Cross-trait and cross-model generality.** Experiments cover three negative traits on two architecturally distinct models (Qwen, Llama). Additional results (Appendix I) extend to four more traits including positive ones (optimism, humor), supporting generality beyond the narrow set shown in the main text.
+
+- **Dataset-level data screening correlations are strong.** Figure 7 reports r=0.88–0.95 (p<0.001) between the projection difference metric computed *before* finetuning and the observed post-finetuning trait expression, suggesting the metric is a useful pre-training signal.
 
 ## Weaknesses
 
 ### Fatal
-None. The core empirical results are reproducible in principle and the central method is well-defined.
+None.
 
 ### Major
-- **No causal-mediation test of the Fig. 4 claim.** Section 4 implies persona vectors *mediate* finetuning-induced behavior, but the evidence is only correlational. A natural test — ablating/projecting out the persona direction during finetuning and checking whether trait expression drops while the training loss is otherwise preserved — is not reported in the main text. Without it, "mediation" is overstated; the persona vector could be a generic "the model has changed" axis. The cross-trait baseline correlations (r=0.34–0.86) overlap substantially with the on-trait ones (0.76–0.97), and footnote 6 acknowledges that negative traits "tend to shift together," which weakens the trait-specificity claim.
-- **Same-judge dependence across vector extraction and evaluation.** GPT-4.1-mini both filters the responses used to define each persona vector (scores >50 / <50 in Sec. 2.2) and grades trait expression for the downstream correlation plots. Human-judge agreement is reported in Appendix D, but no experiment isolates the inflation due to using one judge for both ends of the pipeline (e.g., extract with one judge, evaluate with a disjoint one). For hallucination this is especially concerning, since LLM-as-judge is a weak detector of fabrication.
-- **The "monitoring" claim is weaker than the framing suggests.** Section 3.3 itself admits that r=0.75–0.83 mostly reflects distinguishing prompt categories, with "more modest" within-prompt-type correlations deferred to the appendix. For the deployment scenarios in the motivation (Bing, Grok, GPT-4o), within-prompt-type sensitivity is the operationally relevant quantity; reporting it in the main text would let readers judge the monitoring claim on its real merits.
+
+- **Data screening lacks causal validation in the main text.** Section 6 shows that (a) the projection difference metric correlates with post-finetuning outcomes at the dataset level (Figure 7), and (b) trait-inducing and control samples are separable (Figure 8). However, the paper never performs the obvious intervention: actually filter training data by projection threshold, finetune on the filtered set, and measure whether post-finetuning trait expression decreases. The claim that persona vectors "enable fine-grained data filtering" (Section 6.2) is supported only by correlational evidence in the main text. While Appendix N is referenced for validation on real-world datasets, the main text would benefit from at least one direct filtering experiment to substantiate the causal claim.
+
+- **Figure 4 correlations are reported for all datasets combined, not separately for EM-like datasets.** The scatter plots in Figure 4 include explicitly trait-eliciting datasets (Evil II, Sycophancy II, Hallucination II) alongside emergent-misalignment–like datasets (Medical, Code, GSM8K, MATH, Opinions). The paper's central motivation—that persona vectors capture *unintended* shifts—depends on the method working for EM-like datasets that do not explicitly teach the target trait. The paper does not report correlation coefficients restricted to EM-like datasets. If the correlation collapses or weakens substantially without the explicit datasets, the claim about capturing unintended shifts would be unsupported. This analysis must be shown.
 
 ### Minor
-- **Motivation/evidence gap on scale.** The motivating incidents involve frontier RLHF'd models; all main experiments are on 7–8B open chat models. A demonstration on at least one larger model would strengthen the practical claim, though it is a reasonable scope choice.
-- **Layer selection uses "steering effectiveness" as a tuning signal**, and the resulting layer-specific vector is then used for the downstream trait-score evaluations. How much of the headline correlation is absorbed by this tuning step is not discussed.
-- **Section 5.2 case study is single-dataset, single-model in the main text.** Given that this is the most compelling utility result, a second corroborating instance would substantially strengthen it. No comparison to simple non-steering baselines (lower LR, LoRA rank reduction, omission of rephrasings) is reported in the main text.
-- **Section 6.2 sample-level separation could be matched by trivial baselines.** Trait-II datasets differ obviously in content from Normal datasets, so an LLM judge or even a bag-of-words classifier would also separate them. The genuinely interesting claim — projection catches samples that "escape LLM filters" — is deferred to Appendix N and not substantiated in the main text.
-- **Cost/benefit of projection difference vs LLM filtering is not quantified in the main text** (it requires base-model rollouts for every training prompt). Appendix K discusses approximations but the practical headline number is absent.
+
+- **The judge validation is referenced but deferred entirely to the appendix.** The paper states "we validate it by checking agreement between our LLM judge and human evaluators... (see Appendix D)" (Section 2.1), but the main text provides no agreement rates, confusion matrices, or any quantitative indication of judge reliability. Given that every quantitative result depends on this judge, a brief summary in the main text (e.g., "Pearson r=0.XX with human raters") would substantially increase reader confidence. The appendix validation exists in the original submission but is not summarized.
+
+- **The data screening claim is slightly overclaimed in the abstract.** The abstract states "persona vectors can be used to *flag training data* that will produce undesirable personality changes," which is supported by the correlational evidence. However, the term "flag" combined with the broader context implies a validated screening tool, whereas the causal link (does removing flagged data actually prevent unwanted shifts?) remains untested in the main text.
 
 ### Trivial
-- Section 5 contains two near-duplicate paragraphs describing the CAFT/regularization comparison (lines around the parsed text's CAFT discussion). Likely a copy-edit artifact worth a pass.
+- None of substance.
 
 ## Nice-to-Haves
-- Fluency/perplexity curves as a function of steering coefficient (in addition to MMLU), for both inference-time and preventative steering.
-- Partial-correlation analysis for monitoring (Fig. 3), controlling for prompt type, in the main text.
-- A direct head-to-head with an LLM-judge filter on the same data, with FPR/FNR and cost.
-- Test preventative steering when the trait identity is unknown a priori — i.e., flag a trait via Section 6 first, then preventative-steer against it — to demonstrate the realistic deployment workflow end-to-end.
+
+- **Separate EM-only correlation for Figure 4.** A small table reporting r values for the five EM-like datasets only (Medical, Code, GSM8K, MATH, Opinions) for each trait-model combination would directly address whether the method captures unintended shifts.
+- **One direct filtering experiment.** Finetuning after removing high-projection (or keeping low-projection) samples and measuring trait expression would complete the data screening story.
+- **A brief main-text summary of the LLM judge validation.** A single sentence with an agreement statistic would substantially strengthen the paper's evidential foundation.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- *"Fig. 4 correlation is guaranteed by Normal/I/II dataset design."* Weakened/partly removed: it is true that intensity-graded datasets bias the correlation upward, but the figure also includes EM-like datasets not graded by trait intensity, and the cross-trait baseline comparison is in fact reported (Appendix I.2). The valid residual concern — overlap with cross-trait baselines — is kept under Major.
-- *"Steering examples in Fig. 2 are cherry-picked."* Removed: Figure 2 also reports quantitative trait-expression curves across layers and coefficients; the transcripts are illustrative, not the basis of the claim.
-- *"Generality is asserted but not tested at frontier scale."* Kept in weakened form (Minor): the paper does not claim frontier-scale validation, and 7–8B open models are a standard and reasonable scope for an academic submission. Demanding a 70B+ demonstration is scope creep, but the motivation/evidence gap is worth flagging.
-- *Strength: "Robustness across two open-source chat models … extends to additional traits."* Kept; concrete.
-- *Strength: "Multi-layer preventative steering eliminates trait acquisition without capability loss" (Appendix L.3).* Kept as evidence for preventative-steering effectiveness, though appendix-only.
-- *Strength: "Persona vectors causally control trait behavior."* Kept; supported by Fig. 2.
-- Generic "important problem" type strengths from the Strength Finder were filtered out.
+
+These points are flagged to be removed, treat them with caution:
+
+- **"Asymmetrical comparison between preventative and inference-time steering"** (Harsh Critic Critical Issue 4): Removed. The critic claims the comparison is unfair because inference-time steering is applied during MMLU evaluation while preventative steering is not. However, this is the intended and meaningful comparison: two end-to-end strategies (intervene at inference vs. intervene during training so inference intervention is unnecessary). Measuring MMLU of the preventatively-steered model *without* inference steering is the correct comparison because that is the practical benefit claimed.
+
+- **"LLM judge validation is missing / deferred entirely"** as a structural flaw: Removed per instructions (parser strips appendices; paper explicitly states validation is in Appendix D). However, noted as a Minor weakness that a summary statistic in the main text would help.
+
+- **"Figure 5 gray dashed line is confusing"**: Removed. The figure description is from a parser-extracted image caption; the actual figure may be clearer. Even if the line is a single reference value, this is at most a visualization nitpick.
+
+- **Within-prompt-type correlations being modest** (raised by critic as a limitation): Not listed as a weakness because the paper itself honestly acknowledges this limitation (Section 3.3: "more modest correlations when controlling for prompt type... may be less reliable for more subtle behavioral changes"), which is transparent reporting rather than a flaw.
 
 ## Novel Insights
-Two observations go beyond the immediate pipeline. First, the finding that training on narrow flaws (e.g., flawed math) increases unrelated traits such as "evil" (Sec. 4.1 / Fig. 17) extends the emergent-misalignment literature with a tractable, axis-based diagnostic. Second, the projection-difference metric reframes data screening: it is not the absolute trait content of the training response that matters, but the gap between the training response and what the base model would have produced — an actionable shift in how training data risk should be measured. The preventative-steering inversion (push the model toward the bad direction during training so it does not need to learn it) is a clean, counterintuitive intervention that may generalize beyond persona traits.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. Add a judge-independence ablation: re-extract persona vectors with a different judge (or human labels) and re-evaluate trait scores with a third judge; report whether Fig. 4 / Fig. 7 correlations survive.
-2. Add a causal mediation experiment: project out (zero-ablate) the persona direction during finetuning on a trait-eliciting dataset and measure whether trait expression drops while training loss is preserved — this is the missing test of the Sec. 4 mediation claim.
-3. Promote the within-prompt-type monitoring correlations (Appendix E.2) into Section 3.3 and adjust the abstract's framing accordingly.
-4. Promote at least one "escapes LLM filters" example from Appendix N into Section 6.2, since this is the headline practical claim of data screening.
-5. Quantify fluency/coherence cost of steering (not only MMLU) alongside Figures 2/5/6.
-6. De-duplicate the CAFT/regularization paragraph in Section 5.
 
-## Overall Assessment
-*Originality:* Solid. Persona vectors themselves are a natural extension of contrastive activation steering, but preventative steering and projection-difference data screening are genuine novel contributions. *Importance:* High — persona drift in deployed and fine-tuned LLMs is an open practical problem. *Claim support:* Mixed. Steering and predictive screening claims are well-supported; the monitoring claim is honestly hedged but the abstract does not reflect the hedge; the mediation claim is asserted but not causally tested. *Soundness:* The shared-judge architecture and lack of an ablation-during-finetuning test are real methodological gaps, but not invalidating. *Clarity:* Well-written, well-organized, with limitations discussed (Appendix B). *Value to community:* Substantial — the pipeline, datasets, and preventative-steering technique are likely to be reused.
+1. **Add a direct filtering experiment.** A simple bar-chart experiment comparing post-finetuning trait expression for: (a) full dataset, (b) dataset filtered to remove high-projection samples, and (c) dataset filtered by an LLM judge baseline. This would directly substantiate the "filtering" claim in Section 6.
 
-This is a stronger, broader contribution than the 5-rated steering papers I compared against (`2XBPdPIcFK`, `9wjGUN65tY`), with more applications, larger experimental footprint, and a genuinely useful downstream utility result. It is most similar in scope and quality to `wozhdnRCtw` (avg 7.0, Accept).
+2. **Report EM-only correlations for Figure 4.** Create a small table or annotation showing the r-values restricted to the five EM-like datasets (Medical, Code, GSM8K, MATH, Opinions) for each trait-model combination. This would resolve the most serious empirical concern about whether the method captures *unintended* shifts.
 
-### Anchor comparison
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2XBPdPIcFK.md` — avg 5.00 (Reject), activation engineering / sentiment steering. Narrower scope and fewer applications than the paper under review; this paper is stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/9wjGUN65tY.md` — avg 5.00 (Reject), conceptor-based affine steering. More theoretical, less empirical breadth; this paper is stronger empirically.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/YCu7H0kFS3.md` — avg 4.75 (Reject), entropic activation steering for agents. Narrower task and weaker validation; this paper is clearly stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ZPkNrs6aNO.md` — avg 5.50 (Reject), confident direction steering. Comparable methodology but narrower applications; this paper has more breadth.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7hRuaiRlgZ.md` — avg 4.00 (Reject), dynamic representation alignment for CoT. Less ambitious; this paper is stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/qIN5VDdEOr.md` — avg 6.00 (Accept), instruction-following direction. Similar style of finding-a-direction; comparable in quality, this paper is broader.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/QFmnhgEnIB.md` — avg 3.75 (Reject), alignment/helpfulness tradeoff in RepE. Narrower; this paper is much stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/aCgybhcZFi.md` — avg 5.67 (Reject), RepE position paper. This paper is more empirical and more rigorous.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/cselR6Jne3.md` — avg 5.25 (Reject), LatentQA decoder. Different angle, comparable rigor; this paper offers more downstream utility.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Hf17y6u9BC.md` — avg 6.67 (Accept), activation patching best practices. Methodological/rigorous; this paper is more applied with comparable thoroughness.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ap1ByuwQrX.md` — avg 6.50 (Accept), prompt-influence manipulation. Comparable contribution magnitude.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wozhdnRCtw.md` — avg 7.00 (Accept), instruction-following via activation steering. Closest match: similar pipeline shape, similar evaluation rigor, similar practical utility. This paper has broader applications (preventative steering, data screening) but the same methodological caveats around judge dependence.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/z1yI8uoVU3.md` — avg 3.00 (Reject), steering side-effects evaluation. Much weaker than this paper.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1HQZ4QFWi8.md` — avg 3.50 (Reject), self-steering alignment. Weaker than this paper.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/aRqyX0DsmW.md` — avg 4.00 (Reject), lab safety benchmark. Off-topic; not a useful anchor.
+3. **Include a main-text summary of judge validation.** Even one sentence (e.g., "GPT-4.1-mini achieves Pearson r=0.XX with human raters on 200 samples") would greatly increase trust in all downstream results.
 
-Positioned slightly above `wozhdnRCtw` (avg 7.0) due to broader application set and the genuinely useful fact-acquisition case study, but pulled back toward 7 by the missing causal-mediation test and the shared-judge dependence.
+## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Calibration anchors** (all from ICLR 2026 human reviews):
+
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `QZvGqaNBlU.md` (PERSONA: activation-space personality control) | 5.00 | Similar topic and methodology but narrower scope (inference-time only); this paper is more comprehensive (finetuning, preventative steering, data screening) and has stronger validation → this paper is stronger |
+| `yjrVOxjkDR.md` (Persona Features Control Emergent Misalignment) | 7.50 | Stronger mechanistic analysis via SAEs and clearer causal mediation, but on a narrower phenomenon (emergent misalignment) with proprietary models; this paper has broader practical applications but weaker mechanistic depth → this paper is slightly weaker |
+| `q5AawZ5UuQ.md` (Emergent Misalignment is Easy, Narrow Misalignment is Hard) | 5.33 | Comparable breadth and rigor; this paper covers more application areas (monitoring, data screening, preventative steering) → comparable |
+| `VsEkWh3mXu.md` (SteeringSafety: steering evaluation framework) | 6.00 | Systematic evaluation framework with less novel methodology; this paper has clearer novel contributions (preventative steering, data screening) → comparable |
+| `iD8uUeCBy5.md` (Steering Vector Transfer via Orthonormal Transformations) | 2.50 | Weak evaluation (cosine similarity only, no behavioral validation); this paper has much stronger empirical evidence → this paper is much stronger |
+| `cN1QlgqORs.md` (Impatient Users Confuse AI Agents) | 3.50 | Narrower scope, weaker baselines, similar activation-steering methodology; this paper has better experiments and broader validation → this paper is stronger |
+| `X5YiG1YXVT.md` (Accidental Vulnerability: Fine-Tuning Safety) | 2.00 | Weak methodology, unclear claims; this paper is substantially better in all dimensions → this paper is much stronger |
+
+**Score reasoning**: The paper contributes an automated pipeline for extracting persona vectors, demonstrates strong correlations between activation shifts and finetuning-induced trait changes (r=0.76–0.97), and introduces the novel preventative steering method with clean evidence. The main weaknesses are (a) the data screening application is correlational rather than causally validated in the main text, and (b) correlation results are not broken down by dataset type to verify the method captures unintended shifts. These are addressable limitations, not fundamental flaws. Relative to the calibration set, the paper sits above purely inference-time activation steering papers (PERSONA, avg 5.0) but below deeply mechanistic work on emergent misalignment (avg 7.5). The contributions are substantial, the experiments are thorough, and the weaknesses are clearly scoped.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

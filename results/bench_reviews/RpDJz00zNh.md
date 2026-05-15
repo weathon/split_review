@@ -1,83 +1,97 @@
+Here is my final consolidated review:
+
 ## Summary
-ConciseHint proposes an "in-reasoning intervention" framework that periodically injects a short concise hint (manual text or learned embeddings) into the model's own generation stream, with a complexity-adaptive injection interval (τ_k = α + β·l_k) and a dynamic injection-position rule. Experiments on Qwen3-1.7B/4B/8B and DeepSeek-R1-14B across GSM8K, AIME24, and GPQA-Diamond show 20–65% token reduction relative to original reasoning, with the method also stacking on top of BeConcise/Prompt/Deer/NoWait baselines.
+
+ConciseHint proposes an "in-reasoning intervention" framework that injects conciseness-promoting hints (manually designed text or learned embeddings) directly into the reasoning process of large reasoning models (LRMs) during token generation, rather than applying prompts or fine-tuning before generation begins. The method adaptively controls injection intensity based on query complexity and dynamically selects injection positions, achieving consistent token reduction (27–65% on GSM8K and GPQA, 4–20% on AIME24) across Qwen3-1.7B/4B/8B and DeepSeek-R1-14B while maintaining accuracy, and can be combined with existing efficiency methods (BeConcise, Prompt, Deer, NoWait) for further gains.
 
 ## Strengths
-- **Consistent stacking gains across baselines.** Table 1 shows that adding ConciseHint to Prompt/Deer/NoWait/BeConcise systematically lowers token usage further (e.g., Qwen3-4B/GSM8K: Deer 1405 → Ours(Deer) 841; total 65% reduction vs. original via Ours(Prompt)). The plug-in compatibility is genuine evidence the intervention is complementary to existing efficiency methods.
-- **Informative position-selection ablation.** Table 4 quantitatively shows tail-injection causes severe degradation (55.56 → 42.93 on GPQA-Diamond) while head-injection inflates prefilling to 100%; the dynamic head-to-tail schedule is well motivated by this finding.
-- **Length controllability via γ-interpolation.** Equation 4 yields a clean accuracy/tokens trade-off (Figure 3) — a usability advantage over methods with no tunable knob.
-- **Transition-word analysis (Table 5).** Provides mechanistic evidence that token reduction comes from cutting redundant self-reflection ("Wait" count drops from 14.97 to 4.39 on Qwen3-4B/GSM8K) rather than truncating substantive reasoning.
+
+- **Novel in-reasoning intervention paradigm.** Unlike prior work that applies conciseness constraints before generation (prompt engineering, SFT, RL), ConciseHint injects hints *during* generation. This is a genuinely different axis of attack on verbosity in LRMs, and the paper is the first to systematically explore this direction (Section 1, Figure 1). The distinction from early-exit methods (which stop generation) and from static prompting (which only operates at the input) is clear.
+
+- **Complexity-adaptive injection is convincingly justified.** The ablation in Table 3 shows this is not just a nice feature but a necessity: fixed high-intensity injection (interval 64) collapses Qwen3-4B accuracy on AIME24 from 67.00% to 45.33%, while the adaptive strategy preserves accuracy. On easy GSM8K, the same high intensity causes negligible harm. This validates the core design choice that injection interval should grow with reasoning length (Eq. 1).
+
+- **Consistent additive improvements when combined with existing methods.** ConciseHint reduces token usage on top of all four baselines (BeConcise, Prompt, Deer, NoWait) across nearly every model–benchmark combination tested. For example, on Qwen3-4B GSM8K, Ours(Deer) cuts Deer's 1405 tokens to 841 with minimal accuracy change. This demonstrates the method works as a flexible plug-in, not just as a standalone technique.
+
+- **Dynamic position strategy is empirically motivated.** Table 4 shows that tail injection causes catastrophic accuracy drops (55.56% → 42.93% on GPQA-Diamond) while head injection requires 100% prefilling. The dynamic strategy balances these concerns, and the analysis is appropriately grounded in experimental evidence.
+
+- **Controllability via embedding interpolation is a practical feature.** Figure 3 shows smooth accuracy–token tradeoffs via γ in Eq. (4), giving practitioners a single dial to adjust efficiency.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The core method works and claims are supported by experimental evidence, even if not all claims are equally well-supported.
 
 ### Major
-- **Standalone novelty is close to a static input prompt.** The central claim is that *in-reasoning* intervention is a new paradigm distinct from before-reasoning prompting. But in Table 1, the simple "Prompt" baseline often matches Ours(Ori) (Qwen3-4B/GSM8K: 1263 vs. 1213; Qwen3-8B/GSM8K: 1353 vs. 1489 — Prompt is *better*; Qwen3-4B/AIME24: 10755 vs. 10523). The strongest cells (e.g., Ours(Prompt) 839 on Qwen3-4B/GSM8K) require combining with a strong input prompt, which makes the contribution more "repeated prompting" than a qualitatively distinct paradigm. A direct control — re-prepending the same prompt at the same intervals without the rest of the framework — is missing and would be the cleanest test.
-- **No variance reporting on small benchmarks.** AIME24 has 30 problems (~3.3 pts per item) and GPQA-Diamond has 198. Many headline deltas (e.g., +2.34 on AIME24, +0.91 on GPQA) are within plausible run-to-run noise even averaged over 10 runs. Without std/CI, it is hard to tell which gains and losses are real, and several claims ("maintains accuracy well") rest on these small differences.
-- **The adaptive-interval ablation does not cleanly support Eq. (1).** On Qwen3-8B/GSM8K, Fixed-64 attains 95.65 acc at 908 tokens vs adaptive 95.51/935 (Fixed is strictly better). On Qwen3-4B/GSM8K, Fixed-128 is essentially tied with adaptive (94.44/835 vs 94.75/839). Only Qwen3-4B/AIME24 with Fixed-64 shows a real collapse (45.33), and Fixed-128 there is already close to adaptive. The case for Eq. (1) over a sensible fixed interval (e.g., 128) is weaker than the paper's framing. The use of current generated length as a complexity proxy is also somewhat circular — length is itself suppressed by the intervention being gated.
+
+1. **Efficiency evaluation is incomplete: token count alone is insufficient for a multi-query method.** ConciseHint breaks inference into many small generation calls (chunks of ~128+ tokens), each requiring separate API calls with prefill and network overhead. The paper mentions only that "extra prefilling costs are negligible" (deferred to Appendix A.2) and reports no wall-clock time, total FLOPs, or end-to-end latency measurements. Since a single-call baseline (e.g., the Prompt method) avoids this overhead entirely, it is possible that ConciseHint's token savings do not translate to real latency or cost savings. This is the most consequential gap in the evaluation, as the paper's central claim is about *efficient* reasoning.
+
+2. **Trained hint embeddings (ConciseHint-T) are only evaluated on the smallest model (Qwen3-1.7B).** Table 2 reports results exclusively on 1.7B, while all main results (Table 1) use 4B, 8B, and 14B models. The paper claims generalization of learned embeddings to out-of-domain benchmarks (AIME24, GPQA), but the model scale is far smaller than the primary evaluation setting. It is unclear whether the trained hint benefits, degrades, or has no effect on larger models where the learned concise patterns may not transfer well.
+
+3. **The Prompt baseline (designed by the authors) sometimes outperforms ConciseHint alone.** On DeepSeek-R1-14B GSM8K, the authors' custom Prompt baseline achieves 627 tokens vs. ConciseHint's 713 tokens — a 12% further reduction — while having slightly lower accuracy (94.18% vs 94.87%). This undercuts the central claim that the in-reasoning paradigm is superior to well-crafted before-reasoning prompting. The Prompt baseline ("adaptively control the answer length based on the query's complexity") is itself an adaptive conciseness mechanism applied before generation, making the comparison essentially a test of paradigms rather than a demonstration that in-reasoning intervention is strictly better.
 
 ### Minor
-- **ConciseHint-T evidence is thin.** Trained-hint results are reported only for Qwen3-1.7B, and γ=1 shows a 4.34-pt drop on GPQA-Diamond (39.39 → 35.05, ≈9 of 198 items). The paper's claim that it "generalizes well to out-of-domain data" is overstated; γ=0.7 is a more defensible operating point but is presented as a fallback. Showing ConciseHint-T on at least one larger model would substantiate the trained variant.
-- **Hyperparameters in Eq. (3).** The constants 1024 and 0.8 cap have no sensitivity analysis in the main text; they read as tuned to the studied model family.
-- **No latency / wall-clock numbers in the main text.** Mid-generation insertion can invalidate KV cache after the injection point; Section A.2 reportedly analyzes prefilling cost, but token count alone is not a complete efficiency claim.
-- **No comparison to SFT/RL efficient-reasoning methods.** The paper situates itself relative to Shen 2025 / Luo 2025 / Ma 2025 but compares only against training-free baselines; "comparable to strong baselines" should be qualified accordingly.
+
+4. **No variance reported for token usage.** The paper states experiments are run multiple times (5 for GSM8K, 10 for others) and reports average token usage, but provides no standard deviations or confidence intervals. Token counts can vary substantially across runs for LRMs; without variance, it is impossible to assess whether differences are statistically significant.
+
+5. **The adaptive formulas (Eq. 1 and Eq. 3) are heuristic and sensitivity is underexplored.** The interval formula τₖ = α + β·lₖ and the position formula p = τₖ·min((τₖ−α)/1024, 0.8) are presented without principled derivation. The paper asserts insensitivity to β (deferred to Appendix A.1) and fixes β=0.2 everywhere, but provides no ablation over β values or the 0.8 maximum-position cap in the main paper. The 0.8 cap, in particular, is arbitrary and its removal could change behavior.
+
+6. **Token reduction on hard problems (AIME24) is modest (4–20%) compared to easier ones (GSM8K 27–49%, GPQA 26–57%).** This is consistent with the adaptive design, but it suggests the method's practical utility is concentrated on moderately complex queries. The paper does not discuss this limitation or propose mitigations.
+
+7. **No combined baseline (e.g., Deer+NoWait) for comparison.** The paper shows ConciseHint can be combined with individual baselines, but does not compare against stronger compound baselines that combine two existing methods (e.g., Deer+NoWait). Such a comparison would strengthen the claim that ConciseHint pushes the upper bound of efficiency beyond what compound before-reasoning methods can achieve.
+
+8. **The hint-injection mechanism creates non-standard autoregressive context.** ConciseHint inserts hints into the middle of already-generated text, creating a context that the model never would have generated from scratch. While the empirical results suggest models handle this reasonably well, the paper provides only case studies (deferred to Appendix A.8) to analyze how models cope. A deeper analysis (logit distributions, attention patterns, or coherence checks) would improve confidence that the intervention does not produce pathological reasoning chains.
 
 ### Trivial
-- DeepSeek-R1-14B row in Table 1 omits NoWait without explanation.
-- The descriptive transition-word analysis (Table 5) does not isolate ConciseHint from Prompt; it only confirms that conciseness is achieved.
+None.
 
 ## Nice-to-Haves
-- A "repeated prompt" control (re-injecting the same prompt at the same intervals without adaptivity).
-- A nearest-token decode / cosine analysis of trained hint embeddings vs. the initialization, to substantiate "captures concise patterns."
-- Failure-case study on AIME24 / GPQA where ConciseHint produces wrong answers.
+
+- Measuring wall-clock time or tokens-per-second would directly address the efficiency concern and is standard for methods that alter the decoding loop.
+- Evaluating ConciseHint-T on Qwen3-4B or 8B would significantly strengthen claims about the learned embeddings.
+- A sensitivity sweep for β and the position-cap threshold in the main paper would make the adaptive design more trustworthy.
+- Combining Deer and NoWait as a compound baseline would provide a stronger point of comparison.
+- Adding one non-math domain from the appendix (e.g., CommonsenseQA) to the main paper would broaden the empirical scope.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution.*
-- *Harsh critic's "missing related works/baselines" framing* — partially kept as a minor SFT/RL comparison gap, since the paper does cite these works as scope.
-- *Reproducibility / hyperparameter-tuning complaints* on α=128, β=0.2 — the paper explicitly fixes them and provides ablation in Section A.1.
-- *Strength: "Thorough empirical validation across models and benchmarks"* — generic, partially overlapping with the more specific stacking-gain strength already kept.
-- *Strength: "Complexity-adaptive injection intensity is essential"* — conflicts with the verified major weakness that the ablation does not clearly establish adaptive > Fixed-128, so dropped per the rule that weakness wins.
+
+These points are flagged to be removed; treat them with caution:
+
+- **"Claim that existing literature ignores in-reasoning intervention is false because early-exit methods intervene"** — Early-exit (Deer) *stops* generation, it does not inject guidance to steer conciseness. The paper's "intervention" is about injecting content to shape reasoning, which is orthogonal to early exit.
+- **"Method is conceptually similar to dynamic prompting"** — Dynamic prompting operates at the input stage; ConciseHint's repeated, adaptive injection during generation at varying intervals and positions is structurally different.
+- **"The comparison with baselines does not show ConciseHint alone is consistently competitive"** — The paper explicitly claims "comparable to strong baselines," not "strictly better." Ours(Ori) beats BeConcise, Deer, and NoWait on token count for Qwen3-4B GSM8K, and the Prompt baseline comparison is honestly reported. The Prompt baseline sometimes wins on tokens; this is a real limitation but the paper does not hide it.
+- **"The injection position formula is arbitrary / lacks principled justification"** — The paper provides two clear rules (avoid tail for accuracy, avoid head for compute) and backs the dynamic strategy with empirical evidence (Table 4). The 0.8 cap is heuristic, but the ablation covers the design space adequately.
+- **"Training data already forces conciseness, so learned hint may memorize rather than generalize"** — The paper validates generalization on out-of-domain benchmarks (AIME24, GPQA), demonstrating transfer beyond the training domain.
+- **"The paper overstates novelty"** — The paper frames the contribution as "a promising direction" and "largely unexplored question," which is measured and appropriate.
+- **"Missing appendix sections"** — The parser strips appendices; they exist in the original submission.
 
 ## Novel Insights
-None beyond the paper's own contributions. The most useful empirical observation is that tail-positioned hint injection sharply degrades accuracy on GPQA — a non-obvious property of how LRMs handle late context insertions — but this is the paper's own finding rather than reviewer synthesis.
+
+The reviewers' perspectives converge on a key tension: ConciseHint's paradigm is genuinely novel and well-motivated, but its evaluation is incomplete along the very dimension it claims to improve (efficiency). The method reduces token count — a proxy — but the multi-query decoding loop could plausibly erase those savings in practice. The paper would benefit from treating this not as a minor implementation detail but as the central empirical question: does in-reasoning intervention actually save time and money, or only tokens? A second insight from the cross-review is that the adaptive-before-reasoning Prompt baseline is surprisingly competitive (beating ConciseHint on DeepSeek-R1-14B GSM8K), which suggests the community may want to see a head-to-head comparison of *equally tuned* before-reasoning vs. in-reasoning methods before concluding the paradigm shift is practically superior.
 
 ## Suggestions
-- Run a "repeated input prompt" control to isolate the unique contribution of injecting *inside* the generated stream from injecting *more often* at the input boundary.
-- Report standard deviations or paired t-tests on AIME24 and GPQA-Diamond; flag deltas within noise.
-- Sweep fixed intervals (e.g., 64/96/128/192/256) and plot the Pareto front vs the adaptive schedule; if Fixed-128 is on the front, soften the "Eq. 1 is essential" claim.
-- Add at least one ConciseHint-T run on Qwen3-4B/8B and report γ-curves there.
-- Quantify wall-clock latency, not just average token count.
 
----
+1. **Report wall-clock time or a latency proxy** (tokens-per-second, end-to-end timing) for at least one model–benchmark pair. This is the single most impactful addition and directly addresses the main threat to the efficiency claim.
+2. **Evaluate ConciseHint-T on Qwen3-4B and 8B**, even at a single γ value, to establish that the trained embeddings transfer to larger models.
+3. **Include a DeepSeek-R1-14B row for ConciseHint-T** so the trained-vs-manual comparison is available on a model where the manual method is already evaluated.
+4. **Add error bars or standard deviations** to the token usage columns in Table 1 to support statistical comparison.
+5. **Discuss the modest AIME24 gains** explicitly as a limitation and suggest potential remedies (e.g., softer hints for hard problems, or a confidence-gated injection policy).
 
-### Axis assessment
-- **Originality:** Modest. The idea of mid-generation concise hints is fresh framing but mechanistically close to repeated prompting.
-- **Importance:** Real — efficient reasoning is a hot, practically important area.
-- **Claim support:** Mixed. The plug-in/stacking claim is well supported; the "new paradigm distinct from prompting" claim is not, and the adaptivity claim is only partially supported.
-- **Experimental soundness:** Reasonable model/benchmark coverage and multi-run averaging, but absence of variance reporting and a clean control weakens conclusions.
-- **Clarity:** Generally clear; method exposition is direct.
-- **Value to community:** Provides a usable plug-in with stacking gains, plus a useful negative result on tail-injection.
+## Score and Decision
 
-### Score and Decision
+### Calibration Anchors
 
-Anchors retrieved:
-- `IlQxeKrWDt.md` (avg 5.50, Reject) — "Concise and Organized Perception" for deductive reasoning; comparable scope (improving reasoning efficiency with prompt-style edits), similar evidence quality, similar incremental-feeling contribution. Closest match to this paper.
-- `jRZ1ZeenZ6.md` (avg 5.00, Reject) — Rational Metareasoning; uses RL to reduce inference cost. Similar problem framing; reviewers found it incremental.
-- `6VhDQP7WGX.md` (avg 5.80, Accept) — VLM token compression; cleaner scaling-law result; stronger than the paper under review.
-- `mqVgBbNCm9.md` (avg 5.67, Accept) — Skeleton-of-Thought; closest spirit: a training-free, plug-in efficiency method; accepted with mixed scores. Comparable in caliber to this paper but with a more distinctive method.
-- `IssPhpUsKt.md` (avg 6.80, Accept) — Representation engineering for reasoning; methodologically more novel than this paper.
-- `TUC0ZT2zIQ.md` (avg 6.50, Accept) — Counterfactual generation; substantially more theoretically grounded.
-- `3OyaXFQuDl.md` (avg 7.00, Accept) — Smaller, Weaker, Yet Better; well-supported, broadly impactful — clearly stronger than the paper under review.
-- `HHKboqbkec.md` (avg 5.75, Reject) — Bayesian ToM scaling; mid-tier, comparable evidence rigor.
-- `diKRhKs5yl.md` (avg 5.25, Reject) — Demonstration pre-selectors; incremental, similar in caliber.
-- `ON3QLXrwVb.md` (avg 4.67, Reject) — Reasoning trees; weaker than the paper under review.
-- `jOuHjFw71C.md` (avg 3.00, Reject) — LRM planning evaluation; not topically matched, much weaker reception.
-- `XgYZT35N76.md` (avg 4.25, Reject) — VLM CoT; weaker.
-- `OclSRDktp3.md` (avg 3.50, Reject) — Hopfieldian CoT; weak conceptual paper, much worse than this paper.
-- `FE6WxgrOWP.md` (avg 4.50, Reject) — Chain of Images; weaker exposition than this paper.
+| Anchor Path | Avg Human Score | Comparison to this paper |
+|---|---|---|
+| Efficient Inference with LRMs (ESTAR) | 3.50 | Similar domain, similar gaps (no latency). ConciseHint has more models/baselines and cleaner ablations. **ConciseHint is stronger.** |
+| The Price of a Second Thought (COTHINK) | 3.50 | Less novelty (two-stage prompting), comparable evaluation breadth. **ConciseHint is stronger.** |
+| Efficient Reasoning via Reward Model | 2.50 | Weak evaluations, modest token reduction. **ConciseHint is clearly stronger.** |
+| Dynamic Early Exit (DEER) | 5.33 | More comprehensive (11 models, 10 benchmarks) but similar paradigm (training-free intervention). ConciseHint has more novel intervention mechanism. **Comparable, DEER slightly better evaluated.** |
+| FROST | 5.00 | Comparable evaluation scope and novelty level. **Roughly on par.** |
+| State-Transition Framework | 5.50 | Novel approach with linear attention; broader scope. **ConciseHint is slightly weaker in evaluation depth.** |
+| ReBalance | 7.00 | Strong empirical validation, more benchmarks, cleaner presentation. **ConciseHint is clearly weaker.** |
+| Generative Universal Verifier | 8.00 | Tier apart — benchmark contribution + method + application, oral-quality. **Not comparable.** |
 
-This paper is roughly on par with `IlQxeKrWDt` (5.50) and `mqVgBbNCm9` (5.67): a plug-in efficiency method with a real, modestly compelling empirical result, but with a central novelty that isn't fully separated from the obvious baseline, and missing variance reporting on small benchmarks. It is clearly stronger than the sub-4 rejects but below the 6+ accepts (`IssPhpUsKt`, `TUC0ZT2zIQ`, `3OyaXFQuDl`), which have stronger methodological novelty or more rigorous evidence. Placing it just below the Skeleton-of-Thought anchor due to the unresolved "is this just repeated prompting?" question.
+Based on calibration against these anchors, ConciseHint sits between the 3.50-tier (ESTAR, COTHINK — rejected) and the 5.00–5.33-tier (FROST, DEER — accepted as posters). It has more novelty than ESTAR/COTHINK but less comprehensive evaluation than DEER. The paradigm contribution is genuine, but the two major weaknesses (no latency measurement; trained version only on 1.7B) and the Prompt baseline being sometimes superior prevent it from reaching the stronger accept tier.
 
-MY FINAL SCORE: <pineapple>5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

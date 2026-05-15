@@ -1,81 +1,114 @@
+Now I have all the information needed. Let me synthesize the final review.
+
+---
+
 ## Summary
-The paper introduces "PPI candidate ranking" — given a target protein and its set of known partners KP(p), rank candidate proteins by likelihood of novel interaction — and evaluates a two-stage pipeline on the STRING v11→v12 transition. Stage 1 derives "active residue regions" from D-SCRIPT/Topsy-Turvy contact maps for each known partner and uses cosine similarity over those regions to score candidates; Stage 2 re-ranks the top-10 using interaction score, SpeedPPI pDockQ, annotation-overlap heuristics, and biomedical LMs (BioBERT, BioMedRoBERTa, PubMedBERT).
+
+This paper introduces PPI candidate ranking—the task of prioritizing novel protein-protein interaction candidates for experimental validation—and proposes a two-stage framework. The first stage uses predicted contact maps from D-SCRIPT/Topsy-Turvy to identify "active residues" in known interactors, then ranks candidates by maximum cosine similarity restricted to those residue regions. The second stage re-ranks the top-10 candidates using complementary signals (interaction scores, structural plausibility via SpeedPPI, annotation overlap heuristics, and LLM-based semantic similarity). Evaluation uses a temporal split between STRING v11 (training/known) and v12 (novel interactions as ground truth), showing substantial improvements over raw interaction-probability baselines.
 
 ## Strengths
-- **Prospective evaluation design.** Using successive STRING releases (v11 known → v12 novel) as a temporal split is a more realistic evaluation than within-release classification, and the human-subset scale (279,568 v12 positives) is non-trivial (§5.1).
-- **Concrete retrieval gains over KP-blind baselines.** For the same backbone, contact-map–masked cosine over KP-anchors lifts D-SCRIPT Recall@10 from 0.0124 to 0.2641 and MRR from 0.0340 to 0.1685 (Table 1). Even after discounting unfair baseline framing (see Major #1), the within-backbone improvement is real and substantial.
-- **Useful comparative survey of re-ranking signals.** Table 2 systematically pits curated annotations, structural scoring, and biomedical LMs against one another, providing useful empirical guidance even if the metric is limited.
+
+- **Prospective evaluation via temporal split is well-designed.** Using STRING v11→v12 as a forward-looking testbed directly assesses whether methods can anticipate future experimental discoveries, which is stronger than static retrospective benchmarks and maps well to the paper's motivation of guiding experimental validation.
+
+- **Consistent improvement across two backbone models.** The interpretability-guided retrieval yields substantial gains with both D-SCRIPT (e.g., Recall@10 from 1.24% to 26.41%, MRR from 0.034 to 0.169) and Topsy-Turvy embeddings, demonstrating the approach is not tied to a single architecture.
+
+- **Complementary re-ranking signals are thoroughly explored.** The pairwise rank-shift matrix (Table 2) provides clear evidence that semantic and annotation-based signals (PubMedBERT cross-encoder: 75.5% maintain-or-improve rate; lightweight KeyTerm overlap: 69.3%) capture information orthogonal to sequence-based embedding similarity, yielding useful guidance for future refinement strategies.
+
+- **Computationally pragmatic design.** Restricting expensive re-ranking steps (SpeedPPI, cross-encoder inference) to the top-10 candidates per protein keeps the pipeline feasible for large-scale screening.
+
+- **Well-motivated problem.** The framing around prioritizing candidates for costly experimental validation addresses a genuine practical bottleneck in interactome mapping.
 
 ## Weaknesses
 
 ### Fatal
-None — the contribution is real but its quantitative claims are inflated, not invalid.
+
+None.
 
 ### Major
-- **Headline "two orders of magnitude" gain conflates KP-awareness with the contact-map masking mechanism.** The "Prediction Probability" baseline in Table 1 uses only the pairwise model score and ignores KP(p) entirely, whereas the proposed method uses KP(p) as anchors. A fair Table 1 needs KP-aware baselines (max sequence identity to KP(p), max full-embedding cosine to KP(p) without active-region masking, max D-SCRIPT score against any known partner). Without them, attribution to "interpretability-guided" masking — the central methodological novelty — is unestablished. Also note the gain is closer to ~20× on Recall@10 and ~5× on MRR, not 100×.
-- **Core mechanism is never ablated.** §4.1 hinges on restricting cosine similarity to the contact-map–induced active region I_k whose length "can range from a single residue up to the full sequence" (p. 5). The paper provides no comparison to (i) full-embedding cosine, (ii) a random contiguous segment of the same length, (iii) a fixed-window sliding cosine, or (iv) target-side activation. Without these, the contribution of interpretability-guidance vs. any local-window matching is unknown.
-- **Re-ranking evaluation does not measure ranking quality.** Table 2 reports only pairwise "maintain-or-improve" fractions; a 9→8 promotion counts the same as a 10→1 promotion, and any promotion of a partner that was outside the cosine top-10 is invisible (re-ranking is restricted to those 2,280 top-10 pairs). The headline Recall/MAP/nDCG numbers from Table 1 are never recomputed on the re-ranked lists, so the reader cannot tell whether re-ranking actually improves the system or merely reshuffles its top of list.
-- **Plausible annotation/literature leakage in the strongest re-ranking signals, not controlled.** PubMedBERT/BioBERT/BioMedRoBERTa are pretrained on PubMed, which contains the very papers that drove the v11→v12 update; GO/Reactome/ComplexPortal annotations are not snapshotted to the v11 release date. Given the v12 ground-truth comes from experiments that often co-produced the annotations and abstracts these models see, the dominance of PubMedBERT (75.5%) and even token/TF-IDF overlap (~70%) is exactly the pattern leakage predicts. The paper itself notes this concern in one sentence ("uncertain if their gains reflect…latent knowledge of interactions from the training data") and then claims the LM signals are most valuable anyway. Without snapshot-controlled annotations and a pretraining cutoff prior to v11, the re-ranking conclusions cannot be cleanly interpreted.
+
+- **The core methodological contribution—active-region selection via contact maps—is not isolated by experiment.** The paper compares the proposed method only against raw interaction scores (D-SCRIPT/Topsy-Turvy IS and xCAPT5). It never tests the obvious baseline: ranking candidates by maximum cosine similarity using the *full* embedding of each known partner, without any contact-map-guided residue selection. Without this ablation, one cannot determine whether the ranking improvements in Table 1 are attributable to the contact-map mechanism or simply to the use of embedding-space similarity versus scalar interaction scores. A full-embedding cosine-similarity baseline could plausibly achieve comparable gains, and its absence leaves the central claims about interpretability-guided retrieval unverified. *(This is the single most important weakness and should be the authors' highest priority to address.)*
 
 ### Minor
-- **xCAPT5 is competitive/better at small k.** Table 1: xCAPT5 P@5 = 0.1943 vs. our D-SCRIPT P@5 = 0.1924; P@10 0.1848 vs. 0.1377. The paper says xCAPT5 "rapidly decays as k increases," but at small k — exactly where screening matters — it is at least as good. The discussion glosses over this.
-- **PubMedBERT cross-encoder is supervised on PPI labels with the same annotation-text inputs** it evaluates on, so its comparison to unsupervised text scorers is structurally favorable to it; this is on top of the leakage concern.
-- **Sensitivity to |I_k| not analyzed.** Eq. (3) is dominated by a hyper-flexible window whose length ranges from one residue to the whole sequence; stratified analysis by |I_k| is missing.
-- **No per-target rank distributions, no variance / CIs, no significance tests** on Table 1 or Table 2.
-- **Performance vs. |KP(p)|** is acknowledged as a limitation (cold-start) but never quantified.
+
+- **Re-ranking evaluation uses only pairwise rank-shifts within the top-10, not end-to-end retrieval metrics.** Table 2 reports what fraction of v12 rediscoveries maintain or improve their rank when switching from one signal to another, but the paper never reports Recall@k, Precision@k, MAP, or MRR for the *combined* pipeline (first-stage + re-ranking). The claim that re-ranking "improves early ranking performance by up to two orders of magnitude" (line 283) conflates the first-stage gains (Table 1) with the re-ranking benefits (Table 2), which are not measured on the same scale. Providing end-to-end metrics for the full pipeline would strengthen the evaluation considerably.
+
+- **"Two orders of magnitude" is a factual overstatement.** The paper states this in the Abstract, Introduction (line 29), and Conclusions (line 283). The actual improvements over D-SCRIPT interaction scores are approximately 5× (MRR), 21× (Recall@10), and 32× (Success@10)—meaningful, but not 100×. Over Topsy-Turvy the factors are smaller still (e.g., Recall@10: ~9.5×). The claim should be corrected to "over an order of magnitude" or replaced with specific ratios. This damages credibility even though the underlying results are genuinely strong.
+
+- **Re-ranking cutoff r=10 is arbitrary and not studied.** The choice to re-rank only the top-10 candidates per protein is pragmatic (due to SpeedPPI's cost), but the paper does not examine how sensitive the re-ranking gains are to this cutoff. Performance likely depends on r, especially since the first stage's Recall@10 is only ~26%, meaning most true partners that could benefit from re-ranking are not even in the re-ranking pool.
+
+- **Cross-encoder softmax prior is questionable.** The inference step applies a within-protein softmax over the candidate set (Eq. 12), which assumes exactly one of the top-10 candidates is the true partner. Proteins can have multiple novel interaction partners in v12, making this normalization inappropriate and potentially distorting the ranking.
+
+- **Sensitivity to the number of known partners is not quantified.** The method fundamentally depends on having known interactors to serve as anchors. Proteins with few known partners (common for understudied proteins) are likely poorly served, yet the paper does not stratify results by |KP(p)|. This limits an understanding of the method's practical scope.
 
 ### Trivial
-- "Interpretability-guided" is rhetorically overloaded — the contact map is a learned intermediate, not an explanation. The paper partly clarifies this ("we do not frame interpretability here as a means to generate explanations"), but the abstract/conclusion framing still leans on the term.
+
+- The definition of "active residues" (contiguous segment with highest average contact probability) is one of several possible strategies (e.g., top-k residues, fixed-size windows). A brief sensitivity analysis would help, though the current design is reasonable.
+
+- The "Prediction Coverage" metric is reported as a single global value without a k-dependent breakdown, making its interpretation alongside the other k-dependent metrics ambiguous.
 
 ## Nice-to-Haves
-- Per-target rank-distribution plots and case studies showing v12 partners promoted into top-10 by re-ranking, with the annotation text exposed so the reader can judge whether the signal is biology vs. literature leakage.
-- A v12→v13 (or PubMed-cutoff-controlled) replication to disentangle generalization from leakage.
+
+- **Standalone text-based retrieval performance.** The re-ranking module uses TF-IDF, Jaccard, and LLM embeddings as refinement signals within the top-10. Reporting how well these text-based methods perform as primary retrieval over the full candidate set would help readers assess whether the two-stage design adds value, though this is outside the paper's stated scope of evaluating a combined pipeline.
+
+- **Embedding-space visualization.** A t-SNE/UMAP projection of candidate embeddings, annotated by active-residue regions and true-interaction status, could provide intuitive support for why the method works.
+
+- **Contact-map quality upper bound.** Running the method with true contact maps (where available from known complexes) would provide a sanity-check upper bound on what the approach could achieve with perfect contact predictions.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-- (From Harsh Critic) Concerns about availability or existence of cited models/databases — not applicable here.
-- (From Strength Finder) "Novel, practice-driven problem formulation" as a standalone strength — kept in weaker form under Strengths via "prospective evaluation design," because the bare claim of importance is generic.
-- (From Strength Finder) "Comprehensive metric and baseline comparison" — partly conflicts with verified weaknesses (unfair baseline, missing ablations, Table 2 metric is non-standard); dropped as overstated.
-- (From Strength Finder) "Re-ranking with complementary biological signals" framed as a clear win — conflicts with the leakage concern; the result pattern is consistent with leakage, so it cannot stand as a strength as written.
+
+*These points were flagged by reviewers but are not appropriate to include as weaknesses. Treat them with caution.*
+
+- **"No standalone performance of text- and annotation-based retrieval"** — The re-ranking module is explicitly designed as a refinement step, not as a standalone retrieval method. The paper's contribution is the two-stage framework; requiring each component to be separately validated as a primary retrieval method is scope creep. Moved to Nice-to-Haves.
+
+- **"xCAPT5 inclusion obscures rather than clarifies"** — Including an additional baseline never obscures a comparison. xCAPT5 provides useful context about the state of the field.
+
+- **"Table 2 legend is garbled" / runtime figures not included** — These are parser artifacts from PDF extraction; the original submission does not have these issues. Removed per formatting rules.
+
+- **"PPI candidate ranking as a new problem is inflated — temporal link prediction exists"** — The paper's problem framing (ranking candidates for a target protein using known partners as anchors, with evaluation on prospective database releases) is sufficiently distinct from generic temporal link prediction to warrant treating it as a novel task formulation.
+
+- **"Choice of D-SCRIPT over Topsy-Turvy lacks strong justification"** — The paper explicitly justifies this at lines 241–246: D-SCRIPT emphasizes true partners at top ranks (higher Precision, MAP, nDCG, Success), making it better suited for a pipeline that focuses on early-ranking quality.
+
+- **"Active residues are derived from predicted contact maps, not biological ground truth"** — The paper acknowledges this limitation in the Conclusions (lines 536–539): "the embedding construction process itself remains a black-box representation. As such, we cannot directly ground the predicted interactions in specific, biologically meaningful protein properties." This self-awareness should not be treated as a hidden flaw.
+
+- **"Missing related work on full-embedding similarity baselines"** — Per instructions, we do not flag missing related works that cannot be externally confirmed.
+
+- **"The paper does not address how its rankings would be validated experimentally"** — The paper explicitly states its purpose is to prioritize candidates *for* experimental validation. The STRING v11→v12 temporal split serves as a retrospective proxy for this prospective validation. Demanding actual wet-lab validation is outside the scope of a computational methods paper.
 
 ## Novel Insights
-None beyond the paper's own contributions. The general lesson — that KP-aware ranking beats KP-blind classification scores for prospective discovery — is reasonable but largely a consequence of the asymmetric setup rather than a genuinely new finding.
+
+The most genuinely novel insight from this work is the empirical demonstration that predicted inter-protein contact maps—originally designed as an intermediate bottleneck for interaction scoring—can be repurposed as a mechanism for identifying which residue regions drive embedding similarity between known and candidate interactors. The fact that focusing cosine similarity on these "active" regions yields 5–20× improvements in early-ranking metrics over raw interaction scores suggests that D-SCRIPT/Topsy-Turvy embeddings contain substantially more retrieval-relevant information than their scalar outputs capture, and that contact maps provide a principled (if imperfect) way to surface it. This has implications beyond the specific models tested: it hints that many sequence-based PPI predictors with interpretable internal structure may be under-exploited as retrieval engines.
 
 ## Suggestions
-- Add KP-aware baselines to Table 1: max BLAST/identity to KP(p), full-embedding cosine to KP(p), max D-SCRIPT score against any KP partner.
-- Ablate the contact-map masking against full embeddings, random contiguous segments, and fixed sliding windows.
-- Recompute Recall/MAP/nDCG/MRR on the re-ranked lists (with bootstrap CIs), not only pairwise rank-shifts; expand re-ranking beyond the cosine top-10 so out-of-list promotions become visible.
-- Snapshot GO/Reactome/ComplexPortal/UniProt annotations to the v11 release date; replace PubMed-trained LMs with versions whose pretraining cutoff is pre-v11, or repeat the experiment on a release pair that postdates the LM cutoff.
-- Tone the abstract/conclusion claim from "two orders of magnitude" to the actual within-backbone numbers, and disclose the xCAPT5 small-k comparison fairly.
 
-## Evaluation by Axis
-- **Originality:** Moderate — task formulation as "candidate ranking" is reasonable but a relatively small step over standard PPI prediction; the contact-map active-region trick extends Borghini et al. (2024) systematically.
-- **Importance:** The discovery-prioritization angle is genuinely useful.
-- **Claim support:** Weak — headline gains are inflated by an unfair baseline, and the strongest re-ranking signal is plausibly contaminated.
-- **Soundness of experiments:** Mixed — solid scale, but missing core ablations, missing standard re-ranking metrics, no variance/CIs.
-- **Clarity:** Adequate; some text shows parser artifacts (strikethrough markers), but the method is followable.
-- **Value to community:** A useful empirical survey of signal sources for PPI prioritization, but the conclusions need leakage controls and KP-aware baselines before they can guide practice.
+- **Add a full-embedding cosine-similarity baseline.** This is the single most important experiment to add. Simply compute max cosine similarity between the full (non-truncated) embedding of each known partner and each candidate, without any contact-map guidance. Report it alongside the active-region method in Table 1. This will directly isolate the contribution of the contact-map mechanism.
+
+- **Correct the "two orders of magnitude" claim throughout.** Replace with precise factor ranges (e.g., "5× to 20× improvements") or at most "over an order of magnitude."
+
+- **Report end-to-end ranking metrics for the combined pipeline.** Add Recall@k, Precision@k, and MRR for the first-stage + re-ranking combined output, even if only at the top-10 cutoff where re-ranking operates.
+
+- **Stratify results by |KP(p)|.** Show how performance varies with the number of known partners per target protein, which would clarify the method's practical applicability and limitations.
+
+---
 
 ## Score and Decision
 
-Anchor comparison:
-- `eh1fL0zw8o.md` (LLaPA, PPI prediction) — avg **6.0**, Reject. Stronger methodological contribution (multimodal model handling arbitrary complex sizes); the present paper is methodologically thinner and has more evaluation problems → lower than 6.0.
-- `S8gbnkCgxZ.md` (SIU, redefining bioactivity) — avg **7.0**, Accept. Much more rigorous diagnosis-of-evaluation-pitfalls work; clearly above the present paper.
-- `lzdFImKK8w.md` (Boltzmann-Aligned Inverse Folding for ΔΔG) — avg **7.5**, Accept. Stronger theoretical grounding and cleaner empirical wins. Above the present paper.
-- `xNDydjYBmC.md` (PPB affinity, data integration) — avg **4.6**, Reject. Comparable in scope: applied bio-ML pipeline with evaluation issues. The present paper is similar in profile but with a more glaring unfair-baseline framing and missing ablations → comparable or slightly lower.
-- `ZkpDdCQUC4.md` (NovoBench-100K) — avg **4.6**, Reject. Comparable scale-of-effort but better task framing/data contribution. Present paper slightly weaker on methodological rigor → similar-to-slightly-lower.
-- `ifK9NFyrhn.md` (Leakage-free protein datasets) — avg **3.5**, Reject. Similar leakage-themed concerns; the present paper has comparable evaluation-design issues plus inflated headline claims → close to this band.
-- `qi5dkmEE91.md` (Motif Explainer) — avg **3.0**, Reject. Weaker than that paper in some senses, stronger in scale/task framing → above this.
-- `f6KkyweyYh.md` (Bezier-curve sequence analysis) — avg **5.0**, Reject. Comparable applied-bioinformatics rejected work; the present paper sits roughly here on evaluation, perhaps slightly below due to the overstated 100× claim.
-- `9klRFLY2TT.md` (DNABERT-S) — avg **5.67**, Reject. Better methodological novelty; above the present paper.
-- `nplYdpc1Pm.md` (Audio-language) — avg **4.75**, off-topic anchor.
-- `RiQRUcjXBD.md` (SciPIP) — avg **3.5**, off-topic.
-- `gENfMmUIkT.md` (Pipeline IoT detection) — avg **1.67**, off-topic and clearly below.
-- `VaUy5GZO3f.md` (Q-Bench-Video) — avg **4.8**, off-topic benchmark anchor.
-- `wwXgvjNmt5.md` (MAC) — avg **4.0**, off-topic.
-- `kjVgyR3RFr.md` (HQM hallucination benchmarks) — avg **5.5**, off-topic.
+### Anchor comparison
 
-The closest topical neighbors (PPI/bio-pipeline papers) cluster around 4.5–6.0, almost all rejected. The present paper has a real, usable contribution (prospective KP-anchored ranking) but is hurt by (a) an unfair headline comparison, (b) a missing core ablation, (c) a non-standard re-ranking metric, and (d) plausible literature/annotation leakage in its strongest re-ranking signal that the authors flag but do not control. That places it slightly below the comparable rejected PPI papers.
+The following anchor papers were retrieved. I compared the paper under review against each:
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| RaftPPI | Dp1RM3gPg8.md | 5.00 (Accept Poster) | RaftPPI has a clearer, better-isolated methodological contribution and more complete evaluation (7 datasets, careful splits). The current paper has a more novel problem framing but a weaker core-method ablation. |
+| HIPPO | kXpXKe3KnA.md | 3.50 (Withdrawn/Reject) | HIPPO was rejected largely for presentation issues and incremental contribution. The current paper is more polished, has a stronger evaluation setup (temporal split), and comparable novelty. |
+| TopoScorer | QNcrdCKNa5.md | 4.00 (Reject) | TopoScorer was rejected for unclear training details and underperforming baselines. The current paper has cleaner methodology and more impressive quantitative gains, but shares the issue of incomplete isolation of its core contribution. |
+| Bento | kIxAQxUZHq.md | 5.00 (Reject) | Bento is a benchmark paper with strong execution but limited novelty. The current paper has more methodological novelty but less evaluation completeness. |
+| DisProtBench | WAlZ5YD1g7.md | 3.50 (Withdrawn/Reject) | Benchmark paper; less methodologically comparable. |
+| LiveProteinBench | ACroNFU7Do.md | 4.00 (Reject) | Benchmark paper; less directly comparable. |
+| ColdDTI | xtdPwCp5mi.md | 4.00 (Reject) | Drug-target interaction; different domain but similar multi-stage architecture. |
+| HAIPR | 6cHUf3Dnxr.md | 3.50 (Reject) | Affinity prediction; different task. |
+| Protap | 7cDfYiqe4X.md | 3.50 (Reject) | Benchmark paper; less comparable. |
+
+The paper under review sits between the 4.0–5.0 range. It is stronger than the 3.5–4.0 rejected papers (HIPPO, TopoScorer, DisProtBench) in terms of evaluation design and clarity, but weaker than the 5.0 accepted-poster RaftPPI in terms of isolating its core methodological contribution. The missing full-embedding baseline is a genuine gap that prevents full verification of the central claim, but the temporal-split evaluation, consistent cross-model improvements, and thorough re-ranking analysis represent real contributions. The "two orders of magnitude" overstatement is a correctable factual error that does not invalidate the underlying results.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

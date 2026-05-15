@@ -1,80 +1,81 @@
+Now I have all the information I need. Let me compose the final review.
+
+---
+
 ## Summary
-The paper investigates whether translating English benchmarks (MMLU, XQuAD, MLQA) into Arabic conceals data contamination. Four open-weight LLMs are LoRA-fine-tuned on English benchmark data plus varying proportions of Arabic translations, evaluated on the original English tasks, and probed via a choice-reordering extension of TS-Guessing. The authors argue translation masks but does not eliminate contamination, and sketch a "Translation-Aware Contamination Detection" (TACD) framework as a forward-looking blueprint.
+
+This paper investigates whether translating evaluation benchmarks into Arabic can mask data contamination in LLMs. The authors fine-tune four open-weight models on mixtures of English and Arabic-translated benchmark data (MMLU, XQuAD, MLQA) at varying contamination levels and evaluate on the original English benchmarks. They extend the TS-Guessing memorization probe with a choice-reordering strategy for multiple-choice questions. The paper claims that Arabic translation masks contamination signals (making them harder to detect via surface-form methods) while contaminated knowledge continues to inflate performance, and proposes a Translation-Aware Contamination Detection (TACD) framework as a forward-looking solution.
 
 ## Strengths
-- The choice-reordering extension of TS-Guessing (Sec. 3.3, Fig. 1) is a sensible refinement: shuffling MCQ options before masking provides an interpretable index-recall signal (IDR) that, in principle, separates memorized letter patterns from content reasoning.
-- The study spans four model families and three benchmarks, providing reasonable breadth for an exploratory investigation.
-- The research question — how translation interacts with contamination dynamics in a morphologically distant low-resource language — is genuine and underexplored.
+
+- **Underexplored research question.** Investigating contamination dynamics across language barriers — specifically whether translation into a low-resource language can conceal memorization — addresses a genuine gap in the contamination literature, which has focused almost exclusively on English.
+- **TS-Guessing extension with choice reordering is a creative diagnostic.** The index-recall rate (IDR) metric for MCQ tasks — checking whether a model reproduces the pre-shuffle answer letter after options are randomly reordered — provides a conceptually clean, surface-form-independent probe of index-level memorization (Table 3a).
+- **Cross-model, multi-benchmark experimental scope.** The study covers four model families (Mistral, Gemma, LLaMA, Qwen) across three benchmarks (MMLU, XQuAD, MLQA), revealing task-dependent contamination dynamics: monotonic MMLU accuracy gains contrast with erratic, model-specific patterns on extractive QA, which is a genuinely interesting observation.
 
 ## Weaknesses
 
 ### Fatal
-- **Internal contradiction between Sections 4.1 and 4.2.** Section 4.1 explicitly describes a "generally monotonic increase" in MMLU with contamination (e.g., Mistral 0.577→0.690, LLaMA 0.332→0.431) and substantial XQuAD gains for Gemma/LLaMA/Qwen. Section 4.2 then claims the models "exhibit approximately equal performance on all evaluated benchmarks" and uses this purported flatness as the key evidence that "Arabic→English translation is effectively masking contamination effects." Both readings cannot be correct from the same Table 2. The central thesis (translation masks contamination signals) rests on the flatness reading, which contradicts the very deltas the authors highlight one section earlier. This is not a presentation issue — the headline argument is incoherent with the data.
-- **Experimental design cannot test the central claim.** Per the formulation $\mathcal{D}^d_{\text{train}}(p) = \mathcal{D}^d_{\text{EN}} \cup \mathcal{D}^d_{\text{AR}}(p)$ (line 134), the English test items are inserted into training in *every* condition, including $p=0$. The only variable across conditions is the amount of Arabic translation added. There is no condition in which contamination occurs only through translation; the experiment therefore cannot isolate whether translation alone hides contamination versus generic cross-lingual transfer from extra Arabic data raising English performance. A minimal clean comparison (e.g., Arabic-only contamination, or Arabic non-test data of matched size) is absent.
-- **TS-Guessing IDR results run counter to the contamination thesis.** Authors define IDR as a "strong contamination signal" (Sec. 3.4). Yet Table 3a shows IDR *decreasing* with contamination for Gemma (0.350→0.029→0.005) and Qwen (0.261→0.251→0.208), non-monotonic for LLaMA (0.287→0.643→0.410), and ≈0 throughout for Mistral — the very model with the largest MMLU jump. XQuAD EM/RL-F1 are uniformly ≤0.10. The metric either does not measure what is claimed, or it actively refutes the contamination narrative; neither is addressed.
+*None.*
 
 ### Major
-- **TACD is explicitly unimplemented.** Section 5 is labeled "a forward-looking blueprint rather than a complete implementation" (line 256). No algorithm, no validation, no comparison against existing detectors (Min-K%, guided instructions) on the *same* fine-tuned checkpoints. As a named contribution it is currently a proposal, not a method.
-- **No control distinguishing memorization from cross-lingual transfer.** Improvements as $p$ increases could plausibly reflect models acquiring more general Arabic competence, which lifts English performance independent of test-item leakage. Without an Arabic non-test fine-tuning control of matched size, the mechanism attributed by the paper (translation preserves memorized content) is conflated with the mundane alternative (more Arabic data helps Arabic-capable models on English).
-- **TS-Guessing baseline missing for XQuAD/MLQA.** Masking a token like "capital" in a publicly available English question and grading recovery conflates contamination with general language-model competence; no clean-baseline recovery rate is reported on unseen questions of identical structure.
+
+- **Self-contradictory claim about performance flatness.** Section 4.2 states that "across contamination levels p ∈ {10, 50, 100}%, the models exhibit approximately equal performance on all evaluated benchmarks" and interprets this as evidence that translation masks contamination. Table 2 directly contradicts this for MMLU: Mistral rises from 0.580→0.690, LLaMA from 0.381→0.431, Qwen from 0.560→0.581, and Gemma from 0.244→0.284. These are not "approximately equal." The paper acknowledges monotonic MMLU gains in Section 4.1 but then makes a contradictory interpretive claim in Section 4.2. This undermines the paper's central narrative about translation masking.
+
+- **No same-language contamination condition.** The paper's headline claim — that Arabic translation specifically *masks* contamination signals compared to what would be observed with direct English contamination — cannot be evaluated without a condition where models are contaminated with English test data at comparable levels. Without this comparison, the paper can only show that Arabic-translated contamination produces some performance effects, not that translation uniquely *conceals* those effects relative to same-language leakage. This is a critical missing baseline for the paper's core argument.
+
+- **Ambiguous specification of training data.** Section 3.1 defines D_EN^d as "the English split" with the parenthetical "MMLU: English test items formatted as MCQ; XQuAD/MLQA: English QA." The phrase "test items" creates genuine ambiguity about whether the English evaluation data is included in training. While the reasonable baseline scores (e.g., Mistral MMLU 0.577 at p=0) suggest this is not the case and that D_EN^d likely refers to English training data, the description is so unclear that it invites exactly the kind of misinterpretation that could undermine confidence in the entire experimental design. The paper must unambiguously specify which data splits are used for training vs. evaluation.
 
 ### Minor
-- Reported per-model values in Sec. 4.1 (e.g., "Gemma: 0.474, 0.4936, 0.4109, 0.4707") have mixed precision inconsistent with Table 2 and no seeds/standard errors. Several deltas (e.g., Qwen MMLU 0.553→0.581 over 100% contamination) are well within plausible single-run noise.
-- The Section 4.3 "embedding figure" demonstrating high cosine similarity between Arabic→English translations and originals is invoked as evidence, but the cited high similarity is a general property of competent translation, not specific evidence that contamination persists.
-- Section 2 (literature review) takes a disproportionate share of the paper relative to the paper's own experimental contribution, and several sub-sections (2.2.1–2.2.4) restate well-known points without connecting to the experimental design.
+
+- **Missing TS-Guessing baseline at p=0.** The TS-Guessing results (Table 3) are reported only for p ∈ {10, 50, 100}%. Without a p=0 (clean) baseline, the IDR and ROUGE-L values cannot be properly contextualized. While IDR values like 0.643 for LLaMA at 50% contamination are well above the chance rate of 0.25, the 0.287 at 10% is only marginally above chance, and a clean baseline would clarify whether these signals genuinely reflect contamination-driven memorization or baseline model behavior.
+
+- **Embedding similarity analysis is mentioned but not presented.** Section 4.3 references an "embedding figure" showing that Arabic→English translations remain close to English originals in representation space with "high cosine similarity," but no figure, quantitative results, or layer-wise analysis appear in the paper. This leaves a key piece of the paper's mechanistic argument (that translation preserves semantic content sufficient for memorization transfer) entirely unsupported.
 
 ### Trivial
-- Inconsistency in number of significant digits between Table 2 and inline values in Section 4.1.
+
+- **TS-Guessing implementation details for IDR are underspecified.** For MMLU, the paper does not specify whether the model is prompted to output a single letter or free text, nor how the model's generated output is mapped to the predicted letter ℓ̂_i for IDR computation.
 
 ## Nice-to-Haves
-- A per-subject MMLU breakdown to check whether gains concentrate in subjects whose Arabic translations were included.
-- Direct evaluation on Arabic test sets to complement the English-only evaluation.
-- Qualitative TS-Guessing case studies where the model recovers the masked token under contamination but not without.
+
+- A same-language (English) contamination condition at matched contamination levels to directly test whether translation specifically *masks* contamination relative to direct English leakage.
+- Confidence intervals or per-run variance for accuracy and TS-Guessing metrics — the paper reports point estimates and discusses trends (peaks, monotonic increases) without any indication of statistical reliability.
+- Pre-fine-tuning Arabic capability measurements for all models to substantiate the claim that "models with stronger Arabic capabilities" benefit more from Arabic-translated contamination.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
-- Harsh critic's complaint that an "embedding figure" referenced in Sec. 4.3 is missing — likely an appendix/parser issue per the hard rules.
-- Generic strength claims about the question being important and the design being "controlled" — the latter conflicts with the verified Fatal weakness about experimental design.
-- Generic complaints about missing hyperparameters / reproducibility appendices — covered in Appendix A per the paper.
+
+These points are flagged to be removed; treat them with caution.
+
+- **Harsh Critic claim that the experimental design trains on evaluation data (fatal design flaw):** This interpretation reads "English test items formatted as MCQ" literally as evaluation test items. However, the baseline MMLU scores (e.g., Mistral 0.577 at p=0) are in the normal range for these models, not inflated as they would be if trained directly on the evaluation set. The phrase likely describes the format of MMLU items (all are MCQ test-style items), not the data split. The ambiguity is a real issue (kept as a major weakness above), but the claim that the design is fatally and irrecoverably flawed is not supported by the evidence. **Removed.**
+
+- **Harsh Critic claim that the literature review is "disproportionately long" and "not tightly connected":** This is a subjective presentation critique, not a substantive weakness. The review provides useful context on contamination types and detection methods. **Removed.**
+
+- **Harsh Critic claim about "no comparison against a same-language contamination condition" already covered in weaknesses above; the claim that TACD "does not constitute a substantive contribution":** The paper is explicit that TACD is a "blueprint, not a complete implementation" — this is a scoping choice, not a flaw. The TACD section provides a reasonable forward-looking framework. **Weakened to Nice-to-Have suggestion about same-language comparison.**
+
+- **Strength Finder claim that the paper "demonstrates that translation does not eliminate contamination":** This overstates the evidence. The paper shows MMLU gains with Arabic-translated contamination, which supports the claim, but without a same-language comparison and with the self-contradictory "flatness" claim, the strength is qualified. **Retained with caveats.**
 
 ## Novel Insights
-None beyond the paper's own contributions. The premise (translation can carry semantic content from a memorized benchmark) is a reasonable starting hypothesis, but the experiments do not convert it into a novel, defensible empirical claim.
+
+The most genuinely novel observation from this work is the task-dependent asymmetry in how contamination transfers across languages: closed-book MCQ (MMLU) shows reliable, monotonic gains from Arabic-translated contamination, while extractive QA (XQuAD, MLQA) exhibits erratic, model-specific, and sometimes catastrophic patterns (e.g., Mistral XQuAD collapsing from 0.455 to 0.114). This suggests that translation-mediated contamination does not uniformly inflate all benchmark types and that memorization of surface options may help multiple-choice tasks while harming the fine-grained semantic alignment needed for span extraction. This task-type interaction merits further investigation beyond what the paper provides.
 
 ## Suggestions
-1. Reconcile Sec. 4.1 and 4.2: one of the two interpretations of Table 2 must be retracted. The contamination-masking story should be tested with a comparable English baseline (e.g., paraphrased English contamination of matched size) rather than asserted from a self-contradictory reading.
-2. Add the missing control: fine-tune on Arabic *non-test* data of equal size (e.g., Arabic Wikipedia, Arabic MMLU train) to separate contamination-specific gain from cross-lingual transfer.
-3. Add an experimental condition where contamination occurs *only* via translation (no English test items in training); this is the only design that can isolate translation-masked contamination.
-4. Reconcile the direction of IDR with the contamination hypothesis, or revise the metric definition; in three of four models IDR moves opposite to predicted.
-5. Implement TACD on at least one language pair, compare against Min-K% Prob and guided-instruction baselines on the same fine-tuned checkpoints, and report whether it detects what English-only methods miss.
 
-## Assessment
-- **Originality:** The multilingual angle on contamination is moderately original but the operationalization is shallow.
-- **Importance:** Genuine; multilingual contamination is under-studied.
-- **Soundness:** Severely undermined. The design conflates contamination with cross-lingual transfer, the headline interpretation contradicts its own table, and the probe metric moves in the opposite direction from the thesis.
-- **Claims supported:** The central claim ("translation masks but does not eliminate contamination") is not supported by the experiments as designed.
-- **Clarity:** Generally readable, but contains a load-bearing internal contradiction.
-- **Value to community:** Limited in current form; the TACD framework is a sketch.
+- **Clarify data splits unambiguously.** Explicitly state which MMLU/XQuAD/MLQA splits (train, validation, test) are used in D_EN^d and D_AR^d. This is essential for readers to trust the experimental design.
+- **Resolve the self-contradiction between Sections 4.1 and 4.2.** Either revise the "approximately equal performance" claim to accurately reflect the MMLU trends, or provide a quantitative justification for calling the observed differences "approximately equal."
+- **Add a p=0 TS-Guessing baseline.** Even if only for one model, this would anchor the IDR and ROUGE-L values and dramatically improve interpretability.
+- **Present the embedding similarity analysis** with actual figures, cosine similarity values, and layer-wise comparisons, or remove the reference to it.
 
-## Score and Decision
+---
 
-Anchors retrieved:
-- `Nk1MegaPuG.md` (avg 4.25, Reject) — *Evading Data Contamination Detection*: similar topic; better-scoped contribution and more concrete results than the paper under review, which has additional internal contradictions and an unimplemented framework.
-- `Nsms7NeU2x.md` (avg 6.75, Reject) — *How much can we Forget about Data Contamination?*: vastly more rigorous experimental design (parameter/data scaling, theoretical estimates); the paper under review is far weaker.
-- `m2NVG4Htxs.md` (avg 6.75, Accept) — *To the Cutoff... and Beyond?*: clean natural-experiment design and longitudinal evidence — well above the paper under review.
-- `rAylWUIKtu.md` (avg 4.25, Reject) — *Benchmark Inflation / Retro-Holdouts*: also struggles methodologically; comparable in ambition but executes a more concrete construction than the paper here.
-- `lwtaEhDx9x.md` (avg 4.75, Reject) — *Elephants Never Forget*: more thorough memorization probes than the paper under review.
-- `hFQZmKFtlT.md` (avg 3.50, Reject) — *Rethinking Memorization in LLMs*: similarly criticized for unclear claims and weak evidence; closer in quality to the paper under review.
-- `293V3bJbmE.md` (avg 6.00, Accept) — *HELMET*: comprehensive benchmark; clearly above the paper.
-- `WQwy1rW60F.md` (avg 6.00, Reject) — *LV-Eval*: benchmark paper; above the paper.
-- `a2tU4ykVA9.md` (avg 5.50, Reject) — *OpsEval*: mid-tier benchmark paper, clearly above.
-- `KS8mIvetg2.md` (avg 7.50, Accept) — *Proving Test Set Contamination*: rigorous, provable approach; far above the paper.
-- `sKYHBTAxVa.md` (avg 7.33, Accept) — *LiveBench*: rigorous, useful contribution; far above the paper.
-- `6bDJ3CIm5w.md` (avg 7.00, Accept) — *Interference Among FPPE*: unrelated topic, far above in rigor.
-- `nSDOkm0SKo.md` (avg 1.00, Reject) — financial NN paper: clearly worse, not even peer-paper level.
-- `ICwdNpmu2d.md` (avg 1.50, Reject) — LLM stock prediction: clearly worse.
-- `3iJ7eSj2rE.md` (avg 4.00, Reject) — *Synergistic Weak-Strong Collaboration*: comparable rejection-tier paper.
+### Anchor Comparison
 
-The paper under review is weaker than the 4.25 contamination-evasion anchor (which at least executes a coherent argument) but stronger than the 1.x finance papers. Its core thesis is undermined by an internal contradiction with its own table, the experimental design cannot isolate the effect it names, the contamination probe moves opposite to prediction in most models, and its headline "framework" is explicitly unimplemented. These are structural, not revision-level. It sits at the lower end of the 3-4 band.
+- **GFDSGlEks2** (avg 4.67, Reject) — Contamination + post-training study. More rigorous experimental design, clearer baselines, error bars. Our paper has a more novel angle (translation) but is weaker in execution.
+- **WFGxFzFDmQ** (avg 5.00, Reject) — Watermarking for contamination detection. Novel method with theoretical guarantees, much more substantive contribution. Our paper falls short of this standard.
+- **YlpaaYxx4t** (avg 5.33, Accept Poster) — CoDeC detection method. Clean idea, strong empirical results, well-executed. Clearly superior to our paper.
+- **WERLf030OU** (avg 3.00, Reject) — LogProber. Limited scope, thin experiments. Our paper has broader experiments and a more interesting thesis.
+- **x4vwdjckZ6** (avg 4.00, Reject) — SLM contamination sensitivity. Systematic across 23 models, clear methodology. Comparable contribution level; our paper has a more novel question but weaker execution.
+- **vkTl53bXMs** (avg 2.00, Reject) — PEARL. Fundamentally flawed methodology, all scores of 2. Our paper is clearly stronger.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+**Calibration:** This paper sits between WERLf030OU (3.0) and GFDSGlEks2 (4.67). It is more ambitious and interesting than LogProber but lacks the rigor of the post-training contamination study. The self-contradictory claims and missing baselines prevent it from reaching the 4.5+ range but it is not fundamentally broken. A score of 4.0 reflects a paper with a genuinely interesting research direction and a creative probe (TS-Guessing + IDR) that is undermined by presentation issues, ambiguous methodology, and an overclaimed central argument.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

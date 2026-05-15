@@ -1,79 +1,86 @@
+Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize the final review.
+
+---
+
 ## Summary
-The paper proposes RTA (Regression-based Test-Time Adaptation) for CLIP-based image classification. The idea is to train a lightweight LightGBM regression tree once, offline, on a set of pseudo-labeled images, to predict the cross-entropy loss of an augmented view from its logits, and then at test time select the top-k views with the lowest predicted loss for ensembling. Experiments are reported on ImageNet (and variants), 10 cross-domain datasets, and three multi-label datasets.
+
+This paper proposes Regression-based Test-time Adaptation (RTA), a method that replaces the standard entropy-based view selection in CLIP test-time adaptation with a learned regression mapping from view logits to a pseudo cross-entropy loss. The key insight—demonstrated through ceiling experiments—is that ground-truth label cross-entropy selects views far better than entropy. RTA trains a lightweight LightGBM regression tree once on pseudo-labeled ImageNet data to predict loss from logits, then uses this tree at test time to select confident views across arbitrary downstream tasks without parameter updates. The method achieves new state-of-the-art results on single-label, multi-label, and cross-domain benchmarks.
 
 ## Strengths
-- The "Ceiling TTA" observation (Tables 1–2) is genuinely striking: selecting views by ground-truth cross-entropy loss reaches 90.2%/94.4% on ImageNet-A/R with ViT-B/16 (64 views), versus 64.3%/80.4% for entropy-based selection at the same view count. This is an interesting empirical phenomenon worth reporting even if the proposed estimator cannot reach this oracle.
-- The proposed pipeline is genuinely lightweight: a single one-time training of a depth-5 LightGBM tree on 1k samples, with no test-time optimization, prompt tuning, or memory updates.
-- Empirically, RTA reports gains over Zero/BCA on the ImageNet OOD average (e.g., +0.81 OOD avg over Zero on ViT-B/16 in Table 3) and beats ML-TTA across all three multi-label datasets (e.g., +1.67/+1.58/+2.99 mAP on RN50 in Table 5; +1.43/+1.47/+1.88 in Table 6), where the multi-label gains are the most substantive of the headline numbers.
+
+- **Compelling ceiling experiments:** Tables 1–2 convincingly show that oracle view selection via true-label cross-entropy (LCE) yields dramatic accuracy gains over entropy-based selection (e.g., ViT-B/16 with 64 views on ImageNet-A: 90.2% LCE vs. 64.3% entropy). This clearly motivates seeking better view-selection signals than entropy and is a genuinely useful finding for the community.
+
+- **Consistent state-of-the-art across diverse settings:** RTA achieves new best results on single-label ImageNet variants (Table 3: OOD average 65.84% for ViT-B/16, surpassing Zero's 65.03%), cross-domain benchmarks (Table 4: highest average accuracy for both RN50 and ViT-B/16), and multi-label datasets (Tables 5–6: up to 3.18% mAP improvement over ML-TTA on NUSWIDE). The breadth and consistency of these gains are impressive.
+
+- **Practical and efficient design:** The method requires only a single offline training pass on 1,000 pseudo-labeled samples using LightGBM, followed by zero-parameter-update inference at test time. This avoids the backpropagation, memory banks, or iterative optimization required by most prior TTA methods, making it genuinely lightweight.
+
+- **Cross-domain generalization without per-task retraining:** The regression tree is trained once on ImageNet-based data and applied directly to ten cross-domain datasets and multi-label tasks with strong results, demonstrating practical transferability.
 
 ## Weaknesses
 
-### Fatal
-None — the contributions are not invalidated outright, but the central conceptual claim has a serious gap (see Major).
-
 ### Major
-- **Pseudo-label cross-entropy is, by construction, a near-deterministic function of the regressor's input.** Pseudo-labels are obtained by thresholding CLIP confidence at ≥0.8 (Sec. 5.1). Under this rule the pseudo-label is essentially always l = argmax_k softmax(s^reg)_k, so the regression target Eq. 4 simplifies to -log max_k softmax(s^reg)_k — a closed-form function of the same logits s^reg that constitute the tree's input. A regressor with sufficient capacity to fit this can do no more than learn a monotone transform of max-softmax probability. At test time, the tree only sees logits (no pseudo-label is computed per-view), so "ranking views by predicted loss" reduces to "ranking views by max-softmax." This makes the paper's headline framing — "view-loss mapping as a fundamentally new information source different from entropy" — incorrect as stated. The paper never runs the obvious sanity-check baseline: pick views by max-softmax (or -log max softmax) inside the same Zero-style ensembling pipeline. Without that baseline, all single-label gains are consistent with a renamed confidence selector. Why it matters: the central methodological contribution may be a re-parameterization, not a new mechanism.
-- **The "Ceiling TTA" motivation does not bridge to the proposed method.** Tables 1–2 use ground-truth labels to compute LCE; the regressor never sees ground truth. Given the issue above, the gap between Ceiling LCE (e.g., 90.2% on IN-A) and what an input-deterministic regressor can attain is structural, not a tractability gap. The paper presents the ceiling as if the proposed method inherits its headroom; in Table 3 the actual gain over Zero on IN-A is +1.62%. Why it matters: the motivating narrative is much stronger than the achievable mechanism.
-- **Cross-domain protocol is methodologically underspecified.** The tree is trained on ImageVal-12k as L=1000-dim ImageNet logits (Eq. 3) but applied to Flowers (102), Aircraft (100), DTD (47), EuroSAT (10), MSCOCO (80), VOC (20), NUSWIDE (81). Splits like "is coordinate 437 > τ?" have no shared semantics across these spaces. The paper does not describe any feature-mapping, padding, normalization, or per-dataset retraining. Either the "train once" claim is violated, or the same tree is applied to inputs whose dimensionality and feature semantics differ — making Table 4 currently uninterpretable. Why it matters: the cross-domain experiments are a major part of the empirical contribution.
-- **Multi-label formulation is not specified.** Eq. 4 defines LCE via a single softmax index l, which is ill-posed when an instance has multiple positive labels. How the pseudo-label and target are constructed for multi-label training, and how the tree is queried at test time for multi-label prediction, is not described — yet the largest claimed gains are in this setting (Tables 5–6).
+
+- **Missing direct-computation baseline:** The regression tree is trained to predict pseudo-LCE computed as \(-\log(\max_j \text{softmax}(s)_j)\) for high-confidence samples (confidence ≥ 0.8), because the pseudo-label is the argmax class in these cases. A natural and important baseline is to simply use \(-\log(\max \text{softmax})\) on the same 1000 ImageNet-class logits as a view-selection score, requiring no training at all. The paper never reports results for this baseline, leaving unclear whether the learned regression tree adds value beyond a trivial deterministic computation. Since the tree partitions the full logit space rather than only using the maximum, it *could* capture useful distributional patterns beyond the scalar max, but this needs to be demonstrated. This is the most significant methodological gap in the current submission.
+
+- **Class-set specification for non-ImageNet tasks is ambiguous:** Section 4.3 and Algorithm 2 do not explicitly state which class labels are used to compute the logit inputs to the regression tree during test-time adaptation on cross-domain or multi-label tasks. The most plausible reading is that the tree always takes 1000 ImageNet-class logits regardless of the target task, but this critical design choice is never stated, and the papers notation reuses \(L\) and \(\mathbf{t}_j\) without disambiguation. This makes the cross-domain and multi-label experiments difficult to reproduce from the description alone and should be clarified.
 
 ### Minor
-- Sub-1% deltas (e.g., +0.24 on IN-1k for ViT-B/16; cross-domain average ViT-B/16 RTA 68.70 vs. BCA 68.59) are presented without seeds, variance, or significance, and on several cross-domain datasets RTA is below BCA (DTD 50.45 vs. 53.49; EuroSAT 53.65 vs. 56.63). The narrative bolds RTA cells without acknowledging these losses.
-- Algorithm 2 Step 13 ("Average the predictions") leaves ambiguous whether averaging is over logits or probabilities; given the magnitude of the gains, this matters.
-- Train/test distribution mismatch on regressor inputs is not analyzed: the tree is trained on logits of the *original* image (Sec. 4.2) but applied to logits of *heavily augmented* views at test time.
-- The Spearman analysis (Sec. 4.1) examines the "top 10 features" pre-selected for highest correlation with the target; this is a selection-induced bias and does not establish that logits in general predict LCE.
+
+- **Pseudo-LCE to true-LCE gap not validated:** The paper motivates the entire approach with ceiling experiments using ground-truth LCE (Tables 1–2) and shows that logit features correlate with true LCE (Figures 2–3). However, the regression tree is trained on *pseudo*-LCE from CLIP's own predictions—not true LCE—and the paper provides no direct measurement of how well the trees predicted pseudo-loss correlates with true label loss on downstream tasks. A Spearman correlation between predicted loss and true loss on test tasks would bridge this important gap. The strong downstream results provide indirect evidence, but a direct validation would substantially strengthen the contribution.
+
+- **No analysis of why the tree outperforms entropy:** The paper shows that the tree-based selection outperforms entropy, but never analyzes *why*. Is it because the tree leverages cross-class information in the full logit vector? Because it captures non-linear interactions? Because the mapping generalizes better across distributions? An ablation or qualitative analysis would help readers understand what the tree is learning that entropy misses.
 
 ### Trivial
-- The decision-tree leaf count (16 leaves on 1000 samples) is at the low end for any claim that the regressor is exploiting nontrivial structure beyond max-softmax. This is borne out by Figure 5, where accuracy saturates with 1k–5k training samples.
+
+- Notation inconsistency in Eq. (8): the superscript uses \(x_i^{\text{reg}}\) in a section describing test-time adaptation, where \(x_i^{\text{test}}\) would be expected. This is a minor typographical issue but adds to the ambiguity about whether the test stage uses the same class set as regression training.
 
 ## Nice-to-Haves
-- A scatter plot of predicted LCE vs. true LCE on labeled test data (colored by whether the pseudo-label was correct) would directly visualize how close the regressor approaches the ceiling.
-- Feeding the regressor with features the logits alone cannot recover (image embeddings, cross-view statistics, augmentation parameters) would be the natural way to actually transcend max-softmax confidence.
+
+- **Side-by-side view selection examples:** Showing which views are selected by RTA vs. entropy vs. the direct-computation baseline on a few test images would make the method's behavior more interpretable.
+- **Sensitivity to the confidence threshold (0.8):** The paper analyzes sensitivity to sample size but not to the critical confidence threshold that determines the regression target formulation.
+- **Comparison with training on lower-confidence pseudo-labels:** Showing results when training with lower confidence thresholds (where the pseudo-label is not trivially the argmax) would help justify the regression approach over the direct computation.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- Strength claims like "the regression mapping is learned without ground-truth labels" and "extends naturally to multi-label" — these restate paper claims rather than evidence them, and the multi-label claim conflicts with the formulation gap noted in Major.
-- Strength claim "ablations confirm robustness of design choices" — the ablations (Figures 4–5) vary view count and regression-set size only; they do not isolate the regressor's contribution against a max-softmax-ranked baseline.
+
+These points were raised by the Harsh Critic but are flagged for removal, as they are either incorrect, overly harsh, or misinterpret the paper:
+
+- **"The regression mapping is unnecessary and the methodological contribution is hollow."** While the missing direct-computation baseline is a valid concern (kept as a Major weakness), the Harsh Critic's conclusion that the method is therefore hollow overstates the case. The regression tree uses the full 1000-dimensional logit vector as input, not merely the maximum softmax value, and its decision-tree structure can capture non-linear interactions across logit dimensions that a scalar max-softmax cannot. The empirical results show the method working across diverse settings. The baseline is needed but its absence does not make the method hollow.
+
+- **"Cross-domain and multi-label results are not reproducible and their validity is in doubt."** The Harsh Critic claims the method cannot work because the tree expects a fixed-dimensional input. However, the paper's design implies the tree always takes the 1000 ImageNet-class logits (the classes used during regression training) regardless of the downstream task. This is a reproducible design—it just needs to be stated clearly. The downstream task predictions use task-specific classes separately. This is a clarity issue, not a fatal reproducibility problem.
+
+- **"The logits-loss visualization and Spearman analysis do not validate the regression target."** The Harsh Critic correctly notes these analyses use true-label loss while the tree is trained on pseudo-loss, but this is a limitation in validation strength (already captured as a Minor weakness), not an invalidation. The analyses still demonstrate that logit structure carries information about view quality, which is the core motivation.
+
+- **"The paper should remove the regression model and use the direct formula."** This contradicts the critic's own acknowledgment that the method achieves SOTA results. Whether the tree can be replaced by a simpler formula is an empirical question the baseline would answer—not a reason to reject a working method outright.
 
 ## Novel Insights
-None beyond the paper's own contributions. The main novel empirical observation — that ground-truth-LCE-based view selection nearly saturates accuracy — is already in the paper. The critical follow-up question the reviewers surface (whether the pseudo-label-trained regressor is functionally equivalent to max-softmax ranking) is a diagnosis of the paper's framing rather than a new insight.
+
+The paper's genuinely novel insight is the empirical discovery that view quality can be predicted from logit vectors via a simple regression mapping trained on out-of-domain pseudo-labeled data, without requiring any target-domain labels, parameter updates, or memory banks. This challenges the prevailing assumption in the TTA literature that view selection must rely on instance-level signals (entropy, reward models, etc.) and opens a new direction: pre-computing general-purpose view-quality estimators that transfer across tasks. This is conceptually distinct from both entropy-based methods and prior loss-prediction work (Kim et al., 2020), which required in-domain training.
 
 ## Suggestions
-- Add the decisive control: same augmentations, same top-k, same ensembling as Zero, but rank views by max-softmax probability or by -log max softmax. Report rank correlation between the tree's predicted loss and max-softmax across views; if it is ~1.0, reframe the contribution.
-- Specify and ablate the cross-domain protocol: is the tree retrained per dataset, or applied to differently-shaped logit vectors? If retrained, the "train once, deploy anywhere" claim should be removed.
-- Define the multi-label target precisely (per-class binary CE? Sum over positives? Per-label tree?) and adjust Eq. 4 accordingly.
-- Report seeds/variance on the headline tables; many cross-domain deltas are well within noise.
-- Honestly discuss the rows where RTA underperforms BCA (DTD, EuroSAT on ViT-B/16).
 
-## Evaluation Axes
-- Originality: The Ceiling-TTA framing is novel; the proposed estimator's design fails to deliver a genuinely new signal beyond confidence.
-- Importance: The problem (training-free TTA for CLIP) is established and active.
-- Support for claims: Weak. The "view-loss mapping is new information beyond single-instance probability" claim is not supported once the pseudo-label collapse is taken into account, and the strongest motivating numbers (Tables 1–2) require oracle labels.
-- Soundness of experiments: Mixed. Coverage is broad, but missing the max-softmax baseline, undescribed cross-domain feature mapping, and absent variance estimates undercut interpretability.
-- Clarity: Acceptable at the surface but multi-label and cross-domain protocols are missing.
-- Value to the community: The Ceiling observation is shareable; the proposed estimator as currently designed adds limited value.
+- Add the \(-\log(\max \text{softmax})\) baseline computed on the same 1000 ImageNet-class logits. If RTA outperforms this baseline, it demonstrates the tree adds value; if not, the insight simplifies to an even more elegant finding. Either outcome is publishable and useful.
+- Explicitly state in Section 4.3 that the regression tree always receives logits computed against the 1000 ImageNet class prompts (the same class set used in regression training), regardless of the downstream task's label space.
+- Report Spearman or Pearson correlation between the tree's predicted loss and true label loss on at least one held-out test task to bridge the motivation-to-method gap.
 
 ## Score and Decision
 
-Anchors retrieved:
-- /home/wg25r/.../75PhjtbBdr.md (ML-TTA, avg 6.25, Accept) — directly comparable method on multi-label TTA; better methodological framing and clearer mechanism than RTA.
-- /home/wg25r/.../kIP0duasBb.md (RLCF, avg 6.67, Accept) — clear conceptual contribution (CLIP reward), better-motivated than RTA.
-- /home/wg25r/.../9w3iw8wDuE.md (DeYO, avg 7.00, Accept) — shares the "entropy is insufficient" thesis but builds a principled alternative confidence signal; RTA's alternative collapses to a confidence transform.
-- /home/wg25r/.../yD2JMeKumt.md (DOTA, avg 6.00, Reject) — solid CLIP TTA with distributional modeling; tighter methodology than RTA.
-- /home/wg25r/.../KNtcoAM5Gy.md (BaFTA, avg 5.50, Reject) — backprop-free CLIP TTA; comparable practicality to RTA but with clearer mechanism.
-- /home/wg25r/.../z7PhIgVmZU.md (BAT-CLIP, avg 5.50, Reject) — bimodal CLIP TTA; comparable scope, similar score range.
-- /home/wg25r/.../KZZbdJ4wff.md (PRO, avg 3.75, Reject) — pseudo-label CLIP adaptation with unclear pseudo-label dynamics; close analog in terms of pseudo-label-driven mechanism concerns; RTA has clearer empirical wins but a similar conceptual fragility.
-- /home/wg25r/.../ezzmWTm8r6.md (Noisy-pseudo-labels TTA, avg 4.00, Reject) — pseudo-label TTA with confirmation-bias concerns; comparable to RTA's concerns.
-- /home/wg25r/.../7iuFxx9Ccx.md (SlimTTT, avg 6.00, Reject) — broader TTT scope, more thorough experiments than RTA.
-- /home/wg25r/.../PxL35zAxvT.md (TTA with Auxiliary Tasks, avg 4.67, Reject) — comparable in empirical scope but with a clearer mechanism than RTA.
-- /home/wg25r/.../9bMZ29SPVx.md (CLIP-powered Data Selection, avg 7.50, Accept) — different domain but high quality; clearly above RTA.
-- /home/wg25r/.../yINucFNbcZ.md (Conformal w/ TTA, avg 4.83, Reject) — different focus; comparable execution quality.
-- /home/wg25r/.../XMlj8W8o0Y.md (HoughST VLMA, avg 4.00, Reject) — comparable concept-level concerns with weaker mechanism than RTA.
-- /home/wg25r/.../EKfcngSxwD.md (Task Codebook VLM, avg 4.67, Reject) — different scope; similar marginal-novelty concerns.
-- /home/wg25r/.../t84UBRhhvp.md (Text Descriptions, avg 4.75, Reject) — different angle.
-- /home/wg25r/.../lCqNxBGPp5.md (vVLM benchmark, avg 5.00, Reject) — different scope.
+### Anchor Comparison
 
-RTA's empirical breadth (10 cross-domain + 3 multi-label) is comparable to mid-range CLIP-TTA submissions like BaFTA (5.5) and BAT-CLIP (5.5). However, the central conceptual collapse — pseudo-label CE reducing to a closed-form function of the regressor's input, making the method potentially equivalent to a max-softmax baseline never compared against — is more severe than the issues that pushed DOTA (6.0, Reject) and BaFTA (5.5, Reject) below the bar, and the cross-domain feature-mapping omission is a documented methodological gap. It sits closer to PRO (3.75) and the noisy-pseudo-label TTA paper (4.0) than to mid-range papers, though RTA's stronger empirical numbers and cleaner presentation lift it a notch above those.
+- **CLUvRxQXtf (CLIP-TTA): avg 4.67, Reject** — An incremental method (adds two losses to CLIP-OT), missing key baselines, limited to one backbone. RTA is stronger: broader experimental coverage, more novel paradigm (regression vs. entropy), SOTA margins are larger.
 
-MY FINAL SCORE: <pineapple>4</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+- **S90g7NE88b (FGA): avg 5.00, Accept (Poster)** — A well-motivated method with theoretical analysis but requires labeled training data, has theoretical gaps flagged by reviewers, and narrower experimental scope. RTA has broader benchmarks, requires no labeled data, and achieves clearer SOTA. RTA is somewhat stronger.
+
+- **HeGMugkCOH (C-TTA): avg 3.00, Reject** — Confusing terminology, sensitive hyperparameters, missing CTTA experiments. RTA is substantially stronger in both methodology and evaluation.
+
+- **dHj8hC081K (ADTE): avg 4.50, Accept (Poster)** — Replaces SE with TE plus bias correction; incremental over existing entropy frameworks, modest gains. RTA proposes a fundamentally different paradigm with larger gains. RTA is stronger.
+
+- **nErnNhJx2o (SOBA): avg 4.00, Reject** — Training-free TTA via geometric transformation. RTA has more comprehensive evaluation and stronger results.
+
+- **rClkte0ZTp (Efficient Test-Time Scaling): avg 5.00, Accept (Poster)** — Test-time augmentation and adaptation for small VLMs. Comparable quality level; RTA's broader benchmarks give it a slight edge.
+
+- **7kLNGaAHaw (PEA): avg 5.50, Accept (Poster)** — Backprop-free TTA via embedding alignment, strong theoretical framing. RTA lacks theory but has more extensive multi-label and cross-domain evaluation.
+
+The paper's core strengths (compelling ceiling experiments, consistent SOTA across many benchmarks, efficient design) outweigh its weaknesses (missing baseline, clarity issue on class set, unvalidated pseudo-to-true loss gap). The missing baseline is the most significant concern but is addressable and does not invalidate the contribution. The paper falls in the Accept (Poster) range, comparable to or stronger than the 5.0–5.5 anchors.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

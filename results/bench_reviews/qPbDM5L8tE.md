@@ -1,86 +1,101 @@
+Now I have all the information I need. Let me compose the final consolidated review.
+
 ## Summary
-CoRAL is a modular neuro-symbolic framework that uses a VLM for perception (via FoundationPose for 6-DoF tracking + GPT-4o for physical parameter estimation) and an LLM for generating MPPI cost functions and contact strategies, plus a RAG memory unit and an outer-loop LLM "diagnostician" that refines parameters/plans after persistent failures. The system is evaluated on six custom contact-rich tasks in Robosuite/Mujoco against VLAs (OpenVLA-OFT, π₀.₅) and hand-engineered expert costs.
+
+The paper proposes CoRAL, a modular neuro-symbolic framework for zero-shot contact-rich robotic manipulation. It separates perception (FoundationPose + VLM for pose tracking and physical parameter estimation) from reasoning (LLM for generating MPPI cost functions, contact strategies, and online adaptation). A memory unit enables experience reuse. Experiments on six simulated contact-rich tasks show CoRAL succeeds where end-to-end VLA baselines (OpenVLA, π₀.₅) completely fail, and ablations validate the architectural choices.
 
 ## Strengths
-- The neuro-symbolic decoupling is clearly articulated: the LLM emits cost-function structure (Eq. 2) and contact-region biasing (Eq. 3) that plug directly into the MPPI sampler — more concrete than typical "LLM-for-robotics" papers.
-- Including hand-designed cost baselines (single-stage and FSM) is the right comparison and is rare in this literature; it provides a meaningful upper bound.
-- The Flip-with-Wall contact-strategy ablation (32 vs 199 steps, 1.33 m vs 3.69 m EE path) isolates a specific mechanism (search-space pruning by LLM-proposed contact regions) rather than just toggling whole modules.
+
+- **LLM-driven cost function and contact strategy generation for MPPI is a genuine contribution.** Rather than using the LLM to identify sub-goals or objects (as in prior LLM+planner work), CoRAL has the LLM formulate the mathematical structure and weights of the MPPI cost function itself (Eq. 2) and propose symbolic contact regions that bias sampling (Eq. 3). This grounds high-level reasoning directly into the optimal control problem.
+
+- **Role separation between VLM (perception) and LLM (reasoning) is empirically validated.** The Unified VLM ablation, which merges both functions into a single multimodal prompt, collapses to 0/10 on T1, T3, T5, T6, while the separated architecture achieves non-zero success on those same tasks (Table 1). The paper also shows that removing FoundationPose (w/o Pose Tracking) causes catastrophic failure, confirming that a dedicated pose estimator is critical.
+
+- **Zero-shot success on contact-rich tasks where fine-tuned VLA models completely fail.** On T1, T4, T5, T6, OpenVLA-OFT and π₀.₅ achieve 0/10 on three of four tasks, while CoRAL obtains 4/10, 9/10, 9/10, and 7/10 respectively without any task-specific fine-tuning (Table 1). This demonstrates a real capability gap that the modular approach addresses.
+
+- **LLM-generated contact strategy dramatically prunes the planning search space.** In the "Flip with Wall" task, the LLM-guided strategy requires 83.9% fewer planning steps (32 vs. 199) and 63.9% shorter end-effector travel (1.33 m vs. 3.69 m) compared to an unguided variant (Section 4.1.4). This shows that symbolic reasoning makes long-horizon contact planning tractable.
+
+- **Memory unit provides measurable improvement.** Adding memory boosts success from 2/10 to 4/10 on T1 and from 9/10 to 10/10 on T3, while also reducing completion times (Table 1). This demonstrates the value of experience reuse in this setting.
 
 ## Weaknesses
 
 ### Fatal
-None — the framework is coherent and partial empirical evidence exists; the issues below undermine the *claims* but not the project's existence.
+None.
 
 ### Major
-- **Figure 4 does not show what the prose claims (Section 4.1.4).** The text states a mass adaptation from 2.0 kg → ground truth 0.1 kg and friction 0.9 → 0.5, "converged remarkably close to true values." Figure 4 instead shows mass starting at 1.00 kg, dropping to ~0.85 kg, with no friction subplot and no convergence to 0.1. Since this is the *entire* empirical evidence for the online world-model correction contribution, the prose/figure mismatch directly undermines that contribution.
-- **Internal contradiction in the w/o Pose Tracking ablation.** Section 4.1.3 asserts "catastrophic failure across all tasks (0/10 success)" and concludes a dedicated pose estimator is "non-negotiable," yet Table 1 shows 9/10 on T2 for that same ablation. The categorical conclusion is inconsistent with the table; one of them is wrong.
-- **The unambiguous baseline (Expert FSM) dominates CoRAL.** From Table 1: T1 8/10 (FSM) vs 4/10 (CoRAL); T6 9/10 vs 7/10; tied or better on T2–T5 with comparable times. The abstract/intro promise outperforming state-of-the-art on contact-rich manipulation, but against a fair, in-distribution baseline CoRAL is *worse* than a human-engineered FSM. The reframing as "approaching expert-level with reduced manual tuning" (4.1.2) is a different, weaker claim than what the introduction sells, and the labor-saving claim is never quantified.
-- **The headline VLA comparison is structurally asymmetric in CoRAL's favor (Section 4.1.1).** The paper explicitly uses out-of-the-box LIBERO-OBJECT/LIBERO-GOAL checkpoints for OpenVLA-OFT and π₀.₅ on custom Robosuite tasks involving constant-force pushing and wall-flipping — behaviors never in those checkpoints' training distribution. The conclusion "even fine-tuning an end-to-end policy is insufficient" is unsupported because the VLAs were not fine-tuned on these tasks. Either fine-tune them on demonstrations of T1/T4/T5/T6, or evaluate CoRAL on the LIBERO splits the checkpoints actually cover. The intro promises LIBERO evaluation that Table 1 never delivers.
+
+1. **Figure 4 contradicts the text's claim about online parameter adaptation — this undermines a core experimental demonstration.** The text states the evaluation world was initialized with mass 2.0 kg (ground truth 0.1 kg) and that after adaptation "the agent's belief about both mass and friction converged remarkably close to their true values." However, the figure caption describes a y-axis ranging from 0.75 to 1.00 kg, with the corrected mass starting at 1.0 kg and converging to approximately 0.85 kg — neither close to the stated ground truth of 0.1 kg nor showing 2.0 kg on the axis. The OCR may be imperfect, but the paper text itself asserts convergence to 0.1 kg while the figure as described shows nothing of the sort. This is a critical inconsistency in the paper's headline demonstration of online physical parameter correction. The authors must clarify what Figure 4 actually shows and reconcile it with the text, or the claim of successful parameter adaptation to ground-truth values is unsupported.
+
+2. **The paper does not compare against the most relevant baselines (IMPACT, VLMPC).** The Related Work (Section 2) discusses IMPACT and VLMPC as closely related prior work that integrates foundation models with motion planners, and claims CoRAL "significantly advances this paradigm." Yet the experimental comparison includes only end-to-end VLA models (OpenVLA, π₀.₅) and human-designed cost functions. The failure of end-to-end VLAs on contact-rich tasks is expected given their training data biases and tells us little about improvement over the LLM+planner family. Without at least one comparison to IMPACT, VLMPC, or a similar system, the paper cannot substantiate its claim of advancing the state of the art in its own paradigm. The human expert baselines provide upper bounds but do not substitute for direct comparison with prior methods in the same family.
 
 ### Minor
-- **Statistical thinness.** N=10 per cell, no confidence intervals, no seeds reported, and GPT-4o is non-deterministic. The Memory-ablation argument leans on differences like 2/10→4/10 on T1 (two trials) — too small to claim Memory "consistently achieved the highest success rates."
-- **CAD-model dependency is sidestepped.** FoundationPose requires known 3D meshes M (Section 3.1), which the conclusion's "unknown environments" framing glosses over. The w/o Pose Tracking ablation tests "VLM as pose estimator" rather than a realistic model-free pose pipeline, so the comparison conflates two different deficiencies.
-- **Memory module under-specified.** RAG_Retrieve(T, θ) is referenced but the embedding space, similarity threshold, and match-trigger are unspecified, and the experiment does not distinguish "memory genuinely generalizes" from "memory replays a near-identical successful trajectory."
-- **Outer-loop LLM mechanics not specified.** Section 3.4 describes the LLM as a diagnostician but gives no prompt structure, no description of how time-series episode data is presented, and no bounds on parameter updates to avoid oscillation.
-- **Unified-VLM ablation reports 0/10 across most tasks** without sharing the prompt, leaving open whether the failure mode is fundamental or a straw-man prompt.
+
+3. **The memory evaluation protocol is unclear.** The paper reports that CoRAL with memory outperforms CoRAL without memory (e.g., 4/10 vs. 2/10 on T1) but does not specify whether memory is populated from earlier trials within the same evaluation or from a separate prior set. The text mentions "after just a single successful completion, the system can store the entire successful interaction context," suggesting within-evaluation accumulation. If memory grows during the reported 10 trials, the comparison is not between equivalent conditions — the "with memory" condition has access to more data. The authors should clarify the protocol and, if memory accumulates during evaluation, acknowledge this directly rather than presenting it as a straightforward ablation.
+
+4. **No statistical variance is reported.** Results are given as success counts (x/10) and average completion time over successful trials, with no confidence intervals, standard deviations, or statistical tests. Given the stochasticity from MPPI sampling, LLM generation, and randomized object parameters (mass, friction, dimensions), 10 trials per condition is thin. The average completion time is computed over differing numbers of successful trials (sometimes as few as 2-4), making cross-condition time comparisons unreliable.
+
+5. **The reactive control augmentation (Eq. 7) is never ablated.** The paper mentions a feedback term for robustness but provides no evaluation of its contribution. Given that force feedback is central to contact-rich task performance, an ablation with and without this term would help clarify which components drive the reported results.
 
 ### Trivial
-- The intro promises LIBERO-suite evaluation that does not appear in Table 1; resolve the discrepancy in framing.
+- The term "zero-shot" is used alongside a memory unit that stores and retrieves past experiences, which creates some terminological tension. Clarifying the distinction (zero-shot w.r.t. task-specific fine-tuning vs. within-task experience reuse) would help.
 
 ## Nice-to-Haves
-- A real-robot demonstration on even one task, given the framing around contact-rich dynamics, friction estimation, and the explicit sim-to-real gap motivation in Eq. 7.
-- Quantify the labor savings claim (cost-function design hours saved vs. FSM expert) rather than asserting it.
-- Memory generalization test: held-out object instances or held-out parameter ranges to disentangle replay from generalization.
+- The evaluation is simulation-only. Contact-rich manipulation is highly sensitive to sim-to-real gaps (e.g., friction, compliance, sensing noise). Real-robot validation would significantly strengthen the claims, particularly for the online adaptation mechanism.
+- The system uses GPT-4o for both VLM and LLM roles. Demonstrating the approach with a smaller, open-source model would improve reproducibility and show generality.
+- Showing prompts used for LLM cost function generation and online adaptation (likely in the appendix, stripped by the parser) would help reproducibility.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-- "Strengths" about the modular separation being "demonstrably essential" (from Strength Finder #2) — this rests on the w/o Pose Tracking and Unified-VLM ablations, which are themselves contradicted (former) or under-specified (latter), so the strength conflicts with verified weaknesses.
-- "Online adaptation corrects world-model errors" as a strength — conflicts with the Figure 4 prose/figure mismatch, the very evidence cited.
-- "Memory consistently achieves highest success" as a strength — N=10 with 2-trial deltas does not support "consistently."
-- "Generic importance of contact-rich manipulation" framing — generic, not specific to this paper.
+
+These points were flagged by reviewers but are removed from the main review with justification:
+
+- **"Unified VLM confounded because it likely discards FoundationPose"** — REMOVED. The paper clearly separates these as two distinct ablations (lines 243, 324). "CoRAL (w/o Pose Tracking)" explicitly removes FoundationPose and gets different results (9/10 on T2) from "CoRAL (Unified VLM)" (2/10 on T2). The Unified VLM merges VLM (perception of physical parameters) and LLM (planning) roles while presumably retaining FoundationPose. The critic's claim is factually incorrect.
+
+- **"Missing implementation details (prompts, output parsing, etc.)"** — REMOVED per hard rules about missing appendix content stripped by the parser.
+
+- **"Explainability claim unverifiable"** — REMOVED per hard rules about missing appendix content stripped by the parser.
+
+- **"Zero-shot claim contradictory with memory"** — REMOVED. The paper uses "zero-shot" to mean no task-specific fine-tuning, which is standard usage. Memory is for cross-episode experience reuse.
+
+- **"Missing comparison to ThinkAct"** — REMOVED. The paper mentions ThinkAct in Related Work but this is a different paradigm (LLM generates reasoning steps for a learned policy, not for a controller). The paper's scope is LLM+planner integration, which it already benchmarks against human-designed cost functions.
+
+- **"Simulation only"** — MOVED to Nice-to-Haves. Simulation evaluation is standard for the initial presentation of a new framework, but real-robot validation would strengthen the claims.
+
+- **"Formatting/style nitpicks and typo concerns"** — REMOVED per hard rules.
 
 ## Novel Insights
-None beyond the paper's own contributions. The synthesis of FoundationPose + LLM-generated MPPI cost terms + outer-loop LLM diagnosis is a reasonable engineering combination, but no new conceptual insight is established that is not already present in the existing decoupled-reasoning literature the paper itself cites.
+
+Beyond the paper's own contributions, the most informative pattern across the reviews is that the paper's claimed strength (modular role separation) and its main weakness (experimental gaps) stem from the same architectural choice: by decomposing perception, reasoning, and control into distinct modules, the paper enables clean ablations that clearly identify which components matter, but this same modularity makes the system especially sensitive to any single module's failure (as seen in the Unified VLM and w/o Pose Tracking ablations both crashing performance). This suggests a fundamental tension in the neuro-symbolic approach: modularity buys explainability and targeted debuggability at the cost of brittleness and a larger hypothesis space to validate. The second interesting observation is that the LLM-as-cost-function-designer approach has a natural advantage over end-to-end VLAs on contact-rich tasks that involve simple-but-force-sensitive physics (pushing, flipping) — but the advantage comes at the cost of high variance (2/10 to 4/10 on T1) even within a single task configuration, suggesting the method is not yet reliable enough for deployment.
 
 ## Suggestions
-- Fix Figure 4 so axes, prose, and ground truth match; show both mass and friction trajectories averaged over multiple runs under the stated 2.0→0.1 kg, 0.9→0.5 setup.
-- Resolve the w/o-Pose-Tracking Table-vs-Text contradiction explicitly.
-- Either fine-tune VLA baselines on demonstrations of T1/T4/T5/T6 *or* evaluate CoRAL on the same LIBERO splits the checkpoints were trained on. Reframe RQ1 around what the experiments actually support.
-- Add real-robot or higher-N evaluation; report seeds and per-cell variance for LLM stochasticity.
-- Reframe the central claim as "automated cost-function design that approaches but does not beat hand-engineered FSM" and quantify human-hour savings.
-- Specify the RAG retrieval mechanism, similarity threshold, and outer-loop LLM prompt/bounds.
 
----
+1. Resolve the Figure 4 discrepancy immediately. Clarify what the figure shows (planning world estimates vs. evaluation world values), reconcile the axis labels with the text's stated ground truth of 0.1 kg, and provide a corrected figure or text. If the adaptation did not actually converge close to 0.1 kg, revise the claim accordingly.
 
-## Evaluation by axis
-- **Originality**: Moderate. Modular LLM-for-cost + MPPI is in line with existing decoupled-reasoning trends (RePlan-style replanning, VLMPC); the specific contribution is plumbing LLM into MPPI cost structure.
-- **Importance**: Real — contact-rich manipulation is a known hard problem.
-- **Claim support**: Weak. Headline VLA-superiority claim rests on OOD baselines; adaptation claim rests on a figure that contradicts its caption; ablation conclusions contradict their own table.
-- **Soundness of experiments**: Sim-only, N=10, no seeds/CI, single LLM.
-- **Clarity**: Methodology is readable; experiments section has multiple internal inconsistencies.
-- **Value**: The architecture diagram is useful prior art; the evidence is not.
+2. Add at least one comparison to IMPACT or VLMPC — even if implemented approximately in the same simulation environment — or clearly justify why such a comparison is infeasible.
+
+3. Clarify the memory evaluation protocol: are the "with memory" results from a sequential run where memory accumulates during evaluation? If so, report the per-trial progression or use a pre-populated memory from a held-out set.
+
+4. Report confidence intervals or standard deviations across trials, or at minimum provide per-trial data.
+
+5. Provide the LLM prompts used for cost function generation, contact strategy formulation, and online adaptation (either in the main text or appendix).
 
 ## Score and Decision
 
-Anchors retrieved:
-- `WtHKqtHVXo.md` (avg 4.00) — "Generating Robot Policy Code for High-Precision Contact-Rich" — closest topical match (LLM for contact-rich manipulation). CoRAL is similar in scope but has more internal inconsistencies than this anchor; comparable or slightly weaker.
-- `iTsHStJKcm.md` (avg 5.25) — LLM-guided hierarchical deformable manipulation. Better-supported claims than CoRAL.
-- `qGL6fE1lqd.md` (avg 4.40) — LLMPhy physical reasoning + world models. Comparable LLM-as-physics-reasoner setup; CoRAL is in similar territory but headline claims are less well supported.
-- `Cf8HBieRzL.md` (avg 3.50) — UniContact contact synthesis. Lower-anchor reject; CoRAL is around or slightly above this band.
-- `oyXoGJQlUf.md` (avg 3.00) — GRAIL LLM action-rule induction. Bottom anchor; CoRAL is clearly above this — has more concrete experiments.
-- `gisAooH2TG.md` (avg 4.25) — RePlan replanning with VLMs. Most architecturally similar; CoRAL has a more concrete LLM-into-MPPI mechanism but weaker evidence; roughly comparable.
-- `fZZ4ubttru.md` (avg 5.50) — GenBot generative simulation. Stronger evidentiary base than CoRAL.
-- `KsUh8MMFKQ.md` (avg 8.00) — Thin-Shell with differentiable physics. Far better-supported claims and scope; CoRAL is well below.
-- `b9Ne5lHJ8Y.md` (avg 3.40) — MuJoCo Manipulus benchmark. Below CoRAL on conceptual contribution.
-- `s3sJenvY5H.md` (avg 4.75) — Evaluation of generative robotic simulations. Comparable band.
-- `c0chJTSbci.md` (avg 6.25) — Zero-shot manipulation with image-editing diffusion. Stronger than CoRAL.
-- `KTtEICH4TO.md` (avg 4.75) — CORN contact-based representation. Comparable, slightly above CoRAL.
-- `VEdeDd13gx.md` (avg 5.25) — ManiBox grasping. Stronger than CoRAL.
-- `o3pJU5QCtv.md` (avg 6.25) — EC-Diffuser. Stronger than CoRAL.
-- `EODzbQ2Gy4.md` (avg 3.40) — Diff-Transfer. Comparable band; CoRAL slightly stronger conceptually.
-- `wl1Kup6oES.md` (avg 3.00) — Appearance-to-Motion. Below CoRAL.
+### Calibration Anchors
 
-CoRAL sits with the RePlan/contact-rich LLM cluster (4.0–4.25), but pulled down by the internal contradictions (Fig 4 vs prose; Table 1 vs Section 4.1.3) and the FSM baseline dominating its own method. These are concrete defects beyond what those anchors carry. Position: slightly below the 4.0 anchor cluster.
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| NavFoM (kkBOIsrCXh.md) | 8.00 (Accept Poster) | Stronger paper with real-world deployment, more baselines, cleaner empirical story. CoRAL is comparable in novelty but weaker in execution. |
+| VLM4VLA (tc2UsBeODW.md) | 7.00 (Accept Poster) | Cleaner experimental methodology with broader model coverage. CoRAL has more novel contribution (LLM cost function design) but weaker validation. |
+| Semantic World Models (KfaZaYYCvt.md) | 5.00 (Reject) | Both have novel framing but simulation-only evaluation and missing baselines. CoRAL's practical contribution to contact-rich tasks is stronger, but SWM's framing is cleaner. |
+| VLA-in-the-Loop (aT4LG8c6DE.md) | 5.00 (Reject) | Similar tier: interesting idea with execution gaps. CoRAL has better ablations but worse flagship experiment issue (Figure 4). |
+| BiNoMaP (4jcnded6fA.md) | 5.33 (Reject) | Contact-rich manipulation paper. CoRAL has more novel architecture but similar simulation-only limitation. |
+| LLM-guided MIP (zHexNab8uH.md) | 2.50 (Reject) | Much weaker: toy tasks, overclaimed novelty. CoRAL's experimental validation, while imperfect, is substantially stronger. |
+| GRACE (SESeW4EvPd.md) | 1.50 (Reject) | Over-engineered pipeline with hand-crafted components. CoRAL's LLM-driven approach is more flexible and scalable. |
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+### Score Rationale
+
+The paper presents a genuinely novel contribution — LLM-generated cost functions and contact strategies for MPPI — and provides meaningful ablations that validate the architectural choices. On the hardest contact-rich tasks, CoRAL succeeds where fine-tuned VLA baselines completely fail. However, the experimental validation has two serious issues. First, the Figure 4 parameter adaptation demonstration contradicts its own text: the claim of convergence to the true mass (0.1 kg) is unsupported by the figure as described, which undermines a core claim of the paper. Second, the most relevant prior work (IMPACT, VLMPC) is discussed but never compared against, making it impossible to assess the paper's contribution relative to its own paradigm. Combined with the unclear memory evaluation protocol and lack of statistical variance, these issues prevent acceptance in the current form.
+
+The core ideas warrant further development, but the experimental presentation needs substantial revision before the paper can be evaluated fairly.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>
