@@ -172,6 +172,19 @@ def _is_excluded(basename: str) -> bool:
 
 
 def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, high_score: float = 10.0) -> str:
+    """Search human reviews, optionally filtered by the reviewer avg-score range.
+
+    Args:
+        query: search query.
+        n: number of top results.
+        mode: 'vector' for semantic similarity, 'bm25' for keyword matching.
+        low_score: include only papers with avg score >= low_score (default 0.0).
+        high_score: include only papers with avg score <= high_score (default 10.0).
+
+    Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
+    over the filtered subset. Use this to anchor calibration to a specific
+    score band (e.g. low_score=7, high_score=10 for strong papers).
+    """
     print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=[{low_score}, {high_score}]")
     if mode == "bm25":
         bm25 = list(database.values())[0]["bm25"]

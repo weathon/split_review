@@ -1,84 +1,104 @@
-Now I have a comprehensive picture of both the paper and the calibration anchors. Let me synthesize my final review.
+Now I have all the information I need. Let me synthesize the final review by cross-checking every harsh critic claim against the paper text, and calibrating the score against the anchors.
+
+---
 
 ## Summary
 
-This paper proposes a post-training fine-tuning framework for flow-matching generative models that enforces parameter-dependent PDE constraints through weak-form residuals and jointly infers latent physical parameters via a co-evolved parameter flow within the Adjoint Matching formalism. The method addresses the realistic scenario where solution observations are available but parameter labels are not, and it is evaluated across four PDE families (Darcy, linear elasticity, Helmholtz, Stokes) plus a natural-image recoloring task.
+This paper proposes a post-training fine-tuning framework for flow-matching generative models that enforces parameter-dependent PDE constraints while jointly inferring latent physical parameters, without requiring paired (state, parameter) training data. The method combines weak-form PDE residuals with the Adjoint Matching (AM) stochastic control framework and introduces a joint state-parameter evolution via a surrogate base flow for the unknown parameters, constructed using a pre-trained inverse predictor φ. The approach is validated on four PDE families (Darcy, linear elasticity, Helmholtz, Stokes) and a natural-image recoloring task, with comparisons against PBFM, FM+ECI, and AM ablations.
 
 ## Strengths
 
-- **Post-training PDE enforcement without paired parameter data**: The paper introduces a genuinely useful capability — tilting a pre-trained flow-matching model toward PDE-consistent samples while jointly recovering latent parameters, without requiring joint (state, parameter) training data. This is validated across multiple PDE systems (Section 4.1–4.5) with consistent residual reductions relative to the base model and ablations.
-
-- **Joint parameter-state evolution via Adjoint Matching**: Casting the joint (x, α) fine-tuning as a stochastic optimal control problem (Section 3.2–3.3) is conceptually clean and yields empirical gains. On the Stokes lid-driven cavity (Figure 5), the joint model achieves MMD_α ≈ 0.07–0.13 versus 0.22–0.28 for ablations, and on Helmholtz (Table 2) it simultaneously achieves the lowest residuals and lowest MMD_x among all methods.
-
-- **Broad and well-structured experimental evaluation**: The method is tested on four fundamentally different PDE families with controlled misspecification (noisy Darcy, BC-mismatched elasticity, damped→lossless Helmholtz, forced→unforced Stokes), plus a natural-image recoloring task. The consistent quantitative improvements across these diverse settings lend credibility to the approach.
-
-- **Practical trade-off controls and lightweight adaptation**: The hyperparameter sweeps (Figure 3) provide actionable guidance for balancing residual reduction against distributional fidelity. Fine-tuning requires only 20 gradient steps (~15 minutes on a single GPU) with no inference-time overhead.
-
-- **Scaled memoryless noise schedule**: The introduction of the κ-scaling (Section 3.3) is a simple but useful practical extension to the Adjoint Matching framework, providing a stability knob without breaking theoretical consistency.
+- **Novel methodological combination:** The integration of weak-form PDE residuals with Adjoint Matching for post-training fine-tuning, coupled with a joint state-parameter evolution that enables inverse-problem inference without paired data, is genuinely original. The surrogate base flow construction (Section 3.2) and the regularization drift \(v_{t,\alpha}^{\text{reg}}\) (Section 3.3) are creative and pragmatically effective.
+- **Broad and informative experimental validation:** The method is tested across four distinct PDE families and a natural-image task, with multiple baselines (PBFM, FM+ECI, Base AM, Base AM+φ). The Darcy ablation (Figure 3) showing controllable trade-offs between residual reduction and distributional fidelity via \((\lambda_x, \lambda_\alpha, \lambda_f)\) sweeps provides concrete practical guidance. Quantitative metrics include weak/strong residuals, BC error, and \(\text{MMD}_x, \text{MMD}_\alpha\) against a reference dataset (Tables 1–2, Figure 5).
+- **Practical efficiency:** Fine-tuning on Darcy requires only 20 gradient steps and under 15 minutes on a single GPU (Section 4.1), after which sampling runs at base-model cost with no inference-time adjustments. This makes the method deployable in scientific workflows.
+- **Novel scaled memoryless noise schedule:** The introduction of \(\sigma^2(t) = (1-\kappa)2\eta_t\) with a proof that the memoryless property is preserved (Lemma 1, deferred to appendix) provides a practical numerical stabilization knob that is a genuine extension of the AM framework (Section 3.3).
 
 ## Weaknesses
 
+### Fatal
+
+None. The paper's core claims survive scrutiny.
+
 ### Major
 
-- **Missing ablation to isolate the contribution of the joint flow mechanism**: The paper's central methodological contribution is the joint evolution of state and parameter vector fields. However, the baseline ablations (Base AM, Base AM+φ) do not control for the effect of conditioning the state flow on the parameter estimate α_t. The joint model augments the architecture to condition v_{t,x}^n on α_t and adds a separate head for v_{t,α}^n, while the ablations do neither. Any performance difference could therefore be explained by increased network capacity or conditioning on parameter estimates, rather than by the joint dynamics themselves. An ablation that conditions the state flow on α_t (e.g., via φ) but without a separately evolved α flow would isolate what the joint flow uniquely contributes. Since the joint flow is the paper's defining novelty, this missing comparison weakens the experimental support for the claimed contribution. The consistent pattern of improvement across tasks (Helmholtz, Stokes, elasticity) suggests the effect is real, but the evidence is not as clean as it should be.
+None that would independently warrant rejection. The most substantive concerns are below under Minor — they are addressable and do not undermine the central contribution.
 
 ### Minor
 
-- **Overstated framing as solving inverse problems**: The abstract and introduction frame the method as "effectively addressing ill-posed inverse problems." The method generates joint (x, α) pairs and supports guidance on sparse parameter observations (Section 4.2), which is a form of conditional generation. However, the paper does not demonstrate the classic inverse problem of inferring parameter posteriors given observed states. The inverse predictor φ does provide an implicit inverse mapping, but the framing overstates what is experimentally demonstrated.
+- **No theoretical guarantee for the surrogate base flow.** The Adjoint Matching framework (Domingo-Enrich et al., 2025) assumes a base drift that transports a known prior to a well-defined data distribution. The paper constructs \(v_{t,\alpha}^{\text{base}}\) as an interpolation toward a point estimate \(\hat{\alpha}_1 = \varphi(\hat{x}_1)\) from the inverse predictor (Section 3.2). The paper is transparent that this is a *surrogate*, but there is no analysis of what distribution, if any, this surrogate flow actually transports to, nor under what conditions the AM consistency guarantees carry over. The empirical results are encouraging, but the paper would benefit from explicitly stating the gap between the AM theory and the surrogate construction, and discussing what empirical conditions are needed for the approach to be reliable.
 
-- **No quantitative evaluation for the natural-image experiment (Section 4.6)**: The cross-domain recoloring results are only qualitative (Figure 6), with no FID or other sample-quality metrics reported. This limits the strength of the cross-domain utility claim and reads as preliminary.
+- **The natural-image experiment is loosely coupled to the paper's stated premise.** Section 4.6 uses a polynomial color transform as the latent "parameter" \(\alpha\) and optimizes PickScore with a fixed prompt. No PDE or physical law is involved. While the paper frames this as "cross-domain utility," the connection to the claimed contribution of "physics-constrained generation" and "inverse problems" is tenuous. The comparison (vanilla AM vs. joint model with recoloring) does not isolate the benefit of the joint flow over, e.g., applying the same color transform post-hoc to vanilla AM outputs. This experiment neither strengthens the physics-aware claims nor constitutes a compelling demonstration of cross-domain generality.
 
-- **No systematic sensitivity analysis of the inverse predictor φ**: The method depends on φ to provide parameter estimates for the surrogate base flow and regularization. In regimes where φ produces degenerate estimates (e.g., the fragmented permeability in Figure 2), fine-tuning outcomes could be affected, but the paper does not examine this sensitivity or discuss failure modes. The paper acknowledges φ artifacts qualitatively but provides no quantitative study.
+- **Single-training-run evaluation.** All tables report ± values computed over 256 samples from a single training run. The fine-tuning process involves adversarial-like joint evolution and stochastic control optimization; stability across random seeds is not demonstrated. While single-run evaluation is common in large-scale generative ML, multi-seed runs (3–5) would substantially strengthen confidence in the reported metrics, particularly given the sensitivity of the AM optimization.
+
+- **No direct assessment of φ quality before fine-tuning.** The method's surrogate base flow and residual evaluation both depend critically on the inverse predictor \(\varphi\). While \(\text{MMD}_\alpha\) is reported after fine-tuning, there is no pre-fine-tuning metric for \(\varphi\)'s accuracy (e.g., MMD of \(\alpha\) produced by \(\varphi\) on base samples vs. the reference set). This makes it difficult to disentangle whether the joint flow is genuinely improving parameter recovery or merely correcting a poor \(\varphi\).
 
 ### Trivial
 
-- The Helmholtz/Stokes results for PBFM are described as "failure" or "non-convergence" in passing without analysis of why PBFM struggles on these tasks, which would help contextualize the comparison.
+- The PBFM baseline for Stokes is reported as failing to converge (Section 4.5). The paper acknowledges this honestly but provides limited detail on what hyperparameter configurations were attempted, making it harder to assess whether the failure is inherent to PBFM or a configuration issue. Providing a brief note on attempted tuning would improve transparency.
 
 ## Nice-to-Haves
 
-- Demonstrating true conditional inference of α given an observed x (e.g., via guidance on x) would strengthen the inverse-problem framing.
-- Trajectory visualizations showing how (x_t, α_t) evolve jointly during fine-tuning would help build intuition for the joint dynamics.
-- An ablation isolating the effect of κ in the scaled memoryless schedule, to verify its practical importance as a stabilisation knob.
+- A conditional flow-matching model trained directly on \((x, \alpha)\) pairs (generated from the same PDE solvers, since all experiments use synthetic data) would serve as an informative upper bound, quantifying the gap between unsupervised fine-tuning and the fully supervised ideal. This is not required to support the paper's claims (which are about the no-paired-data setting), but would add valuable context.
+
+- Trajectory-level visualizations of joint \((x_t, \alpha_t)\) paths during sampling would help readers understand whether the \(\alpha\) flow genuinely sharpens \(\varphi\)'s point estimates into a non-trivial distribution or merely regularizes the endpoint.
+
+- A sensitivity analysis showing how final metrics change when \(\varphi\) is trained to different levels of residual (e.g., early-stopped vs. fully converged) would illuminate the dependence on \(\varphi\) quality.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"MMD_x reported against noisy base dataset, not clean reference" (Harsh Critic)**: The paper is explicit about which reference is used: Figure 3(b) states "MMD_x between the fine-tuned samples and the base dataset," while Tables 1–2 report MMD against D_ref (the clean synthetic dataset). Both references are meaningful for different purposes, and the text is clear. This is not a weakness.
+- **"The joint evolution over α is built on an unprincipled surrogate base flow that invalidates the Adjoint Matching guarantee"** — The paper explicitly labels this as a *surrogate* and does not claim theoretical guarantees for it. The AM framework is used as a practical optimization scaffold. The empirical results support the approach. The concern is downgraded to a Minor weakness acknowledging the theoretical gap.
 
-- **"Lemma is straightforward, theoretical contribution minimal" (Harsh Critic)**: The paper does not claim major theoretical novelty for the scaled schedule; it's presented as a practical extension. The lemma is in the appendix and the contribution is appropriately scoped.
+- **"Missing baselines: conditional FM on joint (x,α)"** — The paper's core claim is about operating *without paired data*. Comparing against a method that uses paired data is a different problem setting. Moved to Nice-to-Haves.
 
-- **"Validity of surrogate base flow for α not fully justified" (Harsh Critic)**: The surrogate base flow construction using one-step estimates is clearly described and motivated. Whether it satisfies all theoretical assumptions of Adjoint Matching is a reasonable question but the empirical results suggest it works in practice. The paper acknowledges this is an approximation (Section 3.2: "Since no ground-truth flow of α for the base model is available...").
+- **"No assessment of φ quality"** — The paper does report \(\text{MMD}_\alpha\), which provides distributional assessment. The concern about pre-fine-tuning φ quality is retained as a Minor weakness.
 
-- **Formatting/style concerns and typos**: These are parser artifacts and not author errors.
+- **"Variance across training runs is not reported"** — Retained as a Minor point, but framed accurately as a standard limitation rather than a methodological failure.
 
-- **Missing related works / references**: Per instructions, I do not flag missing related works as I cannot verify their existence or relevance.
+- **"ECI and PBFM comparisons are unfair/misconfigured"** — The paper reports ECI and PBFM results honestly. For ECI, achieving zero BC error with absurdly large residuals is a legitimate empirical finding about projection-based methods, not a misconfiguration. For PBFM on Stokes, the paper reports the failure and provides residual numbers. The concern is downgraded to Trivial.
+
+- **"Natural-image experiment is disconnected"** — Retained as a Minor weakness about loose coupling to the physics premise, but the harsh critic's claim that "one could simply apply the same polynomial transform post-hoc" misunderstands the joint optimization. The joint flow allows coordinated adjustments between the image and the color transform during generation.
+
+- **"What paired data means is never clarified"** — The paper explicitly clarifies this in the abstract ("without paired parameter-solution training data"), introduction, and related work (Section 2, last paragraph). Removed.
+
+- **"Weak-form residual details deferred entirely to Appendix D.3 (missing)"** — The appendix was stripped by the parser, not missing in the original submission. Removed per hard rules.
+
+- **"Darcy experiment is a narrow test"** — The paper tests on four distinct PDE families plus images. Removed.
+
+- **"Elasticity BC improvement is marginal"** — An order-of-magnitude reduction (7×10⁻⁵ to 1.7×10⁻⁶) is not marginal. Removed.
+
+- **"Stokes — no ground truth for ν shown"** — The paper computes \(\text{MMD}_\alpha\) against a reference set explicitly described as "a synthetic, clean dataset generated under the target PDE specification." Removed.
+
+- **"The claim that regularization preserves sample-specific detail is never empirically isolated beyond a single λ-sweep on Darcy"** — Figure 3b directly addresses this with an \(\text{MMD}_x\) sweep over \(\lambda_f\). Removed.
+
+- **"The paper never clarifies what paired data means"** — Addressed above. Removed.
 
 ## Novel Insights
 
-The paper's key insight is that post-training fine-tuning via Adjoint Matching can simultaneously enforce PDE constraints and recover latent parameters without paired training data, by constructing a surrogate base flow for the parameter from an inverse predictor and jointly evolving both state and parameter vector fields. This combination of weak-form physics residuals with adjoint-based distribution tilting for the joint (state, parameter) setting is a non-obvious synthesis that bridges reward-based fine-tuning and physics-informed learning in a practically useful way. The empirical demonstration that this approach works across diverse PDE families with controlled model misspecification — and can even extend to non-physics domains (image recoloring) — suggests the framework is more general than initially apparent.
+None beyond the paper's own contributions. The reviewers did not surface a genuinely novel framing or synthesis that the paper itself does not already articulate.
 
 ## Suggestions
 
-- Add the conditioning-only ablation (state flow conditioned on α_t from φ, no separate α flow) to isolate the joint flow mechanism. This would substantially strengthen the paper's central claim.
-- Either soften the "inverse problem" language in the abstract/introduction or add a demonstration of inferring α given an observed x.
-- Add at least one quantitative metric (e.g., FID) to the natural-image experiment.
-- Include a brief discussion of φ's failure modes and how they might affect fine-tuning, even if just qualitative.
+- Add a paragraph in Section 3.2 explicitly acknowledging that the surrogate base flow for \(\alpha\) does not inherit the full theoretical guarantees of Adjoint Matching, and discuss the empirical conditions under which the approach is expected to be reliable.
+- Run 3–5 independent fine-tuning seeds for at least one PDE setting (Darcy would suffice) and report mean ± std of key metrics to demonstrate stability.
+- Consider either strengthening the natural-image experiment's connection to the physics theme (e.g., replacing it with an additional physical system) or reframing it more modestly as a preliminary demonstration of architectural generality.
 
 ## Score and Decision
 
 **Anchor comparison:**
 
-| Anchor | Path | Avg Score | Comparison |
-|--------|------|-----------|------------|
-| PBFM | tAf1KI3d4X | 5.50 (Accept Poster) | Closest comparator — training-time physics-constrained FM. Our paper addresses a harder setting (no paired parameters, post-training) with broader experiments but has a comparable methodological gap (missing ablation vs scalability concerns). |
-| PMFM | lRGAMx3f6N | 4.00 (Reject) | Hard physics constraints via manifold projection. Our paper has clearer experimental design, better baselines, and a more practical contribution. |
-| PIDDM | hW7P3x9W8A | 4.00 (Withdrawn) | Post-hoc distillation for PDE constraints. Our paper has a cleaner contribution story and better-supported claims, though both share some overclaim issues. |
-| FT-FM | vGWA8wqJ7D | 4.00 (Withdrawn) | Fine-tuning flow matching via MLE. Our paper has substantially broader experiments and a clearer contribution. |
-| Flow Marching | nnRB90w2kv | 2.50 (Withdrawn) | Generative PDE foundation model. Our paper has far more rigorous experimental design. |
-| Weak Gradient | rgyzkW880F | 5.00 (Reject) | Different topic (gradient estimation), less directly comparable. |
+| Anchor | Avg Score | Comparison |
+|---|---|---|
+| tpYeermigp (Physics-Informed Diffusion Models) | 5.75 | Similar topic but narrower scope (one main idea, two experiments). Our paper has broader methodological novelty and experimental breadth. Our paper is stronger. |
+| MKP1g8wU0P (Spectral-Refiner) | 6.00 | Accepted paper with a novel fine-tuning paradigm, strong theory, solid experiments. Our paper has broader experimental validation but less theoretical grounding. Comparable quality. |
+| btaxn8Xce6 (Astral: PINN error majorants) | 5.33 | Rejected. Novel idea but limited experimental scope. Our paper is substantially stronger in experimental validation. |
+| DoDNJdDntB (FM for Posterior Inference) | 4.20 | Rejected. Similar flow-matching fine-tuning theme but insufficient experiments, limited baselines. Our paper is substantially stronger. |
+| Da3j02cHe0 (Physics-Constrained Diffusion) | 3.60 | Rejected. Limited novelty, experimental concerns. Our paper is substantially stronger. |
+| zuuhtmK1Ub (Diff. Implicit Solver on GNNs) | 2.00 | Rejected. Low quality. Our paper is clearly stronger. |
 
-The paper under review is most comparable to PBFM (5.50) in topic and contribution level. It addresses a more challenging setting (no paired parameter data) with broader experiments (4 PDEs + images vs 3 PDEs), which pushes upward, but the missing ablation to isolate the joint flow mechanism pulls downward. On balance, the contributions are real and well-supported enough to warrant acceptance at a poster level, with the expectation that the missing ablation and inverse-problem framing are addressed in revision.
+The paper under review presents a genuinely novel method combining weak-form PDE residuals with Adjoint Matching for post-training fine-tuning, and the joint state-parameter evolution is a creative solution to the no-paired-data inverse problem. The experimental validation across four PDE systems with multiple baselines and ablations is thorough. The main limitations — the theoretical gap in the surrogate base flow, the single-seed evaluation, and the loosely coupled image experiment — are addressable and do not undermine the core contribution. Placing this against the anchors: it is stronger than tpYeermigp (5.75, accepted) and comparable to MKP1g8wU0P (6.00, accepted) in contribution quality, though with less theoretical grounding but broader experiments. Score: **6.0**, Accept.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -57,6 +57,20 @@ implementation details, or large artifacts impractical to include in a submissio
 
 - The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
 
+- REMOVE or DOWNGRADE weaknesses that evaluate the paper against the wrong class of expectations. A benchmark paper should not be faulted for lacking a novel method; a position paper should not be faulted for lacking experiments; a dataset paper should not be faulted for not proposing an algorithm; a theoretical paper should not be faulted for missing large-scale empirical validation. First identify what kind of paper this is, then drop weaknesses that only make sense against a different class.
+
+- REMOVE weaknesses that amount to "the paper should also cover Y / domain Z / additional tasks" when doing so would turn the paper into a different, broader paper rather than a stronger version of the one the authors wrote. Depth in the paper's own direction is valid; demands for breadth outside its scope are scope creep and belong in Nice-to-Haves at most.
+
+- DOWNGRADE weaknesses that inflate ordinary methodological gaps into structural/fatal flaws. A missing ablation, a single-seed run, or an under-specified hyperparameter is rarely fatal on its own — keep these in Minor unless the reviewer has shown the gap actually invalidates the central claim.
+
+- REMOVE weaknesses that fixate on verifying individual sentences in isolation (e.g., "this sentence in the intro is not directly supported by Figure 3") when the paper's overall argument and evidence are coherent. Sentence-level pedantry that does not affect the contribution belongs in Trivial or Removed Points.
+
+- DOWNGRADE weaknesses framed as "the authors should add X" when X would not actually change whether the contribution is believable. The test: would addressing this meaningfully shift the accept/reject judgment, or is it a wishlist item? Wishlist items go to Nice-to-Haves.
+
+- Conversely, do not let the harsh reviewer's softened language hide a real structural problem. If a weakness is phrased as "the authors should clarify" but actually describes a flaw that invalidates the result, restore its real severity.
+
+- REMOVE weaknesses that complain the paper does not use methods, models, or baselines the reviewer prefers when the paper's own choices are defensible within its class. Disagreement on taste is not a weakness.
+
 ## Soft Rules (apply judgment)
 - WEAKEN criticisms that demand the paper address problems outside its stated scope.
 A paper about X should be evaluated on whether it does X well, not on whether it also does Y.

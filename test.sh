@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-PAPER="/home/wg25r/review_agent/paper.md"
+PAPER="datasets/deepreview_13k_test/papers/0AYosSFETw.txt"
 # PAPER="/home/wg25r/review_agent/new/ELErARGR5U.md"
 LOG="run.log"
 
