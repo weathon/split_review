@@ -71,6 +71,28 @@ implementation details, or large artifacts impractical to include in a submissio
 
 - REMOVE weaknesses that complain the paper does not use methods, models, or baselines the reviewer prefers when the paper's own choices are defensible within its class. Disagreement on taste is not a weakness.
 
+- REMOVE weaknesses and suggestions that are physically or technically impossible. Verify each ask is actually doable given the architecture, modality, or capability involved. Examples of impossible asks to filter out:
+  - Using a CLIP text encoder as a standalone language model without further training
+  - Asking an LLM (text-only) to directly generate images, video, or audio
+  - Asking an image encoder to produce text without a paired decoder/LM
+  - Requesting that a discrete-token model produce continuous outputs (or vice versa) without architectural change
+  - Demanding gradient-based attribution on a non-differentiable component
+  - Asking that a frozen pretrained model be evaluated on a task whose output space it was never trained for
+  - Requesting comparisons against models that are closed-source / API-only for setups requiring weight access (e.g., probing, fine-tuning, mechanistic interpretability)
+  - Asking for ablations on a component that does not exist in the proposed method
+  - Swapping out a trained-against component at test time and expecting the model to still work (e.g., asking a model trained on ArcFace embeddings to accept FaceNet embeddings; asking a CLIP-conditioned diffusion model to consume DINO features; feeding a different tokenizer's tokens into a pretrained LM). When the model has been trained against a specific input representation, feature space, vocabulary, or upstream module, that choice is baked into the weights. Asking for a "zero-shot swap" experiment without retraining is asking for something the model is not architecturally compatible with.
+
+- REMOVE weaknesses and suggestions that are practically infeasible for an academic submission. The bar is not "could a well-funded industry lab do this" — it is "is this a reasonable ask of the authors given normal academic resources and timelines." Examples to filter out:
+  - Human studies with hundreds or thousands of participants
+  - Pretraining a foundation model from scratch as a baseline
+  - Full-scale evaluation on every benchmark in a domain when the paper covers a representative subset
+  - Multi-seed runs of experiments that cost $100k+ each
+  - Collecting a new large-scale annotated dataset just to validate one claim
+  - Comparing against models that require compute the authors plausibly do not have access to
+  - Long-term longitudinal studies for a conference submission
+
+  If the underlying concern is real but the specific ask is infeasible, keep the concern but reframe the suggestion to something an academic author could plausibly do, or move it to Nice-to-Haves.
+
 ## Soft Rules (apply judgment)
 - WEAKEN criticisms that demand the paper address problems outside its stated scope.
 A paper about X should be evaluated on whether it does X well, not on whether it also does Y.
