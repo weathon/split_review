@@ -3,15 +3,15 @@ set -e
 
 cd "$(dirname "$0")"
 
-PAPER="datasets/deepreview_13k_test/papers/0AYosSFETw.txt"
+PAPER="../review_agent/paper.md"
 # PAPER="/home/wg25r/review_agent/new/ELErARGR5U.md"
 LOG="run.log"
 
 export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="deepseek-v4-pro"
-export MERGER_MODEL="deepseek-v4-pro"
-export NEUTRAL_MODEL="ollama:glm-5.1:cloud"
+export HARSH_MODEL="deepseek-v4-flash"
+export MERGER_MODEL="deepseek-v4-flash"
+export NEUTRAL_MODEL="deepseek-v4-flash"
 
 # export HARSH_MODEL="ollama:glm-5.1:cloud"
 # export MERGER_MODEL="ollama:glm-5.1:cloud"

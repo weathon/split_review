@@ -10,12 +10,12 @@ export OPENAI_DEFAULT_MODEL="glm-5.1"
 export HARSH_MODEL="deepseek-v4-flash"
 export MERGER_MODEL="deepseek-v4-flash"
 export NEUTRAL_MODEL="deepseek-v4-flash"
-export OUTPUT_CSV="bench_scores_deepreview_flash.csv"
-export MERGE_LOG="pipeline_whole_deepreview_flash.log"
+export OUTPUT_CSV="bench_scores_deepreview_flash_diverse.csv"
+export MERGE_LOG="pipeline_whole_deepreview_flash_diverse.log"
 export CONCURRENCY=50
 export MAX_PAPERS=2000
 export CALIBRATION_SET="2026"
-export REVIEWS_DIR="training_review"
+export REVIEWS_DIR="training_review_diverse"
 
 ollama serve & 
 
