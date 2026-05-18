@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-PAPER="../review_agent/paper.md"
+PAPER="../review_agent/new/papers/paper.md"
 # PAPER="/home/wg25r/review_agent/new/ELErARGR5U.md"
 LOG="run.log"
 
