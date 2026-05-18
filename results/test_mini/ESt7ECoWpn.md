@@ -1,18 +1,12 @@
-Now I have sufficient calibration context. Let me compose the final review.
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
-
-This paper proposes a Noise Variance Optimization (NVO) game to address per-instance differential privacy (pDP). The key idea is to model each data instance as a player in a common-interest sequential game, where players choose noise variances from a discrete set to satisfy ϵ-pDP while optimizing statistical utility. The paper claims that Nash equilibria of this game guarantee ϵ-pDP under a condition on the minimum variance, and demonstrates the approach via best response dynamics (BRD) and an approximate enumeration (AE) genetic algorithm on NBA player data.
+This paper proposes a game-theoretic framework (the NVO game) for optimizing per-instance additive Laplace noise variances in differential privacy. Data instances act as players selecting noise variances from a discrete set; the paper claims that any Nash equilibrium of this common-interest game guarantees ε-per-instance DP. Experiments on an NBA player dataset show that the resulting mechanism improves statistical utility over the conventional uniform-noise Laplace mechanism on distributional metrics and a downstream regression task.
 
 ## Strengths
-
-- **Novel game-theoretic formulation of per-instance noise selection.** The paper correctly identifies the interdependency problem in per-instance DP (changing noise for one instance affects pDP of others) and models it as a cooperative sequential game with shared payoffs. This is a creative framing of a genuine challenge that prior work (Wang, 2010) had identified but not solved.
-
-- **Measurable utility improvements over standard Laplace on the tested setting.** In the NBA height experiment (Table 1), the NVO game reduces KL divergence from 0.420 (Laplace) to 0.142 (BRD) at ϵ=1, and improves cosine similarity from 0.892 to 0.984. These gains are consistent across ϵ∈{1,2,4,8} and extend to the regression task (Table 2).
-
-- **Practical computational cost for BRD.** The best-response dynamics algorithm converges in ~5 minutes, whereas the genetic algorithm baseline requires >2400 minutes. This demonstrates that a practical algorithm exists for finding reasonable strategies.
-
-- **Downstream task validation.** The regression experiment (height→weight prediction) shows that the improved distributional fidelity translates to better prediction accuracy (e.g., at ϵ=8, BRD RMSE 0.035 vs. Laplace 0.101, vs. non-private 0.037).
+- **Novel game-theoretic formulation of the per-instance noise allocation problem.** The paper correctly identifies and explicitly models the interdependency challenge—altering one instance's noise affects the pDP of others—which prior per-instance DP work does not address (Section 4.2, lines 26–28). Framing this as a common-interest sequential game is a genuinely creative approach that could open a new direction for non-uniform noise mechanisms.
+- **Practical algorithm with a favorable computation-utility trade-off.** The Best Response Dynamics (BRD) algorithm achieves competitive utility (KL divergence 0.91 vs. Laplace's 0.65 for ε=1) while requiring only 188 seconds versus the AE genetic algorithm's 17,320 seconds (Table 1). This demonstrates that the BRD approach is computationally feasible for datasets of moderate size.
+- **Demonstrated improvement over the uniform-noise Laplace baseline.** Table 1 reports statistically significant (99.53% confidence) improvements across four distributional metrics. The downstream regression task (Table 2) shows that the NVO game's RMSE is only 8.6% higher than the original data for ε=1, while the conventional Laplace mechanism fares worse. This confirms that non-uniform noise allocation can yield practical utility gains under the same nominal ε.
 
 ## Weaknesses
 
@@ -20,51 +14,54 @@ This paper proposes a Noise Variance Optimization (NVO) game to address per-inst
 None.
 
 ### Major
-- **The evaluation is far too narrow to support the claimed "dramatic" superiority.** Only one real dataset (NBA players) has results shown in the main manuscript; a second dataset (personal income) is mentioned but results are not presented. Only one baseline (standard Laplace mechanism) is compared — no competing per-instance DP methods from the pDP literature are included, no non-Laplace additive mechanisms, and no data-independent noise schemes. The experiments lack confidence intervals, error bars, or multiple runs. The primary results (Table 1) cover only one feature (height). No ablation studies explore the effect of K (number of bins), the variance set ν, or dataset size. The paper claims "dramatic" superiority, but with a single baseline on a single dataset, the evidence is insufficient to support this claim.
-
-- **Conceptually confused framing around the "random sampling query."** Remark 3.1 claims that protecting the random sampling query suffices for all statistical queries via the post-processing theorem. This is incorrect: releasing a single noisy sample from a dataset does not allow one to compute arbitrary statistics of the full dataset — the output is one data point, not a summary statistic. The paper's actual mechanism (adding per-instance noise to the full dataset and then computing statistics) does not rely on this claim, but the remark overstates the generality of the framework and the post-processing argument is misplaced. This weakens the paper's claimed universality and should be corrected.
+- **Theorem 4.1's condition is suspicious and the core privacy guarantee is unverified.** The theorem states that if $b_{\min} \geq 1/\log(1+(|\mathcal{D}|-1)(\exp(\epsilon)-1))$, then any Nash equilibrium ensures ε-pDP. This condition (a) does not explicitly reference the query sensitivity Δq, which is definitional to any DP guarantee, (b) implies that required noise vanishes as $|\mathcal{D}| \to \infty$, a property that would need far more justification than the brief Remark 4.2 provides, and (c) depends only on the minimum variance in the action set rather than on the joint strategy profile actually played. The proof is relegated to an appendix that was stripped from this submission. Without a verifiable proof, the paper's central theoretical claim—that NE strategies guarantee DP—rests on unsubstantiated ground. This undermines the core contribution.
+- **Definition 3.1 misaligns with the established per-instance DP literature.** The paper cites Wang (2019) but defines pDP as checking the privacy inequality only for a single fixed removal from a single fixed dataset $Z$. Standard pDP (and indeed any meaningful per-instance notion) considers the *maximum* over all datasets that differ on the given point, not just removal from one specific dataset. The paper's definition is strictly weaker—it is a per-dataset, per-instance notion, not per-instance DP as commonly understood. This conflation is misleading: the contribution is better described as non-uniform noise allocation under *dataset-specific* DP, not "per-instance DP" in the established sense.
+- **Evaluation is too narrow to support the claimed superiority.** (i) Only one dataset (NBA players) is fully reported, despite a second dataset (personal income) being mentioned. (ii) The only baseline is the conventional uniform-noise Laplace mechanism. No comparisons are made to other per-instance mechanisms, local/smooth sensitivity approaches, propose-test-release, or even a simple per-instance optimization without game theory. (iii) The distributional metrics (KL, JS, cosine similarity) are computed on the same discretized histogram representation used during optimization, creating a favorable circularity. (iv) The regression results (Table 2) report only average RMSE without variance or confidence intervals across independent runs.
 
 ### Minor
-- **Unaddressed privacy gap from discretization.** The paper evaluates the pDP condition on categorized bins (discrete intervals of width 1/K), but the mechanism adds continuous Laplace noise to the original continuous values. Showing that pDP holds on the discrete representative values does not, on its own, guarantee that it holds for all subsets S ⊆ Range(ℳ) in the continuous output space as required by Definition 3.1. The paper provides no analysis bridging this gap. While a more careful argument might close it (e.g., using the structure of Laplace noise), it is absent.
-
-- **Theorem 4.1 requires clearer exposition in the main text.** The condition in Equation 9 (a bound on b_min) is stated without derivation or sketch. The connection between this variance-set condition and the claim that an NE strategy profile guarantees pDP is not explained — the main text asserts the result but does not even outline why the payoff structure forces players to choose variances that satisfy the condition. (A proof may exist in a stripped appendix, but the main text is self-contained enough to need at least a sketch.)
+- **The privacy assurance payoff evaluation is approximate with no error bound.** Computing $p_{\epsilon,i}$ (whether an instance satisfies ε-pDP) requires integrating over the mechanism's continuous output space. The paper uses manual integration over discretized intervals but provides no analysis of how discretization error affects the DP guarantee. The entire NE-finding process operates on an approximate payoff, yet the guarantee is stated as absolute.
+- **The BRD algorithm lacks key convergence analysis.** Convergence is claimed after $|\mathcal{D}|$ rounds based on the game being a potential game, but no formal proof or analysis of the effect of discretization/payoff approximation on convergence is given. Initial strategy profiles, stopping criteria, and tie-breaking are not specified.
+- **The discrete variance set is small and arbitrary (5 values).** The paper acknowledges this limitation but provides no sensitivity analysis—how do results change with more or fewer variance candidates? The values $\{0.2, 0.33, 1, 2, 3\} \times \Delta q/\epsilon$ include two values well below the standard Laplace scale ($\Delta q/\epsilon$) without independent justification.
+- **The "extensibility to all statistical queries" claim (Remark 3.1) is overstated.** While the random sampling query is fundamental, the post-processing theorem only guarantees that *if* the mechanism is DP for the sampling query, then post-processing preserves DP. This does not automatically mean that achieving pDP for random sampling queries gives pDP for arbitrary queries as structured in practice—the argument conflates the query answered with how the output is used.
 
 ### Trivial
-- "Differentially Pivate" in the title is a typo ("Private").
-- Variable naming in Table 1 (e.g., "SD" for standard deviation) could be expanded for clarity.
+- There are minor typographical errors in the paper (e.g., "Pivate" in the title, "Nguyeˆn" with diacritic corruption). These are formatting artifacts from the PDF extraction process and do not reflect on the original submission.
 
 ## Nice-to-Haves
-- A comparison with even one additional per-instance DP baseline (e.g., per-instance Gaussian accounting) would substantially strengthen the evaluation.
-- Ablation studies varying K (number of categorization bins) and the composition of ν would help assess robustness.
+- Reporting results on the second dataset (personal income) would significantly strengthen the empirical claims.
+- Comparing against baselines such as smooth sensitivity, propose-test-release, or a simple per-instance optimization (gradient descent on variances without game theory) would clarify whether the game-theoretic machinery is necessary or decorative.
+- Bounding the discretization error in the privacy assurance payoff would greatly increase confidence that the computed NE actually corresponds to a DP mechanism.
 
 ## Removed Points
-- **Criticism about Theorem 4.1's logical structure** (Point 1 from Harsh Critic). The reviewer argues that the theorem only gives a condition on the *available* variance set and doesn't link to *chosen* variances at NE, and that if the condition is strong enough, the game is irrelevant. The full proof may appear in the appendix (stripped by the parser), so this criticism cannot be fairly evaluated from the visible text.
-- **Criticism about "unfair comparison" vs. the first dataset not being shown** — the paper explicitly states that a second dataset's results are deferred, and the instruction prohibits penalizing for missing appendix content.
-- **Request for more hyperparameter details** (e.g., regression hyperparameters, number of runs). These are standard implementation details likely documented in code or the appendix; the evaluation would be strengthened by including them, but their absence is not a core flaw.
+- **Reviewer's claim that "Definition 3.1 is precisely standard (ε,0)-DP applied to a fixed removal."** This is factually wrong. Standard (ε,0)-DP requires the inequality to hold for *all* pairs of neighboring datasets, not just one specific removal from one specific dataset. The paper's definition is weaker and non-standard, but it is not "standard DP."
+- **Reviewer's claim that the paper "cannot be rescued by a short proof" and that Theorem 4.1 is "almost certainly incorrect."** Without access to the full proof (stripped appendix), this is speculation. The theorem's condition is suspicious and non-standard, but I cannot declare it definitively incorrect without seeing the proof.
+- **Formatting/typo nitpicks.** These are parser artifacts, not author errors.
+- **Nitpick about missing appendix content.** The parser strips appendix sections from all papers; they exist in the original submission.
+- **Strength Finder's claim about "proof that any NE ensures ε-pDP" as a core strength.** This conflicts with the verified weakness about the theorem being unverified/suspicious, so it is removed as a strength (the paper *claims* this, but we cannot verify it).
 
 ## Novel Insights
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The core insight—formulating per-instance noise allocation as a game and solving for an NE—is genuinely novel and worth pursuing. However, the reviews do not uncover deeper implications beyond what the paper itself proposes.
 
 ## Suggestions
-1. **Clarify or remove Remark 3.1.** The random sampling query framing as a universal query is incorrect and unnecessary. The paper's actual contribution (per-instance noise optimization) stands on its own without this claim.
-2. **Expand experimental evaluation.** Add at least one more dataset, a competing per-instance method, confidence intervals, and ablation studies (varying K, ν, dataset size). The strong qualitative claims need proportionally stronger evidence.
-3. **Address the discretization-to-continuous privacy gap** with a rigorous argument or formally prove that checking pDP on the categorized bins implies it for the full continuous mechanism.
-4. **Provide a sketch of Theorem 4.1's proof in the main text** explaining how the payoff structure forces NE strategies to satisfy the pDP condition, not just that the condition on b_min is sufficient.
+1. **Align the privacy definition with the literature.** Either adopt the standard pDP definition (maximum over all datasets differing on a point) or explicitly rename and clarify that the paper provides a *dataset-specific* DP guarantee, not per-instance DP in the established sense.
+2. **Provide a complete, verifiable privacy proof** for Theorem 4.1 in the main paper (or a clear sketch with the full proof in the appendix) that explicitly accounts for sensitivity and the joint strategy profile. The current condition—depending only on $b_{\min}$, $|\mathcal{D}|$, and $\epsilon$—is too terse to be credible without a detailed derivation.
+3. **Expand the experimental evaluation:** report results on a second dataset, include standard deviations over multiple independent runs, and add at least one non-trivial baseline (e.g., noise scaled by local sensitivity, or a direct optimization without game theory).
 
 ## Score and Decision
 
-**Anchors used for calibration:**
+**Comparison to calibration anchors:**
 
-| Path | Avg Score | Comparison |
+| Anchor Path | Avg Score | Comparison |
 |---|---|---|
-| `/home/.../97tbbvSJ4A.md` (Instance-Level Smoothing) | 3.50 | A paper with a fatal privacy analysis flaw. The current paper has conceptual issues but no obvious fatal flaw. |
-| `/home/.../JG9PoF8o07.md` (Generalized Gaussian) | 4.25 | Limited contribution (Gaussian being near-optimal) and narrow experiments. Comparable experimental narrowness, but current paper has more novelty. |
-| `/home/.../f7ZEcoSdXQ.md` (Incentivizing FL) | 4.75 | Reasonable idea with thin experiments. Similar in having an interesting framing but limited validation. |
-| `/home/.../o4X6UM18rI.md` (Bayes-Nash Privacy) | 5.75 | A novel framework with more thorough experiments (3 datasets). Current paper's experiments are weaker. |
-| `/home/.../txV4dNeusx.md` (Near-Exact Amplification) | 6.25 | Solid theory + experiments. Current paper is substantially less mature. |
-| `/home/.../fbqOEOqurU.md` (Optimality Matrix Mechanism) | 7.00 | Strong theoretical contribution with thorough analysis. Current paper is not in this league. |
+| `txV4dNeusx` (Near-Exact Privacy Amplification, Accept) | 6.25 | Much stronger: rigorous theory, complete experiments, clear contribution. This paper is significantly weaker. |
+| `o4X6UM18rI` (Bayes-Nash Generative Privacy, Reject) | 5.75 | Stronger: game theory + DP, but with 3 datasets, clear formalization, and more thorough evaluation. This paper falls short of this standard. |
+| `g16vmAtJ8x` (Reconstruction Attacks, Reject) | 6.00 | Much stronger empirical work with clear, falsifiable claims and thorough evaluation. |
+| `S6Dn3uyM2p` (DP One Permutation Hashing, Reject) | 4.60 | Comparable novelty level, but that paper had clear verifiable privacy proofs and more extensive experiments. This paper has a more creative idea but weaker execution. |
+| `JG9PoF8o07` (Generalized Gaussian Mechanism, Reject) | 4.25 | Similar tier: interesting idea with execution gaps. That paper had a complete privacy proof; this one's proof is unverifiable and suspicious. |
+| `97tbbvSJ4A` (Instance-Level Smoothing, Reject) | 3.50 | Similar tier: both have questionable privacy guarantees. This paper has a more novel framing but both have fundamental issues with their core privacy analysis. |
+| `HmL2Buf0Ur` (Copyright & Privacy, Reject) | 3.75 | Higher-level conceptual paper. This paper has more concrete experimentation but a shakier theoretical foundation. |
 
-The paper presents a genuinely novel idea (game-theoretic per-instance noise optimization) and shows promising initial results. However, the evaluation is too narrow (one dataset, one baseline, no competing methods, no error bars) to support the strong claims of dramatic superiority. Additionally, the random sampling query framing is conceptually confused and the discretization-to-continuum privacy gap is unaddressed. These issues are addressable with revisions but are significant enough in the current submission. The paper is between the 4.25 (narrow but clean) and 5.75 (more thorough) anchors, closer to the lower end due to conceptual issues compounding the narrow evaluation.
+The paper presents a genuinely creative idea (game-theoretic noise allocation) that could be valuable, but the core theoretical claim is unsubstantiated (Theorem 4.1 has a suspicious condition that is neither standard nor adequately explained), the privacy definition is misaligned with the literature, and the experimental evaluation is too narrow to compensate for the theoretical gaps. Relative to the calibration anchors, the paper falls between the weak-but-interesting papers (3.5–4.25 range) and is notably weaker than papers with complete, verifiable analyses.
 
-MY FINAL SCORE: <score>4.5</score>
+MY FINAL SCORE: <score>3.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

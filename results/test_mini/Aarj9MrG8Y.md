@@ -1,87 +1,85 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information needed to write the final consolidated review. Let me carefully construct it.
 
 ## Summary
 
-This paper proposes a "universal learning principle" for designing graph neural network filters, requiring (1) absolute convergence of the coefficient series and (2) Lipschitz continuity. The authors instantiate this principle with APGNN, which uses exponentially decaying weights (parameter α) and a P-hop aggregation scheme to construct a graph filter that can be extended to infinite depth. They provide convergence bounds, a truncation error bound, and a generalization bound under a continuous-graph setting, and report strong accuracy on 6 out of 8 node-classification benchmarks.
+The paper proposes a "universal learning principle" for GNNs requiring (a) absolute summability of power-series coefficients (guaranteeing convergence) and (b) Lipschitz continuity (guaranteeing stability). It instantiates this principle with APGNN, which uses exponentially decaying learnable coefficients ($\theta_k = \beta_k \alpha^k$) and a $P$-hop filter. The paper provides convergence/truncation-error analysis, a generalization bound (Theorem 2), and experiments on eight homophilic/heterophilic benchmarks showing competitive performance.
 
 ## Strengths
 
-- **Practical filter design with exponential decay (Section 4.3).** APGNN's core idea—using weights θₖ = βₖαᵏ with 0<α<1—is well-motivated. It naturally suppresses high-order neighbor contributions to mitigate oversmoothing while guaranteeing absolute convergence of the series Σ|θₖ| ≤ 1/(1−α). This is a clean, principled way to enable arbitrarily deep filters with bounded error.
+- **Practical filter design with provable convergence guarantees.** The APGNN architecture — exponential decay $\alpha^k$ plus bounded learnable $\beta_k$ — cleanly ensures $\|\theta\|_1 \le 1/(1-\alpha)$, satisfying the sufficient convergence condition for the power series. The $K$-order truncation error bound $\alpha^{K+1}/(1-\alpha)$ is graph-independent and explicitly derived (lines 164–173). This is a principled way to construct deep polynomial filters without worrying about divergence.
 
-- **P-hop filter for parameter efficiency (Section 4.3, Figure 3(b)).** The extension gᵦ^{K,P}(λ) = Σβₖαᵏ(1−λ)ᵏᴾ reduces the number of learnable coefficients while retaining an effective receptive field of KP. Figure 3(b) shows that for fixed total order T=KP=60, increasing P from 1 to 6 improves accuracy on heterophilic datasets with no increase in parameters—a pragmatic engineering contribution.
+- **$P$-hop filter with theoretical trade-off analysis.** The $P$-hop extension (lines 177–178) reduces the required polynomial order: $K \ge \mathcal{O}(P^{-1}\log_{1-\delta}\varepsilon)$ vs. $\mathcal{O}(\log(1/\varepsilon))$ for standard truncation, with Lipschitz constant $P\alpha/(1-\alpha)^2$. The empirical study (Figure 3) validates the trade-off, showing accuracy peaking at moderate $P$ then degrading — consistent with the stability argument.
 
-- **Unification of existing methods under the framework (Section 4.2).** The paper correctly shows that PPNP, DAGNN, and GPR-GNN all satisfy the proposed convergence and Lipschitz conditions (though DAGNN only for finite K). This positions the framework as a unifying perspective, which is useful for contextualizing prior work.
+- **Generalization bound with logarithmic dependence on $K$.** Theorem 2 gives a bound $\mathcal{O}(\sqrt{d\log K / n_l})$ in the model complexity term. The paper applies this to DAGNN ($M=K$, $L_M=K(K+1)/2$) and GPR-GNN ($M=1$, $L_M=K$), showing APGNN's terms scale favorably. While the bound uses inexplicit constants, the comparison is conceptually informative.
 
-- **Strong empirical performance on diverse benchmarks (Table 1).** APGNN achieves the highest average accuracy on 6 of 8 datasets spanning homophilic (Cora, Citeseer, Pubmed, Wiki-CS, MS Academic) and heterophilic graphs (Cornell, Wisconsin, Texas). The results are competitive across both settings, suggesting the APGNN design is broadly effective.
+- **Competitive empirical results across diverse benchmarks.** APGNN achieves top accuracy on most of the eight datasets (Table 1), covering both homophilic and heterophilic graphs, which suggests the design has practical merit.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The generalization comparison against GPR-GNN and DAGNN is misleading for practical parameter choices.** Proposition 1 and the discussion in Section 5 claim APGNN has stronger generalization "as K increases," showing asymptotic scaling O(√(log K)) for APGNN versus O(K) for GPR-GNN and O(K²) for DAGNN. This asymptotic claim is technically correct: APGNN's second complexity term α/(1−α)² is constant in K while competitors' grow. However, for the finite K=10 used in the experiments and typical α∈[0.6,0.9], APGNN's bound terms are numerically **worse**. For α=0.9, APGNN's Lipschitz term is 90 vs. GPR-GNN's 10 and DAGNN's 55, and its ℓ₁-norm term ≈6.5 vs. GPR-GNN's 1. The paper presents the comparison as if APGNN's bound is uniformly tighter, without acknowledging this trade-off between finite-K and asymptotic regimes. This undermines the advertised theoretical advantage. The authors should either specify the asymptotic nature of the claim clearly or provide a fair comparison at the finite K used in practice.
+- **Lemma 1 and Theorem 1 incorrectly claim an "if and only if" condition.** The lemma states $\sum a_k \gamma^k$ converges uniformly and absolutely iff $\sum a_k$ converges absolutely. The "if" (sufficiency) direction is correct: $\sum |a_k| < \infty$ implies $\sum |a_k \gamma^k| \le \sum |a_k| < \infty$ for $|\gamma|\le 1$, with uniform convergence via the Weierstrass M-test. However, the "only if" (necessity) direction is false: take $a_k = 1$ and $\gamma = 0.5$, then $\sum (0.5)^k$ converges absolutely but $\sum 1$ diverges. Theorem 1 inherits this error for the matrix setting — e.g., if $\tilde{\mathbf{A}} = 0$, the matrix series $\sum \theta_k \tilde{\mathbf{A}}^k = \theta_0 I$ converges regardless of $\sum |\theta_k|$. This does **not** invalidate APGNN's practical guarantees (the sufficient condition is what the model uses), but it undermines the paper's claim of a *necessary and sufficient* characterization, and weakens the argument that methods like DAGNN *must* diverge at infinite depth based on this criterion. The paper should present the condition as sufficient only, which still yields a useful design principle.
 
-2. **The experimental evaluation procedure is underspecified.** The paper states: "To ensure a fair comparison with the compared methods, we also applied our optimal hyperparameters to them, selecting the maximum value to display" (Section 6.1). This sentence is critically ambiguous. If "our optimal hyperparameters" refers to APGNN's tuned hyperparameters being imposed on baselines, the comparison is meaningless. A more charitable reading is that the authors performed a hyperparameter search over each baseline and reported the best result, but the text does not describe what hyperparameters were searched, what ranges were used, or whether each baseline's key knobs (learning rate, weight decay, dropout, and especially polynomial order K) were tuned independently. Without this detail, readers cannot assess whether the reported gains in Table 1 reflect APGNN's superiority or simply more extensive tuning. Given that K=10 is fixed for all baselines (line 278) but APGNN tunes α and P, the playing field may not be level.
+- **Experimental reporting raises fairness concerns.** The paper states (line 279): "To ensure a fair comparison with the compared methods, we also applied our optimal hyperparameters to them, selecting the maximum value to display." This is ambiguous and suggests cherry-picking — reporting the maximum across hyperparameter configurations chosen *after* seeing APGNN's optimal setup is not standard practice. Additionally, the polynomial order $K$ is fixed to 10 for all baselines (ChebNet, GPR-GNN, BernNet, etc.) while APGNN can use larger $K$ (tested up to 20 in Figure 2). Since larger $K$ can boost performance, this confounds the comparison: it is unclear whether APGNN's advantage comes from the filter design or from simply using more parameters. A fair comparison requires either fixing $K$ across all methods or tuning it individually for each.
 
 ### Minor
 
-3. **The "universal learning principle" has limited theoretical novelty.** Theorem 1 states that ΣθₖÃᵏ converges uniformly and absolutely iff Σ|θₖ| converges, given ‖Ã‖₂ ≤ 1. This is a direct consequence of the Weierstrass M-test applied to the spectral decomposition and is a standard result in functional analysis (it appears in essentially this form in Gama et al. 2020 and related spectral GNN literature). The Lipschitz condition is also standard for stability. The paper's contribution is not the principle itself but its application as a design guideline for GNNs, which is a reasonable contribution—but the paper overstates the novelty by calling it a "universal learning principle."
+- **Lipschitz continuity is presented as a required part of the "universal principle" but only justified informally.** The paper states (lines 99–100) that Lipschitz continuity ensures eigenvalue perturbations of at most $\epsilon$ cause at most $L\epsilon$ change in the filter output — a reasonable intuition. However, no formal stability theorem is proved, and the necessity of this condition for all well-behaved GNNs is asserted rather than derived. Calling this a "universal learning principle" overstates what is essentially a design desideratum. The paper would benefit from either proving that Lipschitz continuity follows from the convergence condition (for the considered filter class) or explicitly characterizing it as a design heuristic rather than a necessary principle.
 
-4. **The generalization bound (Theorem 2) relies on a continuous-graph setting that is not connected to the experiments.** The analysis in Section 5 assumes an underlying probability distribution over ℝᵈ and a continuous graph function A(·,·), from which the observed discrete graph is sampled. This is a valid theoretical framework (used in prior work), but the bound involves an unspecified constant C "related to the graph function" and depends on an integral operator that is never instantiated. The paper does not establish any quantitative connection between this bound and the empirical performance on benchmark graphs. While qualitative insights from such bounds (e.g., dependence on Lipschitz constant and ℓ₁-norm) are useful, the claim that the bound "guarantees the generalization ability theoretically" (Section 1) is overstated.
+- **Theorem 2 uses imprecise notation.** The bound (line 237) uses $\lesssim$ without explicit constants, and the statement "guarantees an approximation error of at most $O(\sqrt{\log(1/\tau)/n_l})$ with probability at least $1-O(\tau)$" is too vague for a theorem — $\tau$ is not defined. The continuous-to-discrete transition ($h_{\mathbf{w},\theta}$ vs. $\hat{h}_{\mathbf{w},\theta}$) is not accompanied by a quantified approximation error, making the bound's applicability unclear without the appendix. While $\lesssim$ is common in ML theory, the additional vagueness about $\tau$ and the missing approximation error quantification make this theorem hard to evaluate as stated.
 
-5. **The P-hop filter's eigenvalue-gap assumption may not hold on the tested graphs.** The bound in Section 4.3 assumes nonzero eigenvalues satisfy λᵢ ∈ [δ, 2−δ] for some δ>0. This fails for eigenvalues near 0 (disconnected components) or near 2 (bipartite/near-bipartite structures). Heterophilic datasets like Cornell, Wisconsin, and Texas are known to have eigenvalues near 2, yet the paper applies the P-hop filter analysis to these datasets without discussing whether the assumption holds. The bound's qualitative insight (larger P reduces required K) remains useful, but its strict applicability is limited.
+- **The claim that DAGNN cannot be extended to infinite depth is too categorical.** The paper states (lines 128) that DAGNN's constraint $0 \le \theta_k \le 1$ "cannot guarantee the convergence" as $K \to \infty$, which is true — but this does not mean DAGNN's filter *diverges* for any graph. Depending on the graph's spectral properties, the series might still converge. The paper's framing implies a stronger conclusion than the (incorrectly justified) criterion supports.
 
 ### Trivial
-None.
+
+- None that survived verification (parser artifacts excluded per instructions).
 
 ## Nice-to-Haves
 
-- An ablation study isolating the effect of the exponential decay: compare APGNN against a version with α=1 (uniform coefficients) but the same learnable βₖ, to confirm the decay mechanism itself drives improvements.
-- Oversmoothing diagnostics (e.g., Dirichlet energy vs. depth) for APGNN vs. DAGNN vs. GPR-GNN across the benchmarks, to connect the claimed suppression of high-order information to observable behavior.
-- A discussion of the mismatch between the ramp loss used in the theoretical risk R̂(h) (Equation 21) and the cross-entropy loss used in practice.
+- **Show truly deep performance.** The paper's narrative emphasizes "infinite depth," but experiments only go up to $K=20$. Demonstrating stable accuracy at $K=50$ or $100$ on at least one dataset would substantially strengthen the claim.
+- **Controlled comparison at identical $K$.** A table where all methods (including APGNN) are compared at exactly the same $K$ (e.g., $K=10$) would isolate the benefit of the filter design from the benefit of extra parameters.
+- **Ablation of the decay rate.** Comparing APGNN with $\alpha=1$ (no decay, losing convergence but tested at finite $K$) would quantify the practical benefit of the decay mechanism.
+- **Visualization of learned $\beta_k$ coefficients.** Showing learned $\beta_k$ patterns across datasets would reveal whether APGNN learns negative weights (for heterophily) as GPR-GNN does.
 
 ## Removed Points
 
-- **Critic's claim that the generalization comparison is "reversed" (Point 1, sentence "the conclusion is reversed").** This is inaccurate. The asymptotic scaling comparison (as K→∞) is directionally correct: APGNN's bound terms are O(1) in K while competitors' grow polynomially. The problem is that the paper presents it as universally favorable without acknowledging the finite-K trade-off, not that the conclusion is opposite. Moved to the main weakness with corrected framing.
-- **Critic's claim that the experimental results "cannot be trusted" (Point 2).** The sentence is genuinely ambiguous, but there is no direct evidence of misconduct. A more charitable reading (hyperparameter search with best-result selection) is plausible. The real issue is underspecification, not fraud. Moved to main weakness with softened language.
-- **Critic's claim that Theorem 1 "simply restates the well-known fact" (Point 3).** While the theorem itself is basic, the contribution is the synthesis of convergence + Lipschitz into a design guideline for GNNs. The novelty is in the application, not the theorem. Moved to Minor weakness with this nuance.
-- **Critic's claim about the continuous-graph setting being "unrealistic" (Point 4).** The setting is a standard theoretical framework used in prior GNN generalization work (Rosasco et al., Li et al., etc.). It is a conventional choice, not an error. The real issue is the missing connection to experiments. Retained in Minor form.
-- **Strength Finder's generic strengths about "addressing important problems" and "interesting questions."** These are too generic to be informative. Removed.
-- **Strength Finder's praise of the generalization bound.** The bound exists and is formally correct, but its practical relevance is limited by the unspecified constant C and the continuous-graph setting mismatch. Weakened from a direct strength to a more measured assessment in the summary.
+The following points from the original reviews are removed per the review guidelines:
+
+- **"Missing experiments" list** (deep network performance at $K=50,100$, controlled comparison, ablation of decay rate) — moved to Nice-to-Haves above, as these are desirable extensions rather than core flaws.
+- **Criticism that Theorem 2's connection between continuous and discrete is not shown to be close** — the paper addresses this by noting they share parameters and deriving the bound; this is a reasonable treatment for the setting.
+- **"Weakly justified motivation for infinite-depth GNNs"** — the paper explicitly states the problem of over-smoothing and inconsistent infinite-depth limits (lines 75, 128), which is sufficient motivation.
+- **Pure formatting/style nitpicks** from the harsh critic — removed as parser artifacts.
+- **Lengthy list of "missing parts and places to improve"** (deep analysis suggestions, visualizations, next steps) — these are suggestions for future work, not weaknesses.
+- **Criticisms about DAGNN analysis being "too coarse"** — the paper's claim that the constraint "cannot guarantee convergence" is factually correct; the stronger implication that the filter *diverges* is not actually made.
+- **Various soft criticisms about presentation** that are either addressed in the paper or are scope-creep.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a recurring tension in GNN theory papers: asymptotic generalization bounds are often derived in idealized settings (continuous graphs, unspecified constants) while the empirical evaluation is on discrete benchmarks. The paper illustrates this gap clearly—the "O(√(log K)) vs. O(K)" asymptotic comparison is formally correct but, when evaluated at the finite K=10 used in experiments with α=0.9, the bound is actually worse for APGNN. This suggests that readers should interpret such "O(·)" comparisons with strong caution, especially when the constants hidden by the asymptotic notation are large.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Fix the generalization comparison.** Clearly separate the asymptotic claim (O(1) vs. O(K) in the Lipschitz term) from the finite-K behavior. Provide a table of the actual bound terms for K=10 and typical α values so readers can see the trade-off. Acknowledge that APGNN's bound is not uniformly tighter.
-
-2. **Clarify the experimental protocol.** Rewrite Section 6.1 to specify exactly what hyperparameters were searched for each baseline, over what ranges, and whether the reported numbers reflect the best or the average across settings. Remove or clarify the ambiguous phrase "applied our optimal hyperparameters to them."
-
-3. **Tone down the claims about the "universal learning principle."** Position the principle as a useful synthesis of known convergence and stability criteria for GNN filter design, rather than a new theoretical discovery. The paper's real strength is the APGNN instantiation with exponential decay, which is well-motivated and empirically effective.
-
-4. **Add an ablation on the decay mechanism.** Compare APGNN with α=1 (no decay, uniform coefficients) and the same learnable βₖ to isolate whether the performance gains come from the decay or the learnable coefficients.
+1. **Correct Lemma 1 and Theorem 1** by replacing the "if and only if" with a one-directional sufficient condition: *if* $\sum |\theta_k|$ converges, *then* the power-series graph filter converges uniformly and absolutely for any matrix with $\|\tilde{\mathbf{A}}\|_2 \le 1$. This is still a useful design rule.
+2. **Clarify the experimental methodology:** specify how hyperparameters were selected for baselines, compare at identical $K$ values, and report whether $K$ was tuned per method.
+3. **Make Theorem 2 self-contained** by stating explicit constants or bounding them, and defining all symbols used in the bound statement.
+4. **Add a truly deep experiment** ($K=50$ or $100$) to substantiate the infinite-depth narrative.
 
 ## Score and Decision
 
-**Comparative anchoring (all calibration matches returned by the tool):**
+### Calibration Anchors
 
-| Anchor Path | Avg Score | Comparison |
-|---|---|---|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/P7KIGdgW8S.md` | 8.00 | Strong theoretical paper with novel Hölder stability analysis. Much deeper theory than this paper, cleaner results. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/BOQpRtI4F5.md` | 6.75 | Well-grounded expressivity-generalization analysis. Stronger theory-practice connection. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2jf5x5XoYk.md` | 6.75 | Comprehensive benchmark paper with rigorous evaluation. Better experimental methodology. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/om5z1n0mXA.md` | 6.00 | Benchmark study with careful protocol. Stronger on evaluation rigor than this paper. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/cTDooc2J9S.md` | 4.60 | Graph filter transferability paper. Similar theoretical issues (asymptotic bounds, unspecified constants), comparable tier. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4A5D1nsdtj.md` | 4.50 | Universal polynomial basis paper. Similar topic (polynomial GNN filters), similar issues with theoretical overclaim and experimental gaps. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/bXk9gcKhqp.md` | 4.00 | Polynomial filter rethinking paper. Similar category of contribution and similar level of issues (weak novelty, underspecified experiments). |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ceNnsnA5gu.md` | 3.00 | WL-Tree analysis tool. Limited practical contribution, unclear novelty—worse on both theory and experiments than this paper. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/S3zKrEQpRr.md` | 3.00 | GNN-as-communication-channels paper. Fundamental methodological flaws that invalidate core claims. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/split_review/.../P7KIGdgW8S.md` (Hölder Stability) | 8.0 | Far stronger: rigorous theory without errors, novel framework, thorough experiments. This paper has a theoretical mistake the anchor does not. |
+| `/home/wg25r/split_review/.../SjufxrSOYd.md` (Invariant Graphon Networks) | 8.0 | Far stronger: tight theory, novel architecture, clean evaluation. |
+| `/home/wg25r/split_review/.../y21ZO6M86t.md` (PolyGCL) | 7.25 | Stronger overall: sounder theory and clearer evaluation. This paper's theoretical error puts it below PolyGCL. |
+| `/home/wg25r/split_review/.../BOQpRtI4F5.md` (Bridging Generalization & Expressivity) | 6.75 | Stronger: solid generalization framework with clearer theorems. |
+| `/home/wg25r/split_review/.../ODSgo2m8aE.md` (Lipschitz Fairness) | 6.25 | Comparable in empirical contribution but cleaner theoretical framing. |
+| `/home/wg25r/split_review/.../bXk9gcKhqp.md` (Rethinking Polynomial Filter) | 4.0 | Comparable: both propose polynomial-filter GNNs with theory + experiments, both have theoretical concerns. This paper's empirical eval is slightly broader. |
+| `/home/wg25r/split_review/.../4A5D1nsdtj.md` (Universal Polynomial Basis) | 4.5 | Comparable: similar domain and issues with theory rigor. |
+| `/home/wg25r/split_review/.../AxYTFpdlvj.md` (Graph Decoding via GRDPG) | 2.0 | Far weaker: missing method details, poor experiments. This paper is clearly better. |
 
-This paper occupies a middle tier. It has a genuinely useful practical architecture (APGNN) and strong benchmark results, but the theoretical framing overclaims (the "universal learning principle" is a known result packaged as a discovery, and the generalization comparison is presented in a misleadingly favorable way) and the experimental protocol is underspecified. These issues are not fatal—the APGNN design is still interesting and the results are still suggestive—but they prevent the paper from rising above the borderline zone. Relative to the polynomial-filter papers scoring 4.0–4.5, this paper has a cleaner practical idea (exponential decay) but similar theoretical overclaiming and experimental opaqueness.
+The paper has a genuine contribution (APGNN is a practical, well-motivated architecture with competitive results) but is marred by a mathematical error in its core theoretical claim (the "iff" in Lemma 1/Theorem 1 is incorrect) and questionable experimental reporting. The theoretical error is not fatal to the practical model — the sufficient condition still works — but it weakens the paper's framing as a "universal principle" and the categorical claims about prior methods. The experimental issues (ambiguous hyperparameter reporting, uncontrolled $K$) further reduce confidence in the claimed superiority. Relative to the calibration anchors, this paper sits below the 6+ papers (which have sounder theory) and slightly above the weakest papers (which have more fundamental problems). The empirical results are a real asset but do not compensate fully for the theoretical and methodological issues.
 
 MY FINAL SCORE: <score>4.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,86 +1,82 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have a thorough understanding of both the paper and the calibration landscape. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-This paper generalizes submodular Bregman divergences (Iyer & Bilmes, 2012b) to arbitrary set functions via the strong difference-of-submodular (DS) decomposition, calling the result the difference-of-submodular Bregman divergence (DBD). The authors prove that strict submodularity ensures the identifiability property of the divergence (Theorem 3.1), claim that the DS construction extends this to any set function (Theorem 3.1′), and show that enlarging the generating function class strictly expands the divergence class (Theorem 3.4). A learnable instantiation using ε-PointNet is proposed, with experiments on ModelNet40 clustering and set retrieval.
+This paper extends submodular-Bregman divergences (Iyer & Bilmes, 2012b) to arbitrary set functions via the strong difference-of-submodular (DS) decomposition. It proves that strict submodularity yields a proper divergence (Theorem 3.1), that any set function can generate a divergence via DS decomposition (Theorem 3.1′), and that richer generating-function classes yield strictly richer divergence classes (Theorem 3.4). The authors then propose a learnable instantiation using ε-PointNet as the two submodular components and train it with triplet loss. Experiments on ModelNet40 show that the learned divergence substantially outperforms fixed submodular-Bregman baselines on clustering (Rand index ~0.65 vs. ≤0.30).
 
 ## Strengths
 
-- **First learning framework for discrete Bregman divergences**: Prior submodular-Bregman divergences required hand-specified submodular functions; this paper is the first to combine the DS decomposition with permutation-invariant neural networks to learn the divergence from data, filling a clear gap in the literature.
+- **Generalization of Bregman divergences to arbitrary set functions via strong DS decomposition (Theorem 3.1′).** This is a clean theoretical extension of the submodular-Bregman framework. By proving that any set function can generate a divergence through the DS decomposition, the paper opens the door to richer divergences than were previously possible.
 
-- **Identifiability characterization (Theorem 3.1)**: The paper cleanly shows that strict submodularity is sufficient for the divergence to satisfy identity of indiscernibles — an issue left implicit in prior work (Iyer & Bilmes, 2012b). This is a useful theoretical clarification.
+- **Expressive power ordering (Theorem 3.4).** The proof that strictly larger classes of generating functions yield strictly larger classes of divergences is crisp and provides concrete motivation for moving beyond submodular functions.
 
-- **Expressive power theorem (Theorem 3.4)**: The argument that enlarging the generating function class strictly enlarges the divergence class provides principled motivation for moving beyond submodular functions. The core idea is sound and correctly targeted.
+- **Large quantitative improvement over fixed submodular-Bregman baselines.** Table 2 shows Rand indices of ~0.65 for the learned DBD versus ≤0.30 for all fixed submodular divergences (cut, facility location, etc.). This gap is substantial and demonstrates that learning the divergence from data provides real practical value over hand-crafted alternatives.
 
-- **Consistent improvement from the DS decomposition in ablations**: Table 2 shows that w/ decomposition outperforms w/o decomposition across all three supergradient choices, with lower variance. This provides direct empirical evidence that the DS construction itself (not just extra capacity) contributes to the gains.
-
-- **Qualitative verification (Figures 1, 2)**: The MNIST toy example and ModelNet40 retrieval results confirm that the learned DBD behaves qualitatively as a divergence should (same-class sets closer, self-divergence minimal).
+- **Ablation confirms the benefit of DS decomposition.** The w/ decomposition variants consistently outperform w/o decomposition variants across all three supergradient types, validating that the non-submodular expressivity enabled by DS decomposition contributes to performance.
 
 ## Weaknesses
 
 ### Major
 
-1. **Unexplained existence of strict supergradients for the DS construction (undermines Theorem 3.1′)**  
-   Theorem 3.1′ (the paper's central theoretical claim) asserts that for *any* set function f, D_f and D^f satisfy the divergence conditions. The construction requires a strict supergradient g_Y² ∈ ∂̃^{f²}(Y) of f², where f² is **strictly submodular** via Theorem 3.2. However, Proposition 2.5 only proves that the concrete supergradients (grow, shrink, bar) are **strict** when f is **strictly supermodular** — not when f is strictly submodular. The paper provides no proof or alternate construction showing that strict supergradients exist for a strictly submodular f². This is not a minor omission: the entire claim that DBD works for arbitrary set functions rests on this step. The practical implementation in Section 4 sidesteps the issue by using regular (non-strict) semidifferentials (h_Y¹ ∈ ∂_{f¹}(Y), g_Y² ∈ ∂^{f²}(Y)), creating a further disconnect between theory and practice — the empirical results therefore do not validate the theoretical claim, and the theory does not fully support the implementation.
+- **Unsubstantiated claim about approaching state-of-the-art.** Line 276 states that "our method closely approaches the state-of-the-art method (Hamdi et al., 2021) and achieves better performance than its previous method (Liu et al., 2019)" — but no numbers, table, or quantitative comparison is provided to support this claim. This is a serious omission: the reader cannot evaluate how the method actually fares against competitive approaches.
 
-2. **Unsubstantiated SOTA comparison**  
-   The paper claims (line 276) that the method "closely approaches the state-of-the-art method (Hamdi et al., 2021) and achieves better performance than its previous method (Liu et al., 2019)," yet **no quantitative results for these methods appear in Table 2 or anywhere else in the paper**. The reader cannot evaluate this claim. Given that the improvement of w/ decomposition over w/o decomposition is modest (e.g., ~72.0 vs ~68.1 Rand index), the absence of SOTA numbers is a significant evidential gap.
+- **No quantitative retrieval metric.** The set retrieval experiment (Figure 2) is purely qualitative. Without a standard retrieval metric such as precision@K, mAP, or recall@K, this experiment provides no measurable evidence of the method's retrieval capability.
 
-3. **Ablation does not control for parameter count**  
-   The w/o decomposition model uses a single network with 64×128 hidden units, while the DBD uses two networks each with 64×64 hidden units. The total parameter counts are not matched. This makes it difficult to attribute the improvement solely to the DS decomposition rather than the different representational capacity. The paper acknowledges adjusting hidden sizes "for fairness" but does not report actual parameter counts or verify that they are comparable.
+- **Gap between theoretical requirement and implementation.** Theorem 3.1′ requires *strict* subgradients/supergradients to guarantee the identifiability condition of a proper divergence. The implementation in Section 4 uses the extreme point for the subgradient of f¹ (which is indeed a strict subgradient when f¹ is strictly submodular) but uses non-strict supergradients (grow/shrink/bar from the standard superdifferential ∂^(f²)(Y), not the strict superdifferential \tilde{∂}^(f²)(Y)) for f². The paper does not address this gap. As a result, the theoretical guarantee that the learned D_f is a proper divergence does not rigorously follow from the stated theory for the implemented architecture. (The gap is not necessarily fatal — D_f = D_{f¹} + D^(f²) can still be a proper divergence via strict identifiability from D_{f¹} alone — but the paper does not make this argument, leaving a mismatch between claimed guarantees and actual construction.)
 
 ### Minor
 
-4. **Proof of Theorem 3.4 is terse and glosses over modular adjustments**  
-   The proof states that D_{f′}(X,∅) is "the sum of f′(X) and a modular function" without discussing the constant term f′(∅) (or f(∅)). Since modular functions require m(∅)=0, the constant shift -f(∅) complicates the claim that the remainder is exactly modular. This gap is likely fixable with a cleaner argument (e.g., assuming normalized functions), but the current presentation is not precise.
+- **Limited set of baselines.** The only quantitative comparison is against fixed (non-learned) submodular-Bregman divergences. While these are the directly relevant prior work on submodular Bregman divergences, the paper claims practical value for point cloud tasks; a comparison against at least one learned set-similarity method (e.g., Deep Sets with contrastive loss) would substantially strengthen the empirical contribution. The lack of such baselines makes it hard to assess whether the Bregman structure itself, as opposed to generic learned embeddings, is driving performance.
 
-5. **No statistical significance testing for the main clustering results**  
-   The comparison of w/ vs w/o decomposition is discussed qualitatively ("better performance") without a formal significance test. Means and standard deviations over 10 trials are reported, but no paired tests or confidence intervals are provided to assess whether the observed gaps are reliable.
+- **No standard deviations reported for fixed baselines in Table 2.** The fixed submodular-Bregman divergences have no variance reported (presumably zero), but this asymmetry in reporting makes direct comparison less informative.
+
+- **The MNIST illustrative example uses a very weak signal for similarity (sharing at least one label).** While this is a toy experiment, the supervision is so permissive that it is not diagnostic — any method that captures even coarse label information would succeed.
 
 ### Trivial
 
-6. **Minor notation issues**: The paper writes "we define m(∅)=0" for modular functions but then later uses the inner product ⟨h_Y, 1_X - 1_Y⟩ which implicitly assumes modular functions are identified with vectors (which requires m(∅)=0). This is consistent but could be stated more clearly.
+- The claim in the introduction (line 30) that existing submodular-Bregman divergences are "forms with respect to simple set operations" is slightly overstated — facility location and cut functions capture non-trivial structure — but this does not affect the paper's technical content.
 
 ## Nice-to-Haves
 
-- Report the actual Rand index values and parameter counts in the table caption or text for readers who cannot visually parse the table image.
-- Include a simple Euclidean-distance baseline on mean point coordinates to contextualize the absolute performance of the learned divergences.
-- Add a discussion or proof sketch for why the grow/shrink/bar supergradients are (or are not) strict for strictly submodular functions, or alternatively, relax the requirement to non-strict semidifferentials and provide an alternative identifiability argument.
+- A comparison against at least one learned set-similarity baseline (e.g., Deep Sets + triplet loss, Set Transformer) on ModelNet40 clustering/retrieval would substantially strengthen the paper's practical claims.
+- Reporting a quantitative retrieval metric (e.g., precision@K) for the set retrieval experiment.
+- A synthetic or controlled experiment where the ground set is large and intersections are sparse (as motivated in the introduction) would better isolate the specific advantage of the DBD framework over generic learned embeddings.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- **Criticism about missing appendix proofs**: Removed per instructions — the parser strips appendix content from all papers.
-- **Criticism that the existence of cited references (Hamdi et al. 2021, Liu et al. 2019) is questionable**: Removed — all cited references are assumed to exist.
-- **Criticism that the proof of Theorem 3.4 fails because "different subgradient maps yield different divergences"**: Removed — this is a misunderstanding. The proof assumes D_{f′}=D_f as functions (for some choice of subgradient maps), and the modular adjustment follows regardless of which specific subgradient was chosen. The core idea of the proof is sound; the only real issue is the unaccounted constant term (captured above as weakness 4).
+- **Criticism about expressive power not being tested (Critical Issue 3 from the harsh critic).** This criticism claimed the method never uses a genuinely non-submodular generating function because both f¹ and f² are submodular. This misunderstands the DS decomposition: f = f¹ - f² can be non-submodular even when f¹ and f² are individually submodular. The ablation (w/ vs. w/o decomposition) does test this — the w/ decomposition variant can represent non-submodular functions while the w/o variant cannot.
+- **Criticism that D^(f²) must be a proper divergence.** The harsh critic claimed D^(f²) needs to satisfy the divergence axioms independently. The paper uses D_f = D_{f¹} + D^(f²), and the sum can be a divergence even if neither term individually satisfies strict identifiability. The strict identifiability is carried by D_{f¹}.
+- **Complaint that baselines are "extremely weak" and the comparison is "hollow."** The fixed submodular-Bregman divergences are the direct prior work in this sub-area. Demonstrating a 2× improvement over them is meaningful within the paper's framing. The criticism conflates "not learned" with "weak" and ignores that these are the only existing submodular-Bregman divergences.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface two observations worth noting: (1) the tension between the theory requiring strict semidifferentials and the implementation using regular (non-strict) ones is a gap the authors should explicitly address; (2) the modest w/ vs w/o decomposition gains coupled with the unmatched parameter count raise the question of whether the DS decomposition is truly driving performance or simply adding capacity.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Fix the strict supergradient gap**: Either prove that the grow/shrink/bar supergradients satisfy the strict inequality for strictly submodular functions, or show that the divergence properties hold with non-strict supergradients under an alternative argument. Without this, Theorem 3.1′ is an unsupported claim.
-2. **Add the missing SOTA numbers to Table 2** or remove the SOTA comparison claim.
-3. **Match parameter counts** in the ablation more carefully and report them.
-4. **Address the proof of Theorem 3.4 more precisely** by accounting for the constant term f(∅) — the fix is straightforward (e.g., assume normalized functions or absorb the constant into the modular adjustment explicitly).
-5. **Add statistical significance tests** for the w/ vs w/o decomposition comparison.
+1. **Address the strictness gap explicitly.** Either (a) reformulate the theory to show that D_f = D_{f¹} + D^(f²) is a proper divergence when D_{f¹} uses strict subgradients (identifiability) and D^(f²) uses non-strict supergradients (non-negativity), or (b) modify the implementation to use provably strict supergradients (e.g., by constructing f² as supermodular or by perturbing the supergradients).
+2. **Support or retract the SOTA claim.** Either provide a quantitative comparison table against Hamdi et al. (2021) and Liu et al. (2019), or remove the claim.
+3. **Add quantitative retrieval metrics.** Report precision@K or mAP for the set retrieval task.
+4. **Add at least one learned baseline.** Compare against Deep Sets or Set Transformer trained with the same triplet loss on the same task.
+5. **Report whether the learned D_f actually satisfies the divergence conditions** (non-negativity, D_f(X,X)=0) on held-out data.
 
 ## Score and Decision
 
-**Calibration anchors** (all from the deepreview_13k_calibration directory):
+### Calibration Anchors
 
-| Path | Avg Human Score | Comparison to paper under review |
-|------|----------------|----------------------------------|
-| Fair Submodular Cover (ULorFBST6X.md) | 6.50 | Stronger paper: clean theory, thorough experiments. Current paper has a significant theoretical gap. |
-| Subset Selection (eepoE7iLpL.md) | 5.67 | Stronger paper: clearer empirical validation, no fundamental theoretical gap. Current paper's theory is more novel but incomplete. |
-| Supermodular Rank (REKRLIXtQG.md) | 5.00 | Similar novelty level but current paper has a more critical theoretical gap that undermines the core claim. |
-| Mini-batch Submodular (1DEEVAl5QX.md) | 4.67 | More incremental but theoretically sound. Current paper has a more interesting idea but an unaddressed gap. |
-| Bregman Bilevel (v2uPdQDwSz.md) | 4.00 | Comparable overall quality — both have significant limitations. Current paper's idea is more novel but the gap is more central. |
-| IFGW (Aku2I3z4aV.md) | 2.60 | Weaker paper: novelty and experimental issues. Current paper is clearly stronger. |
+| Anchor | Avg Score | Comparison to paper under review |
+|--------|-----------|----------------------------------|
+| f4gF6AIHRy — *Combatting Dimensional Collapse (LLM data selection)* | 8.00 | Much stronger experiments (extensive benchmarks, ablations, realistic-scale models). Our paper is far below this bar. |
+| 34STseLBrQ — *Polynomial Width for Set Representation* | 7.25 | Strong theory, clean results, modest experiments. Our theory is less technically novel/deep. |
+| vVCHWVBsLH — *Decomposition Polyhedra of CPWL Functions* | 7.25 | Deep theoretical contribution with rigorous proofs. Our theory is more of an extension/clarification. |
+| m5qpn0KTMZ — *Bridging f-divergences and Bayes Hilbert Spaces* | 6.50 | Interesting theory with limited experiments. Similar pattern to our paper but with better experimental grounding (FID scores, comparisons). |
+| wO1NJLitPL — *Bregman Proximal Viewpoint on Neural Operators* | 5.25 | Theory-practice gap, weak baselines. Similar issues to our paper. |
+| REKRLIXtQG — *Supermodular Rank* | 5.00 | Interesting concept, unconvincing experiments, presentation problems. Our paper is slightly cleaner in presentation and has clearer experiments. |
+| sSWGqY2qNJ — *Indeterminate Probability Theory* | 3.33 | Fundamentally flawed claims. Our paper is clearly better. |
 
-The paper's core theoretical contribution (Theorem 3.1') contains an unaddressed gap: the existence of strict supergradients for strictly submodular functions required by the DS construction is not proven. This, combined with missing SOTA comparison numbers and modest ablation gains, leaves the main claims incompletely supported. Compared to the calibration anchors, the paper is weaker than the typical accept-range papers (5.67–6.50) and comparable to or slightly below the reject-range papers (4.00–5.00). The theoretical gap is structural rather than cosmetic, but the overall idea is novel and the empirical direction is promising.
+**Score rationale:** The paper has genuine theoretical merit (Theorems 3.1, 3.1′, 3.4) and shows a clear empirical improvement over prior submodular-Bregman work. However, the experimental evaluation is thin — only one quantitative table, no quantitative retrieval metric, an unsubstantiated SOTA claim, and no learned baselines. The gap between the strictness required by theory and the non-strict supergradients used in implementation further weakens the contribution. Positioned against the anchors, the paper falls near REKRLIXtQG (5.00) and wO1NJLitPL (5.25).
 
-MY FINAL SCORE: <score>3.5</score>
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

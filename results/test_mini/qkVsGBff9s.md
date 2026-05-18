@@ -1,90 +1,78 @@
-Now I have all the information I need. Let me compose the final review.
+Now I have all the information I need. Let me construct the consolidated review.
 
 ## Summary
-
-The paper proposes SDQC, a framework for safe offline RL that decouples global observations into reward- and cost-related representations using Q-supervised contrastive learning. These representations are then used for safety assessment (via HJ reachability) and policy selection among reward, cost, and tradeoff sub-policies. The paper provides theoretical analysis showing that the Q-supervised method yields coarser representations than bisimulation while preserving optimality. Empirical results on DSRL benchmarks show SDQC achieving zero violations in a majority of tasks and generalizing to unseen environments better than baselines.
+This paper proposes SDQC, a framework for safe offline RL that decouples global observations into separate reward-related and cost-related representations using Q-supervised contrastive learning. It then employs a three-policy selection mechanism (reward-only, cost-only, tradeoff) based on safety assessment. On the DSRL benchmark, SDQC achieves near-zero violations on most tasks and shows improved generalization in unseen environments compared to prior methods including FISOR.
 
 ## Strengths
+- **First state-decoupling framework for safe offline RL with strong empirical results.** The paper is the first to explicitly decouple observations into separate reward- and cost-related representations for safe decision-making (Section 1, Figure 2). On the DSRL benchmark, SDQC achieves near-zero violations on the majority of tasks, substantially outperforming FISOR (the prior SOTA) which only achieves this on a quarter of tasks (Table 1, Section 4.1). This is a meaningful practical advance for hard-constraint safe offline RL.
 
-- **Novel and well-motivated idea of state decoupling for safe offline RL**: The paper identifies a genuine problem — that OOD issues in safe offline RL arise from combinatorial combinations of reward- and cost-related features — and proposes decoupling the global observation into separate representations for decision-making. This is a clean, principled solution that is concretely motivated by the UGV navigation example (Figure 1).
+- **Theoretical result showing Q*-irrelevance representations are coarser than bisimulation while preserving optimality.** Theorem 3.1 extends the known relationship from Givan et al. (2003) to infinite-horizon MDPs and the safety Bellman operator, proving that bisimulation is finer than Q*-irrelevance and that both preserve the optimal policy. The entropy inequality (Eq. 16, \(0 \le H(s|\Theta_{\text{bisim}}) \le H(s|\Theta_{Q^*})\)) provides a principled motivation for why Q-supervised representations should generalize better than bisimulation-based ones.
 
-- **Theoretical connection to bisimulation (Theorem 3.1)**: The paper extends the known relationship between bisimulation and Q\*-irrelevance representations from finite-horizon MDPs to infinite-horizon MDPs and the safety Bellman operator. The result that $H(s|\Theta_{\text{bisim}}(s)) \leq H(s|\Theta_{Q^*}(s))$ provides principled justification for why Q-supervised representations are coarser and can improve generalization.
+- **Demonstrated generalization without cost increase in unseen environments.** In Section 4.2, tests on CarGoal and CarPush tasks with varying obstacle counts show SDQC is the only algorithm that ensures no increase in cost under distribution shift, while all baselines show substantial cost increases. This directly supports the paper's core claim about improved OOD generalization.
 
-- **Strong empirical results on DSRL benchmark (Table 1)**: SDQC achieves zero violations (normalized cost = 0.00) in 6 out of 10 tasks, while the strongest baseline (FISOR) achieves this in only 2-3 tasks. This is a clear and practically meaningful improvement in safety performance across multiple environments.
-
-- **Ablation study validates the Q-supervised contrastive loss**: Figure 4 shows that removing the contrastive loss degrades both reward and safety, and the t-SNE visualizations confirm that the loss effectively clusters states with similar Q-values in the representation space.
+- **Q-supervised contrastive loss is empirically validated.** The ablation study (Section 4.3, Figure 4) confirms that removing the contrastive loss degrades both reward and safety, and t-SNE visualizations show the loss effectively clusters states with similar Q-values. This validates the representation learning component specifically.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-
-- **Generalization tests are only qualitative (Section 4.2)**: The paper's central claim is that SDQC possesses "superior generalization ability" for handling OOD observations during testing. Yet the generalization experiments are described only in prose — "sharp increase in cost," "slight decline in reward" — with no quantitative table, no error bars, and no comparison of numerical cost/reward values for the OOD test conditions. Given that the paper's entire motivation is OOD generalization and the title emphasizes "state decoupling" to address it, this is not a minor omission. The reader cannot verify the strength or statistical reliability of the reported generalization advantage.
-
-- **The ablation does not isolate whether decoupling itself drives the improvement**: The ablation (Section 4.3) removes only the contrastive loss within SDQC, showing it hurts. But SDQC's full system also uses three separate policies operating on decoupled representations, plus a decision-rule based on safety assessment. There is no comparison to a variant that uses *global* observations (no decoupling) while retaining the contrastive loss and the three-policy structure. Without this control, it is impossible to tell whether the gains come from the decoupling mechanism itself, the contrastive loss, or their interaction. The paper claims to be "first to utilize decoupled representations for decision-making" but never tests whether decoupling (vs. global observations) is what causes the improvement over FISOR.
+- **The central claim that "state decoupling" helps is not isolated experimentally.** The paper's headline contribution is decoupling observations into separate reward/cost representations. However, every comparison pits the full SDQC (decoupling + contrastive loss + multi-policy) against baselines using full states. The ablation (Section 4.3) only removes the contrastive loss within the decoupling framework — it does not test a version that uses a single joint representation trained with the same contrastive loss and the same three-policy mechanism. Without this control, the reported improvements could stem from better representation quality (contrastive learning alone) or the Q-learning modifications rather than from decoupling per se. This is the single most significant evidential gap in the paper, as it directly concerns the paper's core novelty claim.
 
 ### Minor
+- **Generalization tests are limited in scope.** The OOD generalization evaluation (Section 4.2) is conducted on only two tasks (CarGoal, CarPush). While the results on these tasks are clean and supportive, the claim that "SDQC is the only algorithm that ensures no increase in cost" is a strong statement resting on a narrow empirical base. Additional environments with different OOD modalities (varying dynamics, sensor noise, or obstacle types) would substantially strengthen the generalization claims.
 
-- **No confidence intervals or standard deviations reported**: The main results (Table 1) are averaged over 3 random seeds × 20 episodes each, but no measures of variance are provided. For safety-critical claims ("zero violations," "no increase in cost"), the absence of error bars weakens confidence, as 3 seeds may not capture the variance in cost outcomes. While this practice is common in the offline RL literature, the paper's strong safety guarantees warrant more rigor.
+- **The link between representation coarseness and generalization is intuitive but not formalized.** Theorem 3.1 establishes that Q*-irrelevance representations are coarser than bisimulation (higher conditional entropy), and the paper argues this provides better generalization. However, there is no formal bound connecting representation coarseness to test-time safety under distribution shift. The argument is plausible but remains at the level of intuition. A bound relating the entropy gap to a generalization guarantee would strengthen the theoretical narrative.
 
-- **Moving-target issue in Q-supervised contrastive learning is acknowledged but not analyzed**: The paper notes (Section 3.2) that Q-values depend on the representation network being learned, creating a moving target for the contrastive objective. The proposed solution — incorporating the contrastive loss as an auxiliary objective during Q-learning — is described, but there is no analysis of how this coupling affects training stability, no diagnostic of cluster reassignments over training, and no mention of whether stop-gradients, target networks, or delayed updates are used. This is a practical concern that could affect convergence.
+- **The safety-assessment selection rule (three-policy mechanism) is not analyzed.** The paper introduces a decision scheme that switches between π_r, π_h, and π_to based on \(V_h^{\text{low}}\) and \(V_h^{\text{up}}\). There is no analysis of how often each policy fires across tasks, whether the assessment correctly classifies safety on OOD states, or what happens when the assessment is wrong. A case study or frequency analysis would help validate that the framework works as intended.
 
-- **The theoretical result is an incremental extension**: Theorem 3.1 extends a known relationship (Givan et al., 2003) to infinite-horizon MDPs and the safety Bellman operator. While cleanly stated, this is a modest extension rather than a fundamentally new theoretical contribution. The paper's main novelty lies in the framework and the contrastive learning methodology, not the theory.
+- **The chicken-and-egg problem between Q-values and representations is acknowledged but not analyzed.** The paper notes (Section 3.2) that the contrastive loss requires Q*-values while Q-values depend on the representation. Joint training is proposed as a solution, but there is no sensitivity study on how errors in the Q-estimates propagate into the representation quality. Given that offline Q-values are known to be unreliable, some empirical analysis (e.g., Bellman error monitoring, comparison with ground-truth in a tractable domain) would be informative.
 
 ### Trivial
-None.
+- The paper could more precisely differentiate its contribution from FISOR at the point where Eq. 3 is introduced — the decoupling in Eq. 3 already requires safety assessment on the full state, so SDQC's contribution is replacing full-state assessment with representation-based assessment. This could be stated more explicitly.
+- Hyperparameters (δ, η, ν, ι_r, ι_h, ι_to) are not ablated or analyzed for sensitivity.
 
 ## Nice-to-Haves
-
-- A controlled ablation comparing SDQC against a variant using global observations (no decoupling) with the same critic architecture, contrastive loss, and three-policy structure would directly test whether decoupling itself is responsible for the gains.
-- Quantitative generalization results in a table analogous to Table 1, including standard deviations, would substantiate the central generalization claim.
-- A diagnostic plot showing Q-value drift or cluster reassignment during training would address the moving-target concern.
-- Analysis of how the generative model's accuracy in sampling in-support actions affects the approximation $\sup_{a\in\mathcal{A}_\beta^s}$ would strengthen the practical implementation.
+- **A single-representation ablation**: Replace the decoupled reward/cost representations with a single joint representation trained with the same contrastive loss and multi-policy structure, to directly test whether decoupling itself contributes.
+- **Bisimulation-based baseline**: Compare against a model-based representation learner (e.g., DeepMDP) to empirically support the theoretical claim that Q-supervised representations generalize better.
+- **Policy selection frequency**: Report how often each of the three policies (π_r, π_h, π_to) is selected across tasks, to validate that the decoupling framework is used as intended.
+- **Broader generalization tests**: Extend OOD evaluation to additional environments with different types of distribution shift.
 
 ## Removed Points
-
-**Removed (factually incorrect / misread paper):**
-- Harsh critic's claim that "no analysis of how it is mitigated" for the moving-target issue — the paper does describe the mitigation (joint training via auxiliary objective, Section 3.2-3.3), though the analysis is minimal. Kept as a Minor weakness, not a Major one.
-- The harsh critic's framing that 3 seeds × 20 episodes is "far too weak" — this is the standard evaluation protocol used in the safe offline RL literature (including FISOR, the direct baseline). Kept as a Minor concern about variance reporting rather than a fundamental flaw.
-
-**Removed (scope creep / not standard for the field):**
-- Request for statistical significance testing (confidence intervals are a reasonable request; formal hypothesis tests are not standard in this literature).
-
-**Removed (formatting / parser artifacts):**
-- None applicable.
-
-**Removed from strengths (generic/superficial):**
-- "The problem motivation is clearly articulated and genuinely important" — generic praise.
-- "The use of HJ reachability for safety assessment... is a solid foundation" — this is inherited from FISOR, not a contribution of SDQC.
+These points were identified but are flagged for removal as they are either factually incorrect, parser artifacts, or unjustified:
+- "Table 1 is an image and not readable in the extracted text" — parser artifact; the original submission has a properly formatted table.
+- "Related work section is missing" — parser artifact; appendix sections are stripped from the extracted text.
+- "Abstract/Introduction framing is vague" — generic criticism without concrete justification; the paper defines the OOD problem clearly.
+- "The comparison with bisimulation extension is trivial" — the extension to the safety Bellman operator and infinite-horizon is non-trivial and the paper correctly credits prior work.
+- "The paper overclaims being first" — cannot be verified or refuted without external sources; the claim is properly scoped ("to the best of our knowledge," "in state-based Safe RL tasks").
+- "Pure formatting/style nitpicks" and criticisms about typos/grammar — these reflect parser artifacts, not author errors.
 
 ## Novel Insights
-
-The harsh critic correctly identifies the central tension in this paper: the paper's key mechanism (decoupling) and its key loss function (contrastive learning) are conflated in the ablation study. This is a genuinely insightful observation that goes beyond surface-level criticism. Many papers introduce multiple interacting components but test only one at a time; here, the critic recognizes that the contrastive loss *operates on the decoupled representations*, so removing the loss tests neither component in isolation. The missing comparison — decoupled + contrastive loss vs. global + contrastive loss — is the minimal experiment that would resolve this. This type of multi-component entanglement is a recurring failure mode in representation-learning papers, and future work in this area would benefit from designing ablations that isolate architectural choices from learning objectives.
+None beyond the paper's own contributions. The reviews surface a genuine methodological gap (the decoupling claim is not isolated experimentally) but do not provide new analytical perspectives that the paper itself does not already suggest.
 
 ## Suggestions
-
-1. Add a quantitative generalization table (mean ± std) for the OOD test conditions, directly comparable to Table 1.
-2. Run a controlled ablation: compare SDQC against a variant that uses global observations (FISOR-style) but adds the contrastive loss and three-policy structure. This isolates whether decoupling or the contrastive loss drives the improvement.
-3. Clarify whether target networks or stop-gradients are used for the Q-values in the contrastive similarity measure $\Gamma$, or at minimum add a diagnostic showing Q-value drift over training.
-4. Report standard deviations for all main results.
+1. **Add a decoupling ablation**: Train SDQC with a single joint representation (same contrastive loss, same three-policy mechanism) and compare. If SDQC (decoupled) outperforms the joint version, the decoupling claim is supported. If not, the contribution reduces to "contrastive Q-supervised representation for safe offline RL," which is still valuable but should be reframed.
+2. **Expand OOD generalization evaluation**: Test on at least 2-3 additional environments with different forms of distribution shift to support the generalization claims.
+3. **Provide a policy-selection frequency table**: Show what fraction of test steps each policy (π_r, π_h, π_to) fires on, to validate that the decoupling mechanism is actually used.
+4. **Add a brief Q-value quality check**: Report Bellman error or compare learned Q-values to Monte Carlo estimates on the dataset to address concerns about Q-reliability dependence.
 
 ## Score and Decision
 
-**Calibration Anchors:**
+**Calibration anchors (all from retrieval batch):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| j5JvZCaDM0 (FISOR) — Safe Offline RL with Feasibility-Guided Diffusion Model | 7.50 | Direct baseline. FISOR is cleaner in execution with stronger experimental rigor; SDQC has a more novel idea (decoupling) but weaker evaluation of that idea. |
-| dbuFJg7eaw (FOSP) — Fine-tuning Offline Safe Policy through World Models | 7.00 | Different setting (offline-to-online). Comparable in building on prior work, but FOSP has real-robot validation. |
-| lUYY2qsRTI — Delphic Offline RL under Nonidentifiable Hidden Confounding | 7.50 | Stronger theoretical contribution and real-data validation. |
-| 3w6xuXDOdY — The Generalization Gap in Offline RL | 6.50 | Benchmark paper with thorough experiments. SDQC has a stronger methodological contribution but weaker empirical breadth. |
-| ZtOnddFVT3 — Self-Alignment for Offline Safe RL | 4.67 | Had major methodological clarity issues and weak theoretical grounding. SDQC is clearly stronger. |
-| fWx1CKgPCc — Towards Reliable Offline RL via Lyapunov Uncertainty Control | 4.00 | Limited contribution, missing baselines. SDQC is stronger in both novelty and empirical results. |
-| 6PcJEFKvBD — offline_rl_ope Python package | 2.33 | Software paper, not comparable in scope. |
+| Anchor | Avg Score | Comparison to SDQC |
+|--------|-----------|---------------------|
+| j5JvZCaDM0.md (FISOR) | 7.50 | FISOR is the direct predecessor; stronger novelty as first HJ-reachability method for safe offline RL; SDQC's contribution is incremental on FISOR |
+| 9pW2J49flQ.md (DeepLTL) | 8.00 | Stronger theoretical contribution and broader experiments; SDQC is less polished in comparison |
+| QyVLJ7EnAC.md (Model-Free Offline RL) | 6.40 | Similar overall quality; SDQC tackles a harder problem (safe RL) but has a more significant experimental gap |
+| XMOaOigOQo.md (ContraDiff) | 5.67 | Similar level: both use contrastive learning in offline RL, both have a theory-empirics gap; SDQC has stronger theory, ContraDiff has more extensive experiments |
+| w9bWY6LvrW.md (Marvel) | 5.20 | Similar quality; both have real contributions but incomplete evaluations |
+| ZtOnddFVT3.md (Self-Alignment) | 4.67 | SDQC is notably stronger — clearer method, sounder theory, better experiments |
+| fWx1CKgPCc.md (LUC) | 4.00 | SDQC is stronger across the board |
+| KkALFpRWSV.md (SSkP) | 3.75 | SDQC is substantially stronger — better motivation, stronger theory, more rigorous experiments |
+| X5tBNz4qtl.md (Offline Safe RLHF) | 3.50 | SDQC is substantially stronger |
+| hZztyfmr8n.md (COSTAR) | 3.00 | SDQC is substantially stronger — better theory, more comprehensive evaluation |
+| Q1Hr9dVfDS.md (Decoupled Rep CRL) | 3.00 | SDQC is substantially stronger |
 
-SDQC has a genuinely novel and well-motivated idea with strong benchmark results, placing it well above rejected papers in the 2–4 range. However, the incomplete experimental validation of its core mechanism (decoupling vs. contrastive loss) and the qualitative-only generalization results prevent it from reaching the 7+ bar set by FISOR and comparable accepted papers. The paper contributes a meaningful idea but needs stronger evidence linking its architectural claims to its empirical wins.
+SDQC is clearly above the 3-4 range papers due to its sound theoretical motivation and strong empirical results. It is comparable to papers in the 5.5-6.5 range. The main factor preventing a higher score is the missing decoupling ablation, which means the paper's central claim is not fully supported experimentally. Relative to FISOR (7.50), the contribution is more incremental and the experimental validation of the core novelty is incomplete. A score of 5.5 reflects a paper with real contributions and promising results, held back by a significant evidential gap in its central claim.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

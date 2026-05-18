@@ -1,84 +1,93 @@
-Now I have sufficient calibration context. Let me produce the consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-The paper proposes DORAEMON (Domain Randomization via Entropy Maximization), a constrained-optimization approach that automatically shapes the training dynamics distribution in domain randomization. The method maximizes the entropy of the sampling distribution subject to a minimum success-probability constraint, interleaved with policy optimization via any off-the-shelf RL algorithm. The authors validate on six MuJoCo sim-to-sim tasks and a 17-parameter real-robot PandaPush task, showing consistent improvements over Fixed-DR, LSDR, and AutoDR baselines.
+This paper proposes DORAEMON (Domain Randomization via Entropy Maximization), a method that automatically shapes the training distribution of dynamics parameters in simulation-based reinforcement learning. The core idea is to maximize the entropy of the dynamics sampling distribution subject to a constraint that the policy's success probability stays above a threshold α. This is a principled alternative to prior heuristic approaches (LSDR, AutoDR) that require a reference distribution or wasteful policy evaluations. The paper evaluates DORAEMON on six MuJoCo sim-to-sim tasks, a toy problem with known ground-truth feasibility boundaries, and a real-robot PandaPush task with 17 randomized dynamics parameters.
 
 ## Strengths
 
-- **Constrained entropy-maximization formulation.** The optimization in Eq. (1) / Eq. (4) is a clean, principled way to automate domain randomization: directly maximize distribution entropy while maintaining a desired success rate. This eliminates the need for manual tuning of DR distributions or defining reference ranges, which prior automatic-DR methods (LSDR, AutoDR) still require in various forms.
+- **Novel and well-motivated constrained optimization formulation (Eq. 2):** Framing automatic domain randomization as entropy maximization subject to a success-rate constraint is original and clean. It directly addresses a core challenge in DR — balancing generalization against conservatism — without requiring a manually chosen reference distribution or extra policy evaluations.
 
-- **Consistent sim-to-sim outperformance across diverse environments.** Figure 2 shows DORAEMON achieving higher global success rates and faster entropy growth than LSDR, AutoDR, and Fixed-DR on all six MuJoCo tasks (10 seeds each). The advantage is particularly notable against AutoDR, which also employs a curriculum-like gradual widening — suggesting DORAEMON's per-dimension joint update via IS yields a real efficiency gain over AutoDR's one-dimension-at-a-time approach.
+- **Consistent sim-to-sim improvements across six MuJoCo tasks (Fig. 4):** DORAEMON achieves higher or faster-converging global success rates on the maximum-entropy distribution compared to LSDR, AutoDR, and Fixed-DR. The advantage is consistent and often substantial (e.g., Swimmer: DORAEMON ~100% vs. LSDR <60%, AutoDR <40%).
 
-- **Successful zero-shot sim-to-real transfer on a 17-parameter robotic task.** Section 5.3 reports that DORAEMON-trained policies transfer to a real 7-DoF Panda robot pushing a box with unknown center-of-mass, weight, and contact dynamics. All ten Fixed-DR policies "are unable to learn any meaningful behavior," and LSDR scales poorly to the 17-dimensional space. This is the strongest practical evidence that the method works where simpler approaches fail.
+- **Successful zero-shot sim-to-real transfer on a 17-dimensional dynamics task (Table 1, PandaPush):** The real-robot experiment with 7-DoF arm pushing a box with unknown center-of-mass, mass, friction, and joint damping is challenging and realistic. That Fixed-DR completely fails and LSDR/AutoDR struggle while DORAEMON succeeds is a compelling practical demonstration.
 
-- **Sample-efficient distribution update.** The importance-sampling estimator in Eq. (2) allows the success-rate constraint to be evaluated for a candidate $\phi_{i+1}$ using data already collected under $\phi_i$, avoiding the extra Monte-Carlo rollouts that LSDR and the original AutoDR formulation require.
+- **Sample-efficient distribution updates via importance sampling (Eq. 4):** Reusing the K trajectories collected during policy training to estimate the candidate distribution's success rate avoids additional Monte-Carlo evaluations, making the pipeline more efficient than LSDR and AutoDR.
 
-- **Empirical analysis of the success-rate/entropy trade-off.** Figures 5(a)-(b) study the effect of $\alpha$ and the success-indicator threshold, showing that the method predictably trades per-episode return for wider dynamics coverage. This is a useful practical insight for users choosing $\alpha$.
+- **Transparent analysis of trade-offs (Fig. 6a, 6b):** The paper systematically studies how α affects entropy vs. success rate, and how the return threshold for defining success affects the trade-off. This gives practitioners useful guidance.
 
 ## Weaknesses
 
 ### Major
 
-- **The importance-sampling constraint estimator is unvalidated.** The entire distribution update hinges on the IS estimator in Eq. (2) to approximate the success rate under the proposed $\phi_{i+1}$. The paper acknowledges that IS may overestimate the true success rate (lines 138–140), and introduces a backup optimization (Eq. 5) as recourse. However, the backup itself uses the *same* IS estimator and inherits the same risk of overestimation. More importantly, the paper provides *no empirical analysis* of the estimator's reliability: no effective sample sizes, no comparisons of IS estimates against actual rollouts under candidate distributions, no characterization of when the estimator fails. Given that constraint satisfaction is the method's central mechanism for preventing excessive randomization, this is a significant evidential gap. The empirical success of the overall method suggests the issue may not be catastrophic in practice, but the reader cannot evaluate whether the constraint is actually being enforced as claimed.
+- **Importance sampling reliability is not diagnosed.** The IS estimator (Eq. 4) is used to estimate success under candidate distributions in high-dimensional spaces (up to 17 parameters). The paper acknowledges possible overestimation (lines 138–139) and provides a backup recovery mechanism, but offers no diagnostics — no effective sample size, no variance tracking over iterations, no ablation comparing IS against fresh Monte-Carlo rollouts. While the method works well empirically, this gap matters because the IS quality directly affects whether the learned distribution actually satisfies the success constraint, which is the central pillar of the method.
 
-- **Best-performing policy selection weakens the reported results.** The paper states it "track[s] the best-performing policy during training in terms of global success rate" (line 263) to mitigate performance degradation in some environments, and reports results from this selection. For a method that is supposed to robustly produce good policies, reporting best-achieved rather than final-policy performance inflates the results and obscures variance across seeds and training stages. The learning curves in Figure 2 show performance over time, but the headline numbers and heatmaps (Fig. 4, Fig. 6) appear to use the best-performing checkpoint. The paper does not clarify whether baselines are reported with the same selection criterion. Without final-policy comparisons, the practical reliability of DORAEMON relative to baselines is less clear than the paper suggests.
+- **Best-policy selection procedure for baselines is not specified.** The paper tracks the best-performing policy during DORAEMON training (line 263) and reports results from this selection (e.g., Fig. 4, HalfCheetah heatmaps). It does not state whether LSDR and AutoDR evaluations also use best-policy tracking, or whether they report the final policy. If the procedure is asymmetric, the comparison could be biased in DORAEMON's favor. This needs clarification.
 
 ### Minor
 
-- **The contribution of entropy maximization beyond a simple curriculum schedule is not fully isolated.** The paper acknowledges (line 268) that gradual widening itself produces a curriculum effect that helps — citing the same finding from AutoDR's paper. And DORAEMON outperforms AutoDR, which also uses a curriculum-like widening, so the entropy-maximization objective is definitely doing *something* beyond raw curriculum. However, the paper never compares against a simple fixed-schedule baseline (e.g., linear expansion of uniform bounds) that would more directly ablate whether the specific entropy-maximization-with-constraint formulation matters, or whether any gradual widening schedule would achieve similar results. A positive result against such a baseline would sharpen the paper's central claim considerably.
+- **The backup procedure does not prevent IS-driven over-widening; it only recovers post-hoc.** The backup (Eq. 5) is triggered when the *current* success rate on φ_i falls below α — not when IS overestimates the success of the *candidate* φ_{i+1}. If IS overestimates and the algorithm widens too aggressively, the violation is only detected one iteration later when new data arrives. The backup then recovers, but the paper does not quantify how often this happens or whether it harms training in high dimensions.
 
-- **Critic conditioning on true dynamics is asymmetric with respect to baselines.** The paper conditions the SAC critic on the true sampled $\xi$ (line 128), citing prior work. It does not explicitly state whether the same conditioning is used for all baselines (LSDR, AutoDR, Fixed-DR). If some baselines do not receive this additional information, the comparison is biased in DORAEMON's favor. A clear statement that all methods use identical architecture choices would resolve this.
+- **Details of Beta distribution optimization are omitted.** The paper states that ν_φ is parameterized as uncorrelated Beta distributions (line 147), but does not describe how φ is updated — whether via gradient descent on the Lagrangian, closed-form updates, line search, or some other procedure. This is a concrete reproducibility gap.
 
-- **The computational cost of the distribution update is not characterized.** The paper says optimizing Eq. (4) uses only already-collected data, but doesn't describe the optimizer, the number of gradient steps, or wall-clock overhead relative to baselines. Given that the update involves IS reweighting and a KL constraint, a brief computational cost comparison would help practitioners assess the trade-off.
+- **The "widest range" claim is relative to the constraint, not independently validated.** The method finds the maximum-entropy distribution *that satisfies the success constraint*. This is exactly what the optimization does — the claim is not circular but it is tautological with respect to the optimization objective. What is *not* shown is whether this distribution corresponds to the true feasible set of the task (except in the toy problem). For the high-dimensional MuJoCo tasks, there is no external validation (e.g., brute-force mapping of feasible dynamics) to confirm that the achieved entropy is indeed maximal. The claim is thus best read as "widest range *that meets the in-distribution success constraint*," which is weaker than "widest *feasible* range."
+
+- **Trust-region size ε is not reported or ablated.** The KL constraint (Eq. 3) uses a hyperparameter ε that controls how fast the distribution can widen. The paper never states what value of ε was used or shows sensitivity to it. This is a key parameter.
 
 ### Trivial
 
-- The paper references tables (tab:parameter_specs, tab:pandapush) and figures that are absent from the extracted text; these exist in the original submission and are standard appendix content. No actions needed.
+- The paper tracks "best-performing policy in terms of global success rate" but does not specify how often the evaluation is done (every N iterations?) or how many rollouts per evaluation.
+- The table of sim-to-real results (Table 1) is loaded via `\input` and stripped by the parser, so the numbers cannot be verified from the text — but this is a parser artifact, not an author error.
 
 ## Nice-to-Haves
 
-- Validating the IS estimator on a subset of environments by comparing its predictions to actual rollouts under candidate distributions, to establish when it is reliable.
-- Reporting final-policy performance alongside best-achieved performance, to give a realistic sense of what a practitioner would obtain after training.
-- A simple curriculum baseline (e.g., linear expansion of uniform bounds over the same number of interactions) to directly ablate the entropy-maximization objective.
+- **Ablation comparing IS-based estimation vs. fresh rollouts** for a range of K and dimensionality would directly address the main methodological concern and strengthen the paper.
+- **A 2D ground-truth feasibility overlay** for one MuJoCo task (like the HalfCheetah heatmaps) would validate that the achieved entropy actually covers the feasible region.
+- **Visualization of how individual Beta parameters evolve** over training in PandaPush would illustrate which dynamics dimensions are widened early vs. late.
 
 ## Removed Points
 
-The following criticisms raised by reviewers are excluded or downgraded:
-- **Missing success thresholds for MuJoCo tasks**: These would be in the appendix (stripped by parser); the original submission contains them.
-- **Critic conditioning as an unfair advantage**: The paper states this is done "as in" the AutoDR paper. A statement clarifying that it is standard for all methods would help, but the complaint is speculative without evidence that baselines did *not* use it.
-- **Missing related work**: Not verifiable without external sources; rule prevents inclusion.
-- **Reproducibility nitpicks** (undisclosed hyperparameters, trivial implementation details): Standard content for appendix sections stripped by parser.
-- **Formatting and typo complaints**: Parser artifacts, not author errors.
+These points were flagged for removal. Treat them with caution:
+
+1. **"LSDR comparison is unfair because LSDR optimizes for return, not success rate"** — The critic argues LSDR was designed for a different objective. However, the paper sets LSDR's reference to ν_max (the same distribution on which all methods are evaluated), and LSDR's goal *is* to find a training distribution that generalizes to that reference. Evaluating on success rate (rather than return) is a different but natural axis for coverage comparison. Not unfair, just incomplete if return is not also reported. [Reason: The asymmetry (if any) favors the baseline, not the author's method — the paper even notes LSDR converges to *intermediate* entropy values, a real limitation of LSDR.]
+
+2. **"The 'widest range' claim is circular"** — The critic claims this is tautological. But the optimization is well-defined: maximize entropy subject to a constraint. The result is the widest range that satisfies the constraint. This is the intended behavior, not a flaw. The issue of whether the IS estimate accurately tracks the true success rate is a separate concern (covered above). The basic claim is not circular. [Reason: The criticism misunderstands the objective.]
+
+3. **"Missing appendix / missing sections"** — References to Sec. sec:beyond_beta and the input table are stripped by the parser. These exist in the original submission. [Reason: Parser artifact.]
+
+4. **"Toy problem should report mean or worst-case"** — The paper deliberately uses median (not mean) because catastrophic returns on infeasible dynamics would distort the mean. This is a reasoned choice, not an oversight. [Reason: Already addressed by the authors' stated design rationale.]
+
+5. **"Sim-to-real table numbers are incomplete"** — The critic says the table is stripped and evidence is incomplete. The table exists in the original submission; the parser removed it. [Reason: Parser artifact.]
+
+6. **"No real-world parameter analysis or failure mode analysis"** — These are nice-to-haves, not required for a conference paper, especially one that already includes real-robot deployment. [Reason: Scope creep; the paper already has a significant real-robot experiment.]
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most interesting observation from reading the reviews collectively is that the method's success-constraint-via-IS mechanism is simultaneously its most novel and least validated component. The constrained entropy-maximization formulation is clean and well-motivated, but the importance-sampling lynchpin — which in principle is what makes the method sample-efficient — receives no diagnostic evaluation. This creates an unusual situation where the empirical results (six environments + real robot) are stronger than the methodological support for why they work. The paper would benefit substantially from one targeted diagnostic experiment: comparing IS estimates against ground-truth rollouts for a subset of candidate distributions, to demonstrate that the constraint mechanism actually functions as described.
+None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation that the paper itself does not already articulate. The key insight — that maximizing distribution entropy under a success constraint yields an automatic curriculum for domain randomization — is the paper's own contribution.
 
 ## Suggestions
 
-1. **Validate the IS estimator empirically.** Pick 1–2 environments (e.g., Hopper and HalfCheetah), select several candidate $\phi_{i+1}$ distributions at different stages of training, compute the IS estimate from data under $\phi_i$, and compare against the ground-truth success rate obtained by actually rolling out the policy under $\phi_{i+1}$. Report correlation, bias, and failure cases.
-2. **Report final-policy performance.** Alongside the best-achieved numbers, report the performance of the final policy at the end of training and indicate variance across seeds.
-3. **Clarify whether all baselines use the same critic-conditioning scheme** (conditioning on true $\xi$). If they do, state this explicitly. If they do not, retrain under controlled conditions or justify why the comparison remains fair.
-4. **Add a fixed-schedule curriculum baseline** that linearly expands a uniform distribution's bounds over the same training horizon. This directly tests whether the entropy-maximization-with-constraint mechanism adds value beyond "gradually widen."
+1. **Add IS diagnostics:** Report effective sample size or IS weight variance across training iterations for at least one high-dimensional task (e.g., PandaPush with 17 parameters). Ideally also include an ablation comparing IS-based updates against using fresh rollouts.
+2. **Clarify baseline evaluation protocol:** State explicitly whether LSDR and AutoDR results use best-policy tracking (same as DORAEMON) or final-policy reporting. If they use final-policy, also show DORAEMON's final-policy performance for a fair comparison.
+3. **Report and ablate ε:** State the ε value used across all experiments and show sensitivity analysis (e.g., Hopper with ε × {0.5, 1, 2}).
+4. **Describe Beta parameter optimization concretely:** Add a brief description (or appendix paragraph) of how the constrained optimization over Beta parameters is solved (gradient-based? closed-form? convex?).
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fvTaoyH96Z.md` | 2.33 | Much weaker paper — unclear contribution, unfair baselines, poor writing. DORAEMON is substantially stronger in formulation, experiments, and clarity. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/zaoGCGLpux.md` | 4.75 | Theoretical MaxEnt paper with weak empirical work (1 seed). DORAEMON has stronger experiments and real-robot validation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/X1p0eNzTGH.md` | 5.67 | Level-sampling paper with interesting ideas but overclaimed results and messy presentation. DORAEMON is cleaner but has a more significant methodological gap (IS validation). |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/rJ5g8ueQaI.md` | 5.75 | Clean SEM paper with solid theory + experiments, narrower scope. DORAEMON has broader scope (sim-to-real) but weaker theoretical backing for its core mechanism. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/p01BR4njlY.md` | 5.75 | Strong robotics paper with thorough experiments but simulated-only evaluation. DORAEMON has real-robot validation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Dem5LyVk8R.md` | 7.00 | Safety-constrained policy evaluation with rigorous theory + experiments. DORAEMON is less theoretically grounded. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/QOfWubPhdS.md` | 6.50 | Self-adaptive reward shaping with thorough analysis. DORAEMON is comparable in empirical scope but has a methodological gap. |
+| Anchor Path | Avg Score | Comparison |
+|---|---|---|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/pISLZG7ktL.md` | 8.00 | Exceptional empirical scale (15k+ real rollouts), stronger than DORAEMON in empirical depth |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7BLXhmWvwF.md` | 8.00 | Strong theoretical+empirical contribution on challenging manipulation; DORAEMON is comparable in practical impact |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/JDzTI9rKls.md` | 6.75 | Clean contribution with rigorous evaluation; DORAEMON has a similar level of rigor but adds a real-robot experiment |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/X1p0eNzTGH.md` | 5.67 | Theory-heavy but incomplete; DORAEMON is clearly stronger with cleaner exposition and real experiments |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MSe8YFbhUE.md` | 6.50 | Solid empirical paper; DORAEMON is similarly well-executed with an additional real-robot demonstration |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/06mzMua9Rw.md` | 4.00 | Similar sim-to-real topic but lacks novelty and real-robot experiments; DORAEMON is substantially stronger |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fvTaoyH96Z.md` | 2.33 | Poorly written, unfair comparisons; DORAEMON is far superior in every dimension |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/EODzbQ2Gy4.md` | 3.40 | No real-robot experiments, limited evaluation; DORAEMON is stronger |
 
-**Score: 5.5**
+DORAEMON is clearly above the 4.0–5.67 range and comparable to the 6.5–6.75 range (DrM, Vlearn), with the additional strength of a real-robot experiment. It is not at the exceptional 8.0 level (lacking the massive empirical scale of the scaling-laws paper or the theoretical depth of the geometry-aware RL paper). The main weaknesses — missing IS diagnostics and ε sensitivity analysis — are real but do not invalidate the core contribution. The paper makes a clean, novel contribution with solid evidence across simulated and real settings.
 
-The paper proposes a well-motivated, clean formulation for automatic domain randomization and backs it with reasonably thorough experiments including real-robot transfer. The main weaknesses are (a) the unvalidated importance-sampling estimator for the core constraint, (b) best-policy selection inflating reported results, and (c) the entropy-maximization vs. simple-curriculum distinction not being fully isolated. These are non-trivial but addressable. The paper sits slightly below the strongest anchors (score 6+) due to the methodological gap around IS reliability, but above weaker papers with unclear contributions or poor experiments.
-
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

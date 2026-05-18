@@ -1,22 +1,20 @@
-Now I have all the information needed. Let me produce the final review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-LogicMP proposes a neural layer that performs mean-field variational inference over Markov Logic Networks to encode first-order logic constraints (FOLCs) into any off-the-shelf neural network. The key technical contribution is an efficient mean-field iteration that leverages the structure of clause formulas to reduce the per-grounding message complexity from O(L D^{L-1}) to O(L), and the overall iteration from O(N^M L^2 D^{L-1}) to O(N^{M'} L^2). The algorithm is further parallelized via Einstein summation (Einsum), enabling GPU-accelerated inference. Experiments across document understanding (FUNSD), collective classification (UW-CSE, Cora, Kinship), and sequence labeling (CoNLL-2003) demonstrate that LogicMP outperforms prior neuro-symbolic methods in both performance and efficiency.
+This paper proposes LogicMP, a neural layer that performs efficient mean-field variational inference over Markov Logic Networks (MLNs) to encode first-order logic constraints (FOLCs) into arbitrary neural networks. The key technical contributions are: (1) a theoretical reduction of grounding-message computation from O(LD^{L-1}) to O(L) per message (Theorems 1-2), and (2) a parallel tensor formulation using Einstein summation that aggregates grounding messages efficiently, reducing overall iteration complexity from O(N^M L^2 D^{L-1}) to O(N^{M'} L^2) with M' ≤ M. Experiments on three domains—document images (FUNSD), relational graphs (Kinship/UW-CSE/Cora), and text (CoNLL-2003)—demonstrate consistent performance improvements and ≈10× speedups over prior MLN inference methods.
 
 ## Strengths
 
-- **Theoretical complexity reduction from exponential to polynomial.** Theorem 1 and Theorem 2 formally show that the grounding message for a clause reduces to checking only the single true-premise assignment, cutting complexity from O(L D^{L-1}) to O(L). Combined with Einsum-based parallel aggregation, the overall iteration complexity drops from O(N^M L^2 D^{L-1}) to O(N^{M'} L^2). This is a principled advance that places MLN inference in a different complexity class than prior approaches.
+- **Theoretically grounded complexity reduction**: Theorems 1 and 2 (Section 3.2) prove that grounding-message computation collapses from O(LD^{L-1}) to O(L) by observing that only the true-premise assignment matters. This is a non-trivial and correctly derived insight, clearly illustrated with a truth table (Table 1 in the paper).
 
-- **Large empirical speedup enabling scale.** On the graph benchmarks, LogicMP achieves roughly 10× faster training than ExpressGNN w/ GS (Fig. 4) and scales to 20M groundings within a reasonable time, whereas prior methods either time out (>24h on Cora) or run out of memory. On Cora (300B groundings), LogicMP achieves AUC-PR 0.82 vs. 0.64 for ExpressGNN w/ GS, concretely demonstrating the scalability payoff.
+- **Demonstrated ≈10× runtime advantage**: Figure 4 shows LogicMP is ~10× faster per grounding than ExpressGNN w/ GS on collective classification tasks. Figure 5 further shows this efficiency enables training on far more groundings (20M vs 16K), translating to substantially better AUC-PR (e.g., 0.30 vs 0.11 on UW-CSE average, +173% relative improvement).
 
-- **Modular plug-and-play integration across domains.** LogicMP is shown as a drop-in layer replacing softmax (Fig. 2) and integrated with three different backbones — LayoutLM (document images), ExpressGNN (relational graphs), and BLSTM (text) — without altering the underlying network. The FUNSD experiment further shows that LogicMP handles up to 262K variables in 0.03 seconds, where AC-based methods (SL, SPL) fail entirely.
+- **Cross-domain versatility with the same modular layer**: The same LogicMP layer is integrated with LayoutLM (FUNSD), ExpressGNN (Kinship/UW-CSE/Cora), and BLSTM (CoNLL-2003), improving over each backbone. On FUNSD, it is the only neuro-symbolic method that succeeds with 262K variables and 134M groundings (SL/SPL fail due to AC compilation limits beyond 8 tokens). On CoNLL-2003, it achieves 91.42 F1 with both adjacent and list rules, outperforming logic distillation baselines.
 
-- **Consistent performance gains across tasks.** On FUNSD, LogicMP improves F1 from 82.0 to 83.3 (full) and from 46.7 to 50.1 (long). On CoNLL-2003, it achieves 91.42 F1 vs. 91.18 for LogicDist, with list-structure F1 improving from 94.68 to 97.41. On Kinship, it achieves near-perfect AUC-PR. These gains are consistent across three modalities with multiple backbone architectures.
-
-- **Novel formalization of message aggregation as Einstein summation.** Proposition 1 provides a clean mapping from implication-level aggregation (e.g., "ab, bc → ac") to Einsum notation, enabling parallel tensor computation instead of sequential grounding enumeration. This is the algorithmic lynchpin that makes the theoretical complexity reduction practical.
+- **Elegant Einsum-based parallelization**: Expressing the otherwise sequential grounding aggregation as Einstein summation (Proposition, Eq. 5) is a clean formulation that maps naturally to GPU tensor operations. The transitive-rule example (`einsum("ab,bc->ac", ...)`) concretely demonstrates the idea.
 
 ## Weaknesses
 
@@ -24,64 +22,71 @@ LogicMP proposes a neural layer that performs mean-field variational inference o
 None.
 
 ### Major
-None that rise to the level of threatening acceptance.
+None. The paper's core claims are well-supported by theoretical analysis and empirical results.
 
 ### Minor
-- **The graph experiments do not isolate whether the gain comes from better inference or simply more training data.** LogicMP achieves large AUC-PR improvements over ExpressGNN w/ GS (e.g., 0.30 vs. 0.11 on UW-CSE; 0.82 vs. 0.64 on Cora). The paper explicitly attributes this to the ability to train on more groundings (20M vs. 16K). However, no ablation trains ExpressGNN w/ GS for a comparable number of groundings (even if it takes >24h) to test whether the improvement is primarily from better inference or from more training data. The paper's efficiency claim is solid, but the claim that LogicMP yields "better inference" (not just faster inference enabling more training) is not cleanly supported. This is a scope-of-evidence gap, not an error.
 
-- **The main-text justification for the core simplification (Theorem 1) is thin.** The paper provides one sentence of intuition ("Since the grounding affects i only when the premise g_{-i} is true") plus a table illustrating a single example, then defers to the appendix for the full proof. While relegating proofs to appendices is standard practice, the central claim of the entire method — the exponential-to-linear reduction — deserves a more thorough main-text sketch (2–3 equations or a brief derivation) to build reader trust without requiring jumping to the appendix. As written, a skeptical reader cannot assess correctness from the main text alone.
+- **Slightly inflated novelty claim**: The abstract and introduction state that LogicMP is "the first fully differentiable neuro-symbolic approach capable of encoding FOLCs for arbitrary neural networks." This is overstated: prior differentiable methods (DeepProbLog, Scallop, Logic Tensor Networks) can integrate first-order logic with neural networks, albeit under different assumptions (closed-world, different inference mechanisms). The paper's *actual* novelty—efficient parallel mean-field inference for MLN-style reasoning under OWA—is compelling enough that softening this claim would strengthen the paper by making it more precise. The paper correctly acknowledges these methods in the related work (line 339), making the "first" claim in the contributions inconsistent with the more nuanced discussion elsewhere.
 
-- **No convergence analysis of the mean-field iterations.** LogicMP uses a fixed 5 iterations for all experiments, but no diagnostic (e.g., change in variational free energy or KL divergence across iterations) is reported. While 5 iterations is a reasonable default in practice, showing convergence behavior would strengthen the method's credibility, especially since MF convergence is not guaranteed for arbitrary MLN potentials.
+- **Missing standard deviations in key tables**: On FUNSD (Table 1), the paper reports averages over 8 runs with no variance estimates. On the graph tasks (Table 2), standard deviations are mentioned in the text (0.03 for UW-CSE, 0.01 for Cora) but not shown in the table. While the gains are substantial enough that missing error bars don't threaten the conclusions, their inclusion would improve rigor.
 
-- **Statistical significance is not reported.** The paper reports means over 5–8 runs and mentions standard deviations (0.03 for UW-CSE, 0.01 for Cora), but does not report confidence intervals or significance tests. For modest improvements (e.g., +0.24 F1 on CoNLL-2003), it is unclear whether the difference is statistically reliable.
+- **Conclusion overstates optimality**: The conclusion claims LogicMP's output is the "(nearly) optimal combination" of FOLCs and evidence. Mean-field variational inference finds a local, not global, optimum of the KL divergence. The word "nearly" hedges this, but the phrasing is imprecise and could mislead readers unfamiliar with variational inference.
+
+- **Convergence properties of mean-field for MLNs not discussed**: The derivation of the mean-field update (Eq. 2-3) is clear, but the paper does not discuss convergence guarantees or sensitivity to initialization for the MLN setting, which is known to be non-convex. An empirical sensitivity study (e.g., varying the number of iterations T from 1 to 10) would strengthen reproducibility.
 
 ### Trivial
-- The paper mentions "ExpressGNN" in the body text but the citation format and naming could be clearer about the distinction between ExpressGNN, ExpressGNN w/ GS, and ExpressGNN-E.
+
+- The complexity claim in Section 3.3 ("optimized overall complexity is O(N^{M'} L^2)") could be more precise about when M' < M vs M' = M, though the paper does note "In the worst case, M' equals M, but in practice, M' may be much smaller."
 
 ## Nice-to-Haves
-- A controlled experiment training ExpressGNN w/ GS on the same 20M groundings as LogicMP (even if it takes >24h) to isolate whether MF inference quality itself is superior, or whether the gain is entirely from training scale.
-- Discussion of how non-clausal formulas (existential quantifiers, nested implications) can be converted to CNF without losing efficiency.
-- A per-category breakdown on CoNLL-2003 showing which FOLCs contribute most to the improvement.
+
+- **Learning rule weights**: The collective classification experiments fix rule weights to 1 (following the ExpressGNN w/ GS protocol for fair comparison). Since the differentiable formulation supports learning rule weights via backprop, an ablation showing whether learned weights further improve performance would be a natural extension.
+
+- **Convergence sensitivity study**: Reporting sensitivity of LogicMP's output to the number of mean-field iterations T (currently fixed at 5 across all experiments) would strengthen reproducibility claims.
+
+- **Qualitative examples on relational graphs**: The paper provides a helpful visual example for the document understanding task (Fig. 1) but no equivalent for the relational graph tasks (UW-CSE, Cora), where the nature of the logical corrections is less intuitive.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-1. *"The simplification in Theorem 1 is not adequately justified and could be incorrect."* — The paper states the proof is in the appendix, provides an intuitive explanation ("only assignments that make the premise true matter"), and illustrates with a table. The critic's concern is about presentation density, not correctness. This is a minor presentation issue, not a structural/methodological gap.
+These points are flagged to be removed — treat them with caution:
 
-2. Several strengths from the Strength Finder that are generic or redundant: *"Sound theoretical simplification in mean-field"* (redundant with the complexity reduction strength); *"Clear problem framing and motivation"* (generic — every paper should have this); *"Modular design"* (already captured in the strengths list with specific evidence).
+- **"Missing CRF baseline on CoNLL-2003"**: REMOVED — factually wrong. The paper includes both a standard linear-chain CRF (BLSTM w/ CRF, 90.94 F1) and a mean-field CRF variant (91.07) in Table 2 (line 419-420). LogicMP's adjacent-rule result (91.25) exceeds both.
 
-3. Criticisms about *"missing appendix content"* or *"proofs deferred to appendix"* — this is standard practice for ML conference papers with length limits; the proofs exist in the original submission.
+- **"Einsum complexity imprecise — should state worst case"**: REMOVED — the paper already addresses this: "In the worst case, M' equals M, but in practice, M' may be much smaller" (line 284).
 
-4. *"Handling of non-clausal formulas"* as a weakness — the paper explicitly states it handles CNF formulas and generalizes to multi-class predicates. Extending beyond CNF is scope creep.
+- **"Theorems assume clausal forms"**: WEAKENED to Nice-to-Have. The paper explicitly generalizes to CNF (Theorem 2) and multi-class predicates (Appendix), and notes that non-clausal formulas can be converted. This is adequately addressed.
+
+- **"Section 2 — mean-field convergence properties"**: MOVED to Minor Weaknesses from a standalone criticism, since this applies to all mean-field methods and is not specific to LogicMP.
+
+- Various formatting/style nitpicks, and reproducibility nits about undisclosed hyperparameters, are removed per the review guidelines.
 
 ## Novel Insights
 
-The most interesting observation emerging from the interaction between the paper and the reviews is that the paper's key enabler — the complexity reduction in Theorem 1 — is simultaneously the most elegant and the most opaque part of the contribution. The paper shows that for clause formulas, the grounding message collapses to checking only the single assignment that makes the premise true, because all other assignments yield potentials that are invariant with respect to the hypothesis variable. This insight is simple once understood, yet the reviewer's difficulty following it from the main text suggests the paper under-communicates what is arguably its deepest conceptual contribution. A second observation is that the paper's efficiency claim is unassailable (the speedup is real and measured), but the downstream performance claim is more nuanced: the method's value proposition is "efficiency enables scale, and scale enables accuracy." This is a legitimate contribution — many impactful ML methods follow this paradigm (e.g., ResNets enabled deeper networks) — but the paper would benefit from stating this framing more explicitly rather than implicitly suggesting the inference algorithm itself is more accurate.
+None beyond the paper's own contributions. The reviews raise standard concerns (missing error bars, inflated claims) that are well-understood in the community and do not produce a novel synthesis beyond what the paper itself provides.
 
 ## Suggestions
-1. Add a 2–3 equation derivation sketch of Theorem 1 in the main text (or move the key step from the appendix forward) so readers can follow the core simplification without consulting the appendix.
-2. Run a controlled experiment on UW-CSE that trains ExpressGNN w/ GS on the same 20M groundings as LogicMP (allowing >24h if needed) to directly test whether the MF approximation provides better inference or just faster training. Even a single data point would resolve the attribution question.
-3. Include a convergence plot (e.g., change in variational free energy or average Q_i entropy across iterations) for at least one moderate-sized task.
-4. Report confidence intervals or pairwise significance tests for the main results, particularly on CoNLL-2003 where the absolute gains are modest.
+
+1. **Reframe the "first" claim** as "the first *efficient and fully parallelizable* neural layer for MLN-style FOLCs under OWA" or similar. The contribution stands on its own merits without this particular superlative.
+2. **Add standard deviations to all main tables** (FUNSD and graph results) for statistical rigor.
+3. **Add a brief note** acknowledging that mean-field finds a local optimum of the KL divergence, to avoid overstating optimality in the conclusion.
+4. **Include an empirical sensitivity study** of the number of iterations T (e.g., T ∈ {1,3,5,10}) on at least one dataset.
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration anchors** (all from the retrieval batch):
 
-| Path | Avg Human Score | Comparison to LogicMP |
-|------|----------------|----------------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1BmveEMNbG.md` | 7.00 | Stronger theoretical rethinking of an established problem with a new dataset; LogicMP has broader empirical scope but less incisive theoretical framing. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Zes7Wyif8G.md` | 6.50 | KLay tackles a closely related problem (accelerating neurosymbolic circuits) with similar rigor; LogicMP is comparably strong but slightly less polished in main-text exposition. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7PGluppo4k.md` | 6.40 | Neuro-symbolic integration for LLMs; LogicMP has stronger theoretical contribution (complexity proof) and broader experimental scope. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3NFtzhFbYM.md` | 6.00 | Dolphin framework has similar aims (scalable neurosymbolic) but was rejected due to undiscussed limitations; LogicMP's limitations are less severe and better acknowledged. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ELQ8X02IEp.md` | 5.33 | Vi-SATNet has weaker theoretical grounding and narrower experiments; LogicMP is clearly stronger. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/uBMNOjqHUV.md` | 3.50 | Mostly exposition/survey with incremental contribution; LogicMP has far more substance. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/bpSN5YfSSZ.md` | 3.50 | Weak experiments, unclear contribution; LogicMP is substantially stronger. |
+| Anchor Path | Avg Score | Comparison |
+|---|---|---|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Zes7Wyif8G.md` (KLay) | 6.50 | Similar paper (accelerating neuro-symbolic computation); LogicMP has stronger theoretical analysis but similar empirical breadth and presentation quality |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LemSSn8htt.md` (Delta-AI) | 6.67 | Stronger empirical evaluation but narrower scope; LogicMP is comparable in quality |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7PGluppo4k.md` (LoCo-LMs) | 6.40 | LoCo-LMs accepted with concerns about evaluation scope; LogicMP has broader cross-domain evidence |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3NFtzhFbYM.md` (Dolphin) | 6.00 | Rejected due to novelty concerns; LogicMP has clearer novelty via theoretical complexity reduction |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/x3cFAoorct.md` (LFL) | 4.40 | Weak paper with clarity issues; LogicMP is substantially stronger in all dimensions |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ZyCuQxyPJK.md` (NeuroLifting) | 4.25 | Weak MRF inference paper; LogicMP has crisper claims and better experiments |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4ndvumlZak.md` (Closing the Gap) | 4.50 | Weak reasoning paper; LogicMP is far more rigorous |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fjZMGKB2dU.md` (Conjunctive Queries) | 3.60 | Weak paper; LogicMP is a clearly better submission |
 
-LogicMP sits comfortably above the low-scoring anchors and is comparable to the 6.0–6.5 band. It has genuine theoretical contributions (complexity reduction proof), clean algorithmic ideas (Einsum-based MF), and solid multi-domain experiments. The main weaknesses are presentational and could be addressed in revision. Relative to the field's standards, this is a solid paper with real contributions.
+LogicMP is on par with accepted papers in the 6.5–6.7 range. Its theoretical contribution (Theorems 1-2 reducing grounding message complexity) is stronger than typical for this band, while its minor issues (slightly inflated claims, missing error bars) are comparable to accepted papers like KLay and LoCo-LMs.
 
-**Score:** 6.0  
-**Decision:** Accept
-
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

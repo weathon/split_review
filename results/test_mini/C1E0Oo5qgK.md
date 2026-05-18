@@ -1,99 +1,105 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have good calibration. Let me write the consolidated review.
 
 ## Summary
 
-This paper identifies a "model-fitting" problem in diffusion guidance, where samples over-optimize for the guidance classifier at the expense of generalizable features. The authors propose Compress Guidance (CompG), which applies guidance at only a subset of timesteps while reusing gradient information from prior guidance steps. Experiments across classifier guidance (ADM, CADM), classifier-free guidance (DiT, Stable Diffusion), and CLIP-based guidance (GLIDE) on ImageNet and MSCOCO show that CompG with 50 guidance steps outperforms vanilla guidance with 250 steps while cutting computation by 23–42%.
+This paper identifies *model-fitting* in diffusion guidance, where samples become over-optimized for the specific classifier used during sampling rather than generalizing to the intended condition. It proposes Compress Guidance (CompG), which applies guidance gradients only at a subset of timesteps (concentrated early in the process) and reuses them elsewhere. Experiments across ADM, CADM, DiT, GLIDE, and Stable Diffusion on ImageNet and MSCOCO show that CompG reduces the number of guidance steps by up to 5× while maintaining or slightly improving FID/sFID and reducing compute.
 
 ## Strengths
 
-- **Concrete empirical demonstration of model-fitting**: Table 1 (in Section 3) shows a large accuracy gap between the on-sampling classifier (90.8%) and two off-sampling classifiers (62.5%, 34.2%), and Figure 2 visualizes that on-sampling loss converges early while off-sampling loss remains high. This provides tangible evidence that guidance at every step overfits to the guiding classifier.
+1. **Practical finding validated across multiple architectures.** The paper demonstrates that reducing guidance frequency can maintain or improve quality across five different model families (ADM, CADM, DiT, GLIDE, Stable Diffusion), both classifier and classifier-free guidance, and across multiple resolutions (64×64, 128×128, 256×256). This breadth suggests the effect is not an artifact of a single architecture (Tables I–IV).
 
-- **CompG improves both quality and efficiency simultaneously**: On ImageNet 64×64 unconditional ADM (Table 2), CompG with 50 guidance steps achieves better FID (5.91 vs 6.40) and recall (0.56 vs 0.54) than vanilla ADM-G with 250 steps, while cutting GPU hours by 42%. Similar improvements hold across resolutions and model types (Tables 2–4). This directly supports the claim that reducing guidance frequency can improve quality while lowering cost.
+2. **Polynomial scheduling ablation shows distribution matters.** By varying the exponent \(k\) in Eq. 15, the paper shows that concentrating guidance toward early timesteps systematically reduces the required number of guidance steps (from 50 at \(k=1\) down to 28 at \(k=6\)) while maintaining or improving FID (Table V, FID improving from 1.91→1.82). This demonstrates that *how* one distributes a fixed guidance budget is a meaningful design choice.
 
-- **Principled analysis of why naive baselines fail**: Section 3.2 identifies two necessary properties—continuity (to avoid "forgetting") and magnitude sufficiency (to avoid "non-convergence")—and demonstrates that Early Stopping violates continuity while Uniform Skipping violates magnitude sufficiency (Figure 3/6 area). This analysis motivates the design of CompG and distinguishes it from naive alternatives.
+3. **Simultaneous quality and efficiency improvement in some settings.** On ImageNet 64×64 with ADM, CompG improves FID from 6.40 (vanilla guidance, 250 steps) to 5.91 (50 guidance steps) while reducing GPU hours from 54.86 to 31.80 (Table I). This simultaneously breaks the usual quality-efficiency trade-off, which is the paper's most compelling result.
 
-- **Broad experimental generality**: The method is validated across classifier guidance (ADM, CADM), classifier-free guidance (DiT, Stable Diffusion), and CLIP-based guidance (GLIDE), on both ImageNet and MSCOCO at multiple resolutions (64×64, 128×128, 256×256). This breadth shows the method is not tied to a specific guidance type or architecture.
-
-- **Controllable guidance step distribution**: Equation (16) parameterizes guidance-step placement with a single scalar k, and the ablation in Table 6 confirms that shifting guidance toward early timesteps maintains or improves performance while reducing step count, validating the design.
+4. **Simple and practical method.** The proposed technique (skip gradient computation at most timesteps, reuse the last computed gradient at skipped timesteps) is trivial to implement on top of existing pipelines and introduces no additional hyperparameters beyond the polynomial exponent \(k\) and the total number of guidance steps.
 
 ## Weaknesses
 
 ### Major
 
-- **Missing fair baselines in FID comparisons**: The main quantitative comparisons (Tables 2–4) compare CompG at 50 guidance steps against vanilla guidance at 250 steps. This conflates two things: reducing the *number* of guidance steps and the *compression mechanism* itself. The paper discusses Early Stopping (ES) and Uniform Skipping (UG) in the analysis section and even reports their accuracy in Table 5, but never reports their FID/sFID/Precision/Recall in the main tables. Without knowing whether vanilla guidance with 50 steps (applied early or uniformly) achieves comparable or worse FID, the reader cannot tell whether the compression mechanism adds value beyond simply using fewer guidance steps. A direct ablation against vanilla guidance at the same guidance step count, and against ES/UG at the same count, is needed to isolate the effect of gradient reuse.
+1. **Theoretical framing (Theorem 1, Eqs. 9–11) is not rigorous and does not support the method.** The proof of Theorem 1 assumes \(\epsilon_\theta(\mathbf{x}_{t_1}, t_1) \approx \epsilon_\theta(\mathbf{x}_{t_2}, t_2) \approx \epsilon\) with equal approximation error \(\Delta\) across timesteps — an unjustified claim. The rewriting of the sampling equation as gradient descent (Eq. 9, labeled \(\gamma_1 \nabla D_{KL}\)) is a rearrangement of terms with no derivation showing it is the gradient of the claimed KL divergence. The theory does not produce any testable prediction or design principle that the method follows from; the proposed method (skip guidance, reuse gradients) is an empirical observation that stands independently. This section attempts to give a formal veneer to an essentially empirical contribution but does not constitute valid theoretical support. **However, the method itself does not depend on this theory**, so the empirical contribution can be evaluated separately.
 
-- **The "gradient of KL divergence" framing is asserted, not derived**: Equations 9–12 (lines 93–102) rearrange the standard DDPM sampling equation and simply label a term as "γ₁∇D_KL" without any derivation showing that this term is actually the gradient of a KL divergence with respect to xₜ. Similarly, Theorem 1's proof makes unjustified assumptions (e.g., that ‖ε−ε_θ‖ is constant across timesteps and that ε_θ approximates ε equally well at all timesteps). While this theoretical framing is not essential to the paper's empirical contributions, presenting it as a rigorous derivation weakens the paper's credibility. The paper would be stronger if it dropped or drastically simplified this formalism and presented the method as an empirically-motivated heuristic.
+2. **Evidence for the core "model-fitting" diagnosis has a confound.** The paper's central conceptual claim is that guidance over-applies because samples become "tuned" to the guidance classifier's parameters. The key evidence is an accuracy gap: on-sampling classifier 90.8% vs. off-sampling classifier (same architecture, different weights) 62.5% (Table in Section III-A). The paper states the off-sampling classifier has "the same architecture and performance as the on-sampling classifier" and that "the only difference between the two models is the parameters." However, it does not clarify whether the off-sampling classifier was trained on noisy images at all diffusion timesteps (as the on-sampling ADM classifier was). Without this detail, the gap could partially reflect distribution mismatch rather than model-fitting per se. The ResNet152 comparison (34.2%) provides a useful reference but does not resolve this confound since ResNet152 is a clean-image classifier. The claim is plausible but not bulletproof as presented.
+
+3. **No comparison in terms of NFEs (number of function evaluations).** The paper reports GPU hours and number of guidance steps but never the total NFEs, which is the standard efficiency measure in the diffusion sampling literature. Since CompG reuses old gradients at skipped timesteps (the \(\Gamma_t\) mechanism in Eq. 12), it incurs some overhead that GPU-hour measurements conflate with other factors. Reporting FID vs. NFEs would enable fair comparison and is standard practice.
+
+4. **Gradient reuse mechanism is not validated.** The method reuses the guidance gradient from the last guidance step at subsequent non-guidance timesteps (\(\Gamma_t\) in Eq. 12). The paper provides no empirical analysis of whether gradients from, say, timestep \(t\) remain a useful direction five or ten steps later. Without measuring gradient similarity across timesteps, this mechanism is an unvalidated assumption. An ablation comparing CompG with gradient reuse vs. simply skipping guidance steps (the "otherwise" branch without \(\Gamma_t\)) would isolate the benefit of reuse.
 
 ### Minor
 
-- **The "model-fitting" problem is partly definitional**: The paper treats the accuracy gap between on-sampling and off-sampling classifiers (90.8% vs. 62.5%) as evidence of a harmful phenomenon. However, this gap is partly expected — samples explicitly optimized for classifier A will naturally have higher accuracy on A than on a different classifier B, and narrowing the gap (to 64.2% with CompG) is not by itself evidence of improved quality. The paper's qualitative results (Figures 4, 5) show plausible improvements, and CompG does improve FID while narrowing the gap, but the causal link between model-fitting and sample quality remains correlational rather than causal.
+1. **Marginal improvements in off-sampling accuracy from CompG.** Table III shows CompG raises off-sampling accuracy from 62.5% to 64.2% and ResNet accuracy from 34.17% to 34.93% — very small gains. The claim that CompG "solves" model-fitting is overstated given these numbers.
 
-- **Method description notation is ambiguous**: Equation 15 (Eq. dup2, line 223–227) uses the notation Σ_{t=G_i}^{G_{i+1}} Γ_t, which is confusing because Γ_t is defined as a stored value (unchanged between guidance steps). The accumulation logic is understandable from context, but the paper would benefit from clear pseudocode specifying exactly when gradients are computed, stored, accumulated, and applied.
+2. **No confidence intervals or statistical significance.** All FID/sFID numbers are reported as point estimates without variance across runs. This makes it impossible to assess whether improvements (e.g., FID 11.96→11.65 on ADM-256) are reliable or within noise.
 
-- **No error bars or multiple runs**: No experiment reports standard deviations or is repeated with multiple seeds. Given that some FID improvements are modest (e.g., 11.65 vs. 11.96 on ImageNet256 unconditional), statistical significance is unclear.
+3. **Missing NFE-controlled baseline.** The paper does not compare to a simple baseline that uses the same total number of guidance steps but distributes them via a simple alternative schedule (e.g., only the first N steps, or a random schedule). The comparison to Early Stopping (which stops after step 200) and Uniform Skipping (every 5 steps) partially addresses this, but an equivalent-NFE comparison with a non-reuse scheme would be cleaner.
 
-- **Abstract claim is inconsistent with experimental results**: The abstract states "reducing the required guidance timesteps by nearly 40%," but the experiments consistently report a 5× reduction (80%) in guidance steps (250→50).
+4. **Some FID improvements are small.** On CADM-256 (Table II), CompG achieves FID 4.52 vs. vanilla 4.58 — a 0.06 difference. On DiT-CompCFG, FID goes from 2.25 to 2.19. These improvements are modest and may not be perceptually meaningful.
 
 ### Trivial
 
-- None that are genuinely substantive beyond what is captured above.
+None of note — the parser-stripped presentation issues flagged by reviewers are artifacts, not author errors.
 
 ## Nice-to-Haves
 
-- Extend the evaluation to modern few-step samplers (e.g., DDIM with 50 total steps), since the paper uses T=250 for most experiments.
-- Compare against the gradient accumulation/reuse baseline without the early-biased distribution (i.e., CompG with uniform step distribution).
+- An analysis of gradient cosine similarity across adjacent timesteps to justify the gradient reuse mechanism.
+- A plot of \(\|\nabla_{\mathbf{x}_t} \log p_\phi(y|\mathbf{x}_t)\|\) across timesteps to show gradient magnitude decreases late in sampling.
+- Validation that the off-sampling OADM-C classifier was trained on identical noise-augmented data as the on-sampling classifier (to address the confound in the model-fitting evidence).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points from the harsh critic are flagged for removal; treat them with caution:
 
-1. **Harsh critic's "Critical Issue 1" as "structural/fatal"**: The critic describes the theoretical issues as making the paper's "central narrative" collapse. This overstates the role of the theory — the paper's core contributions (identifying model-fitting, proposing CompG, showing empirical gains) do not depend on the formal optimization framing. The theory is supplementary framing, not the foundation of the method. I have included this as a Major weakness but downgraded its severity.
+- **"The central claim of model-fitting is not supported by the evidence (Structural)"** — Partially kept above as Major #2, but the critic's stronger claim that the evidence is "invalidated" is an overstatement. The paper's evidence is suggestive (same architecture, different weights, large accuracy gap) and the critic's accusation of confound relies on assuming the off-sampling classifier training differed from the on-sampling one — the paper states the opposite. The critic's third evidence point (color bias) being called "anecdotal" is overly dismissive of valid qualitative evidence.
 
-2. **Harsh critic's claim that model-fitting "is not convincingly demonstrated" as a "Methodological gap"**: The paper provides three distinct pieces of evidence (loss curves, accuracy gap, qualitative examples). While the causal link is correlational, the phenomenon itself is convincingly quantified. This is now listed as a Minor weakness.
+- **"The runtime improvements are largely mechanical: applying guidance at fewer timesteps trivially reduces compute"** — This is a non-criticism; the paper's contribution is that reducing guidance steps also *improves quality*, not just that it saves compute. The compute savings are reported as a secondary benefit.
 
-3. **Strength Finder's #2 under Supporting strengths ("Formal grounding of sampling as optimization")**: This conflicts with the verified weakness about the theory being asserted rather than derived. Per instructions, when a strength and weakness disagree, the weakness wins.
+- **"Figure 2 caption claims superiority... but the numbers... are not statistically validated"** — Lack of confidence intervals is kept as Minor #2; the critic's framing that this invalidates the results is too harsh.
 
-4. **Harsh critic's claim that "the paper cannot be reproduced from the description"**: The algorithm description, while notationally ambiguous, conveys the core idea clearly enough for reproduction with reasonable effort. The ambiguity exists but does not preclude reproducibility.
+- **"Table II... the text says '42% reduction' — 31.80/54.86 ≈ 58%, so the reduction is actually 42%"** — The critic's math is wrong. 31.80/54.86 = 0.58 (CompG takes 58% of vanilla time), so the reduction is 100% − 58% = 42%. The paper is correct.
 
-5. **Harsh critic's claim about "inconsistent claims in abstract" as a major issue**: This is a minor clarification issue, now folded into Minor weaknesses.
+- **"The caption of Table I claims 'approximately 42%... and 23%' but the numbers show 42% and 23% respectively"** — The critic appears to be saying the numbers match the caption, which is not a criticism. Nonsensical point.
+
+- **"No comparisons are made to... DPM-Solver, consistency models, progressive distillation"** — These address a different problem (reducing total sampling steps, not guidance efficiency within a fixed sampling budget). Scope creep.
+
+- **"Missing comparison to any recent work on efficient diffusion sampling"** — See above. These works are orthogonal to the paper's contribution (guidance frequency reduction within a fixed sampling schedule).
+
+- **Pure formatting/style nitpicks** about table spacing, non-standard notation, and undefined metrics — removed per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The observation that guidance loss saturates early and that gradient reuse across timesteps works well is the paper's core insight, and the reviews do not surface a fundamentally different perspective on the work.
+None beyond the paper's own contributions. The core observation — that guidance gradients are more useful early in the sampling process and can be applied at a subset of timesteps — is the paper's main insight and is well-supported empirically, even though the "model-fitting" explanation for *why* this works is not fully validated.
 
 ## Suggestions
 
-1. **Add fair baselines to the main tables**: Include vanilla guidance with 50 guidance steps (both early-stopped and uniformly skipped), with the same total number of sampling steps, so readers can assess whether the compression mechanism itself (rather than just reducing guidance count) contributes to the improvement.
+1. **Tighten the model-fitting evidence.** Explicitly state that the off-sampling OADM-C was trained on the same noise-augmented data distribution as the on-sampling classifier, or retrain it with that protocol. If the gap persists, it cleanly supports the model-fitting claim.
 
-2. **Remove or drastically simplify the theoretical framing in Section 3.1**: The paper would be stronger if it simply presented the empirical observation that guidance loss saturates early and proposed gradient reuse as a practical heuristic, without attempting to prove it is a gradient descent on KL divergences.
+2. **Drop or substantially revise the theoretical section (Theorem 1, Eqs. 9–11).** The current framing is not rigorous and invites justified criticism. Replace it with a simpler, defensible observation: guidance gradients across nearby timesteps are correlated, and empirically, early timesteps contribute more to conditional information. Validate the correlation claim with a simple experiment.
 
-3. **Provide pseudocode**: A clear Algorithm box specifying (a) when Γ is computed vs. reused, (b) how the accumulated gradient is applied at compressed steps, and (c) how k controls the distribution would eliminate the ambiguity in Equations 13–15.
+3. **Add NFE-based efficiency comparisons** (e.g., FID vs. number of guidance function evaluations) for all methods, and report results over multiple random seeds with mean ± std.
 
-4. **Add error bars** for at least the main results to establish statistical significance.
+4. **Ablate gradient reuse.** Compare CompG (with \(\Gamma_t\)) against a version that simply skips guidance at non-sampled timesteps (no reuse) to quantify the benefit of the reuse mechanism.
 
-5. **Reconcile the abstract**: Change "nearly 40%" to reflect the actual 80% guidance step reduction used in experiments, or clarify what is being measured.
+5. **Add a simple baseline: the same number of guidance steps applied only at the earliest timesteps** (no polynomial scheduling, no reuse). This would isolate the effect of the scheduling from the effect of gradient reuse.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration anchors:**
 
-| Path | Avg Human Score | Comparison |
-|------|-----------------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/b3CzCCCILJ.md` (ICG/TSG) | 6.00 | Stronger theoretical grounding and clearer experiments, accepted. This paper has a weaker theoretical story and missing baselines by comparison. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/8K36RkrI7N.md` (CFG as PC) | 5.75 | Both papers address guidance shortcomings. That paper has stronger theory but limited practical impact; this paper has broader experiments but weaker theory. Roughly comparable. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/i8bdPSmOwk.md` (Momentum) | 5.33 | Similar profile — practical method addressing guidance limitations, missing baselines, limited novelty. This paper has broader experimental coverage. Comparable. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Y4kJp8GQmV.md` (ReCFG) | 4.25 | Both address guidance issues. That paper had modest empirical gains and was rejected. This paper has stronger empirical results but weaker theoretical framing. Slightly stronger overall. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Hpu3KIX8Am.md` (Dreamguider) | 4.00 | Rejected for limited novelty and marginal improvements. This paper has more extensive experiments and clearer gains. Stronger. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Trn4Hji6iH.md` (AccCtr) | 3.50 | Rejected for significant errors. This paper has no such critical errors. Stronger. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| Universal Guidance (pzpWBbnwiJ) | 5.25 (Accept) | Similar type (guidance improvement paper). This paper has weaker theory but broader architecture validation. Comparable overall. |
+| Revamping Diff. Guidance (b3CzCCCILJ) | 6.00 (Accept) | Stronger theoretical framing of CFG alternatives. The current paper has weaker theory but is more practically focused. Slightly weaker. |
+| Representative Guidance (gWgaypDBs8) | 7.33 (Accept) | Stronger empirical validation and clearer contribution. This paper is notably weaker. |
+| Feature-guided Score Diff. (kwY3eL3QVh) | 5.50 (Reject) | Mixed reviews, similar quality level empirically. The current paper has broader experiments but similar theoretical weakness. Comparable. |
+| Dreamguider (Hpu3KIX8Am) | 4.00 (Reject) | Similar topic (guidance efficiency). The current paper has stronger empirical validation across more settings. Better. |
+| Rectified Diff. Guidance (Y4kJp8GQmV) | 4.25 (Reject) | Limited experiments. The current paper has broader empirical validation. Better. |
+| Memorization→Generalization (XeGSIr7z6u) | 3.40 (Reject) | Serious methodological flaws. The current paper is clearly stronger. |
+| Diff. Process w/ Implicit Latents (NW5vSJXO9V) | 3.67 (Reject) | Not strong empirically. The current paper is stronger. |
 
-The paper has genuine strengths (broad experimental validation, clear empirical motivation, consistent improvements across settings) but is held back by its weak theoretical framing, missing fair baselines, and ambiguous notation. The core idea is useful and the experiments are reasonably thorough, but the paper does not currently establish whether the compression mechanism specifically (beyond just reducing guidance steps) is responsible for the gains. A major revision addressing these issues could produce a solid paper.
+The paper makes a useful empirical contribution — demonstrating that guidance frequency can be substantially reduced while maintaining or improving quality — and validates it across a broad range of models and datasets. However, the theoretical framing is not rigorous, the central "model-fitting" diagnosis has a confound that weakens the conceptual contribution, and the evaluation lacks standard rigor (no NFEs, no statistical significance, unvalidated gradient reuse). The method is simple and practical, but the paper's strongest claims are not fully supported.
 
-**Originality**: Moderate — identifying model-fitting and reusing gradients is a novel design, though related to early-stopping ideas.
-**Importance**: High — efficient guidance is practically important.
-**Claims**: Partially supported — missing baselines weaken the claim that compression specifically adds value.
-**Soundness**: Fair — the theory is weak, but the empirical results are consistent.
-**Clarity**: Needs improvement — ambiguous notation, unclear method description.
-**Value**: Moderate — useful practical method, but the contribution size is modest.
+Relative to the anchors: this paper is stronger than the 3–4 range papers and on par with the mid-5 papers, but not as strong as the 6+ papers that have clearer theoretical backing or more thorough evaluation.
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

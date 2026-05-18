@@ -1,20 +1,22 @@
-Now I have all the information needed to write the consolidated review. Let me produce it.
+Now I have a thorough understanding of the paper and the reviews. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper identifies and formalizes a "model collapse" failure mode in DCCA-based multi-view representation learning, where performance degrades sharply as training proceeds. The authors diagnose the root cause as low-rank weight matrices in the DNN encoders, propose a noise regularization (NR) approach that enforces a Correlation Invariant Property (CIP) on the encoders to keep weight matrices full-rank, and develop NR-DCCA. Synthetic experiments with controllable common rates demonstrate the collapse phenomenon and show NR-DCCA avoids it; real-world experiments on PolyMnist, CUB, and Caltech show competitive final performance.
+This paper identifies and formalizes a previously undocumented phenomenon — model collapse in Deep Canonical Correlation Analysis (DCCA), where performance degrades as training proceeds. It proposes NR-DCCA, a noise regularization approach that enforces the Correlation Invariant Property (CIP) — keeping correlation with random noise invariant under transformation. The paper provides: (a) theoretical analysis connecting CIP to full-rank weight matrices for linear transformations, (b) a synthetic data construction framework with controlled "common rate," and (c) empirical results on synthetic and real-world datasets showing NR-DCCA maintains stable performance while standard DCCA methods collapse.
 
 ## Strengths
 
-- **Identification and diagnosis of model collapse in DCCA**: Section 4 provides both analytical reasoning and empirical evidence (eigenvalue distribution comparison in Figure 1) that DCCA weight matrices become low-rank during training, while Linear CCA weight matrices remain full-rank. This links a concrete mechanistic signal to a previously undiscussed failure mode in the DCCA literature.
+1. **Identification of a real, previously underexplored problem.** The paper is the first to systematically document model collapse in DCCA-based methods — the phenomenon where performance degrades sharply as training continues, making early stopping unreliable. This observation is practically relevant and could motivate further work on training stability in CCA-based multi-view learning.
 
-- **Clean theoretical connection between CIP and full-rank weights (for linear transformations)**: Theorem 1 proves that for a square linear transformation \(W_k\), the Correlation Invariant Property (\(\eta_k=0\)) is equivalent to \(W_k\) being full-rank. This provides a principled justification for the NR loss design, and is a stronger theoretical anchor than most heuristic regularizers provide.
+2. **Simple, principled noise regularization with clean intuition.** The noise regularization idea (enforcing invariant correlation with random noise) is conceptually elegant: it directly mimics the known behavior of Linear CCA, which does not collapse, by adding a loss term \(\zeta_k = |\text{Corr}(f_k(X_k), f_k(A_k)) - \text{Corr}(X_k, A_k)|\). The method is easy to implement and compatible with existing DCCA architectures.
 
-- **Theoretical link between weight rank and representation quality**: Theorem 2 shows that full-rank weight matrices guarantee low reconstruction loss and bounded denoising loss, formally connecting rank preservation to representation quality. This is non-trivial and provides the paper's key diagnostic tools (NESum, reconstruction/denoising losses used in Figure 3).
+3. **Strong empirical evidence on controlled synthetic data.** Figure 3 (paper's Figure \ref{fig: mean and std full cca}) provides compelling evidence across multiple diagnostic axes: (a) NR-DCCA maintains stable \(R^2\) across training epochs at all common rates (0%–80%), while DCCA/DCCAE/DCCA_PRIVATE all collapse; (b) NR-DCCA uniquely keeps correlation with noise near zero (confirming CIP); (c) NESum of weight matrices stays high for NR-DCCA; (d-e) reconstruction and denoising losses remain low. This multi-faceted diagnostic evaluation convincingly demonstrates the mechanism on synthetic data.
 
-- **Comprehensive synthetic benchmark with controllable common rate**: The synthetic data generation framework (Definition 1, Figure 2) with a tunable "common rate" parameter is a useful contribution for systematically stress-testing MVRL methods. The results in Figure 3 trace the full hypothesized mechanism: NR-DCCA maintains near-zero \(\zeta_k\), high NESum, low reconstruction/denoising loss, while baselines degrade on all metrics.
+4. **Synthetic data construction framework.** The "God Embedding" approach with controlled common rate (Definition 1) provides a useful tool for systematically benchmarking MVRL methods across varying levels of shared information, filling a gap in the existing evaluation toolkit.
 
-- **Multi-metric validation on synthetic data**: Figure 3 goes beyond simple accuracy to show the entire causal chain (CIP → full-rank weights → low reconstruction/denoising → stable performance) across varying common rates, confirming the mechanism rather than just the outcome.
+5. **Theoretical connection between CIP and full-rank weights.** Theorem 1 rigorously proves that for a linear transformation \(W_k\), CIP (\(\eta_k=0\)) is equivalent to \(W_k\) being full-rank. While this is limited to the linear case, it provides a solid theoretical starting point that motivates the noise regularization approach.
 
 ## Weaknesses
 
@@ -22,56 +24,76 @@ This paper identifies and formalizes a "model collapse" failure mode in DCCA-bas
 None.
 
 ### Major
-- **Real-world evaluation does not directly demonstrate collapse prevention**: The paper's central claim is that DCCA-based methods undergo a *performance drop during training* and NR-DCCA prevents this. Yet on real-world datasets (Figure 5), only final bar-chart F1 scores are reported without epoch-wise training curves. While the synthetic experiments (Figure 3a) do show training trajectories, the real-world results — essential for establishing practical relevance — lack the temporal dimension needed to verify that collapse actually occurs in the baselines and is avoided by NR-DCCA on these datasets. The paper acknowledges that "DCCA-based methods exhibit varying degrees of collapse" on real data, but provides no direct evidence of this claim. This is a significant gap between the paper's stated contribution and the evidence provided for its most practically relevant setting.
+
+1. **Theory-practice gap: Theorem 1 is proven only for a single linear layer, but the paper applies it to deep nonlinear networks.** Theorem 1 proves that CIP \(\iff\) full-rank for a single linear matrix \(W_k\). The paper then asserts that enforcing CIP on a deep nonlinear function \(f_k\) (composed of multiple linear layers + nonlinearities) "constrains the weight matrices to be full-rank" (line 232). No theorem or rigorous analysis bridges this gap: CIP for a nonlinear function is defined only at the output level (\(\zeta_k = 0\)), and there is no proof that \(\zeta_k=0\) implies any rank property of the internal weight matrices. The paper's central theoretical claim — that noise regularization prevents collapse by maintaining full-rank weights — is therefore not fully supported by the theory as presented. The empirical NESum measurements (Figure 3c) are suggestive but do not close this gap.
+
+2. **Real-world experiments do not verify collapse prevention.** The paper's headline claim is that NR-DCCA *prevents model collapse*, but the real-world results (Figure \ref{fig: real_world_cca}) show only bar charts of F1 scores — presumably at a single epoch. Collapse is inherently temporal (performance degrading over training). Without learning curves on real datasets, the reader cannot determine whether DCCA actually collapsed, whether NR-DCCA maintained stable performance, or whether the advantage is simply better convergence. This is a major evidential gap for the paper's central empirical claim on real-world data.
+
+3. **Generalization to DGCCA is claimed but not demonstrated.** The abstract and conclusion state that noise regularization "can also be generalized to other DCCA-based methods such as DGCCA." However, the experiments include DGCCA only as a *baseline* — there are no NR-DGCCA results. DGCCAE and DGCCA_PRIVATE are baselines, not noise-regularized versions. This claim is unsubstantiated and overstates the contribution.
+
+4. **Missing error bars on real-world results.** The real-world bar charts (Figure \ref{fig: real_world_cca}) do not show standard deviations or confidence intervals, despite the paper stating that "5-fold cross-validation" is used (line 275). Without variance information, it is impossible to assess the statistical significance of NR-DCCA's reported gains over baselines on real data.
+
+5. **No sensitivity analysis of the critical hyperparameter \(\alpha\).** The noise regularization weight \(\alpha\) (Equation in line 209) is a key hyperparameter that controls the trade-off between correlation maximization and the noise regularization. The paper does not report any sensitivity study (e.g., varying \(\alpha\) over \(\{0.01, 0.1, 1, 10\}\)) on either synthetic or real data, making it unclear how robust the method is to this choice.
 
 ### Minor
-- **Theory for the linear case does not automatically extend to deep networks**: Theorem 1 proves CIP ⇔ full-rank only for a square linear transformation \(W_k\). The step from this to the claim that enforcing CIP on a *nonlinear* encoder \(f_k\) likewise constrains all weight matrices within \(f_k\) to be full-rank is argued by analogy ("mimicking the behavior of Linear CCA") rather than by theorem or rigorous argument. This gap is acknowledged implicitly in the paper's language, but it leaves the theoretical foundation of NR-DCCA unsubstantiated for the deep case in which it is actually applied. Many papers use this pattern (prove for linear, apply to deep with empirical support), but the paper would benefit from explicitly characterizing the NR method as a theoretically-motivated heuristic for the deep case.
 
-- **Missing comparison with standard regularizers that also encourage full-rank weights**: The paper attributes model collapse to low-rank weight matrices and proposes NR as a remedy. Yet it does not compare against off-the-shelf regularizers known to encourage well-conditioned or full-rank weights, such as orthogonal regularization (Bansal et al. 2018) or weight decay. The paper itself acknowledges this as future work (Section 7). Without such baselines, it is unclear whether NR offers unique benefits or is simply one of several routes to the same effect. Given that the paper claims to introduce a new approach to prevent collapse, establishing this distinction matters for novelty.
+1. **Causality between low-rank weights and collapse is not established.** The paper states (line 32) this as a "conjecture" and provides correlational evidence (Figure 1 eigenvalue decay). This is appropriate for a discovery paper, but the causal mechanism remains a hypothesis. An intervention experiment (e.g., artificially forcing low-rank weights and observing collapse) would strengthen the paper's claims.
 
-- **Claim of generalizability to DGCCA is not empirically supported**: The paper states that NR "can be generalized to other DCCA-based methods such as DGCCA" (abstract, Section 5.1, conclusion), but no experiments with NR-DGCCA are presented. While DGCCA appears as a baseline, the regularized version is never evaluated. The claim is stated as a capability rather than a demonstrated result, but given the emphasis placed on it, some empirical support would be appropriate.
+2. **The synthetic data framework, while creative, lacks validation.** The "God Embedding" construction with overlapping slices and arbitrary nonlinear transformations is not validated against any known generative process. There is no guarantee that the synthetic data distribution captures realistic multi-view relationships, and the results could be influenced by the match between the noise regularizer and the synthetic data structure.
+
+3. **Real-world evaluation is limited.** Only three datasets are used (PolyMnist, CUB, Caltech), with only F1 scores reported. Including regression tasks (\(R^2\)) on real data would strengthen the generalizability claims, especially given that \(R^2\) is used in synthetic experiments.
+
+4. **Eigenvalue analysis (Figure 1) only shows the first layer on synthetic data.** The paper hypothesizes collapse is caused by low-rank weight matrices in DNNs, but Figure 1 only examines the first linear layer. While Figure 3c reports NESum across all weights on synthetic data, showing layer-specific rank evolution on real data would strengthen the connection.
 
 ### Trivial
-- The paper refers to a Lemma (Lemma 1 — about rank relationships) that appears to be in a stripped appendix section; it is referenced in the main text but cannot be evaluated from the current manuscript body.
+
+- Line 358 has an incomplete/fragmented sentence: "Considering that we believe that the low-rank property (i.e. Higher NESum represents lower redundancy in weight matrices."
+- Minor inconsistency: the text references subfigures (b) for NESum and (c) for correlation (lines 358-361), while the figure caption (lines 347-349) labels them oppositely.
 
 ## Nice-to-Haves
-- **Hyperparameter sensitivity analysis for \(\alpha\)** (the NR loss weight) would help assess the robustness of the method.
-- **Training curves for real-world datasets** (even for a subset, or at multiple checkpoints) would directly substantiate the collapse-prevention claim in the most practically relevant setting, turning a major weakness into a strength.
-- **Comparison with orthogonal regularization and weight decay** would contextualize the contribution against existing regularizers.
+
+- Including learning curves (F1 vs. epochs) for at least one real-world dataset would substantially strengthen the paper's core claim of preventing collapse.
+- Adding an ablation study on \(\alpha\) sensitivity would improve practical usability.
+- An intervention experiment (artificially constraining weight matrix rank and observing collapse patterns) would provide stronger causal evidence.
+- Validating the synthetic data framework against a known generative latent-variable model (e.g., views generated from a shared latent factor plus private noise) would improve confidence in the benchmark.
 
 ## Removed Points
-- *Criticism that DCCA baselines in real-world experiments are "not shown to collapse" → moved from Fatal to Major.* The paper does show synthetic training curves confirming collapse; the criticism is valid but only for real-world data, not for the entire paper.
-- *Strength Finder's claim about "generalization of NR to other DCCA variants" → removed.* The paper claims this capability but provides no experiments with NR-DGCCA or other NR-enhanced variants. This is an overclaim, not a substantiated strength.
-- *Strength Finder's strengths about the paper addressing an "important problem" → removed as generic/superficial.*
-- *Criticism about missing appendix content (Lemma references, proof details) → removed per instructions.* Parser strips these; they exist in the original submission.
-- *Formatting nits, typos, grammar issues → removed per instructions.*
+
+- **Criticism about "the paper does not discuss hyperparameter tuning for baselines"** — This is a generic criticism that applies to most comparison papers and does not specifically undermine this paper's contribution. Moreover, the paper states "For a fair comparison, we use the same architectures of MLPs for all D(G)CCA methods" (line 277), indicating control over architecture.
+- **Criticism that "Figure 1 only shows the first linear layer" as a weakness about insufficient evidence** — The paper's Figure 3c shows NESum "across all weights within the trained encoders" on synthetic data, addressing this concern. The Figure 1 eigenvalue plot is explicitly described as an illustrative observation, not the complete evidence.
+- **Strength Finder's claim about "generalizability to other DCCA-based methods" being demonstrated** — Removed because it conflicts with the verified weakness that no NR-DGCCA experiment exists. Including DGCCA as baselines does not constitute demonstrating generalization.
+- **Strength Finder's claim about "evaluation includes DGCCA variants"** — Same issue; including DGCCA baselines ≠ demonstrating noise regularization works for DGCCA.
+- **Formatting/style nitpicks and typo claims** — Removed as per instructions (parser artifacts, not author errors).
+- **Missing appendix/proof criticism** — Removed as per instructions.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviewers' comments largely converge on the same evaluation: the paper identifies a genuine problem with a creative solution and partial theoretical backing, but the evaluation has gaps that prevent the core claim from being fully substantiated. No reviewer raised a point that reframes or deepens the paper's contributions from a different angle.
+
+None beyond the paper's own contributions. The reviews do not surface any insight about the paper that the paper itself does not already express.
 
 ## Suggestions
 
-1. **Add epoch-wise performance curves for at least one real-world dataset** (e.g., Caltech or PolyMnist) showing DCCA's performance trajectory and NR-DCCA's stability. This would directly substantiate the collapse-prevention claim where it matters most.
-2. **Explicitly acknowledge the linear-to-deep theory gap** and characterize the NR method as a theoretically-motivated heuristic for deep networks, rather than implying the theorem directly covers the deep case.
-3. **Include comparisons with orthogonal regularization and weight decay** on at least the synthetic benchmark to establish whether NR offers unique benefits.
-4. **Add a sensitivity study for \(\alpha\)** (the NR loss weight) to demonstrate robustness to this hyperparameter.
-5. **Either add NR-DGCCA results or temper the generalizability claims** to match the evidence provided.
+- **Add learning curves for real-world data.** This is the single most impactful change: show validation F1 (or a similar metric) vs. epochs for at least one real dataset (e.g., Caltech101 or PolyMnist) for DCCA, NR-DCCA, and one or two baselines. This would directly support the claim of preventing collapse.
+- **Add NR-DGCCA results.** Even a single experiment on synthetic data with NR-DGCCA would validate the generalization claim made in the abstract and conclusion.
+- **Acknowledge the theory-practice gap explicitly.** State clearly that Theorem 1 applies to linear transformations, and that the extension to deep networks is justified empirically (via NESum measurements) rather than theoretically. This would make the paper's claims more precise.
+- **Add error bars to real-world results.** Report standard deviations across 5-fold cross-validation.
+- **Add \(\alpha\) sensitivity experiments.** Show performance across a range of \(\alpha\) values (e.g., 0.01, 0.1, 1, 10) on at least one synthetic and one real dataset.
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/COPER_5ZEbpBYGwH.md` | 7.25 (Accept) | Stronger: More comprehensive evaluation with training curves, ablation studies; tighter theoretical contributions. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/OGtnhKQJms.md` (Multi-View Causal Rep Learning) | 7.00 (Accept) | Much stronger theoretically; rigorous identifiability proofs. The present paper's theory is less complete. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/s4MwstmB8o.md` (MVP) | 6.25 (Accept) | Stronger: More extensive experiments across 7 datasets, thorough ablation. The present paper has fewer datasets and less experimental depth. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fPYJVMBuEc.md` (CwA) | 6.00 (Reject) | Comparable: Both have evaluation gaps. CwA lacked sufficient comparisons; this paper lacks training curves and baselines. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6Mg7pjG7Sw.md` (CSA) | 6.00 (Accept) | Comparable: Both have some evaluation gaps but clear contributions. CSA had unfair comparisons; this paper has a theory gap and missing baselines. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/SsWMJ42hJO.md` (CLOP) | 5.00 (Reject) | Weaker: CLOP had definitional errors and limited small-scale experiments. This paper has more substance and better experiments. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4SrzKsJocx.md` (Simultaneous DR) | 3.80 (Reject) | Much weaker: Only synthetic data, no novel method. This paper has real-world experiments and a novel approach. |
+| Path | Avg Score | Comparison to This Paper |
+|------|-----------|-------------------------|
+| `1yJP5TVWih.md` (Lambda-Skip Connections) | 6.25 | Stronger theory (rigorous rank-collapse proofs), comparable architectural contribution. This paper has more novel problem identification but weaker theory. |
+| `5ZEbpBYGwH.md` (COPER) | 7.25 | Stronger multi-view method with thorough theory and experiments across 10 datasets. This paper is less comprehensive. |
+| `6Mg7pjG7Sw.md` (CSA) | 6.00 | Similar CCA-related contribution with comparable empirical scope. This paper identifies a more novel problem but has less rigorous validation. |
+| `ZINaxJyoQr.md` (Barlow Twins analysis) | 1.50 | Extremely weak paper with no experiments. This paper is substantially stronger. |
+| `8TbqoP3Rjg.md` (Knowledge Distillation for Model Collapse) | 2.00 | Very weak paper with trivial approach. This paper is far more solid. |
+| `et5l9qPUhm.md` (Strong Model Collapse) | 8.00 | Rigorous theoretical analysis of model collapse in a different setting. Not directly comparable in topic but represents strong theory. |
+| `Yan3Ll5oCp.md` (Model Collapse for Rectified Flow) | 4.67 | Similar "model collapse" framing with theoretical analysis. This paper has stronger empirical evaluation on synthetic data. |
+| `4SrzKsJocx.md` (Simultaneous Dimensionality Reduction) | 3.80 | Multimodal representation learning paper with limited contributions. This paper has clearer problem identification. |
 
-This paper sits between the 5.00 and 6.00 bands. It has genuine contributions (problem identification, CIP theory for the linear case, synthetic benchmark, solid empirical results on synthetic data) but significant evaluation gaps (no real-world training curves, missing regularizer baselines, limited theory for deep networks) that prevent it from being a clear accept. It is stronger than the sub-4 papers and the CLOP paper, but not as strong as the accepted 6+ papers.
+The paper identifies a genuinely novel and practically relevant problem (model collapse in DCCA-based MVRL), proposes a simple and intuitive solution, and provides good diagnostic evidence on synthetic data. However, the main weaknesses — the theory-practice gap (Theorem 1 only applies to linear transformations), the lack of learning curves for real-world data, the unsubstantiated claim about generalization to DGCCA, and missing hyperparameter sensitivity analysis — are substantive enough that the paper in its current form falls short of the acceptance threshold at top venues. The problem identification and synthetic evidence are valuable, but the paper's core claims are not fully supported.
 
-MY FINAL SCORE: <score>5.5</score>
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

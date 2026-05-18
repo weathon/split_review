@@ -1,20 +1,14 @@
-Now I have all the information needed to write the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
-
-This paper introduces Modality-Collaborated Federated Learning (MCFL), a novel FL setting where uni-modal clients with different modalities (e.g., vision and language) collaborate without requiring any client to hold multi-modal data. The authors propose FedCola, a framework built on a modality-agnostic transformer, using three design strategies explored through systematic research questions: Attention Sharing (parameter-sharing), Modality Compensation (aggregation), and Modality Warm-up (temporal arrangement). Evaluations on CIFAR-100/AGNEWS and OrganAMNIST/MTSamples across multiple FL scenarios show FedCola consistently outperforms both a uni-modal FedAVG baseline and an adapted CreamFL baseline, while maintaining the same communication and computation costs as the uni-modal baseline.
+This paper introduces Modality-Collaborated Federated Learning (MCFL), a novel FL setting where uni-modal clients with different data modalities (e.g., vision, language) collaborate to improve each other's performance without requiring multi-modal clients or aligned data. The authors propose FedCola, a framework built on a modality-agnostic transformer with three components: (1) sharing only self-attention layers across modalities, (2) a modality compensation scheme that corrects layer-level misalignment during aggregation, and (3) a modality warm-up stage. Experiments on vision-language and medical-domain dataset pairs across eight FL scenarios show that FedCola consistently outperforms both Uni-FedAVG and a CreamFL baseline.
 
 ## Strengths
-
-- **New MCFL setting is clearly defined and well-motivated**: Sections 1–2 formally introduce MCFL, distinguishing it from prior FMML settings that require multi-modal clients and evaluate only multi-modal tasks. The motivation (uni-modal clients are more realistic; multi-modal data and label alignment are hard to obtain) is compelling and practically grounded.
-
-- **FedCola consistently outperforms all baselines across diverse FL scenarios**: Table 4 shows FedCola achieves the highest average accuracy in all eight tested FL scenarios (e.g., 73.73% vs. 72.07% for Uni-FedAVG and 65.15% for adapted CreamFL in the default 4-client setting). The improvement over the vanilla MAT prototype is dramatic (from 51.19% to 73.73%).
-
-- **Resource efficiency without extra cost**: Figure 6 demonstrates FedCola requires the same communication and computation per round as the simple Uni-FedAVG baseline, while CreamFL needs 1.97× computation. FedCola with warm-up further reduces costs by skipping modalities during warm-up.
-
-- **Systematic ablation cleanly isolates each component's contribution**: Table 5 traces performance from Vanilla MAT (51.19%) → +Attention Sharing (72.92%) → +Modality Compensation (73.43%) → +Modality Warm-up (73.73%), showing Attention Sharing accounts for the bulk of the gain while the other components provide incremental improvements.
-
-- **Empirical verification of cross-modal knowledge transfer**: Figure 7 shows a positive correlation between the performance of one modality and the other when model capacity varies, providing evidence that the framework leverages out-of-modality knowledge rather than merely aggregating within-modality signals.
+- **Novel problem framing (MCFL).** The paper clearly identifies and formalizes a practical gap: existing multi-modal FL (FMML) requires multi-modal clients with aligned data, which is often unrealistic. MCFL's two principles—uni-modal clients only, per-modality evaluation—are well-motivated and contrast cleanly with prior work (Figure 1). This setting is likely to be adopted by the community.
+- **Systematic three-perspective decomposition.** The paper decomposes the MCFL challenge into parameter-sharing (RQ1), aggregation (RQ2), and temporal modality arrangement (RQ3), then empirically investigates each dimension before assembling the full framework. This clean methodology lets the reader understand each component's individual contribution.
+- **Consistent and large-margin improvements.** In Table 4, FedCola outperforms both Uni-FedAVG and CreamFL on averaged accuracy across all 8 FL scenarios, often by substantial margins (e.g., 73.73% vs. 66.80% over CreamFL under the default 4-client setting). The gains are visible in both vision and text accuracy individually, supporting the claim of genuine cross-modal collaboration.
+- **Resource efficiency.** Figure 6 demonstrates that FedCola requires nearly identical computation and communication to the simple Uni-FedAVG baseline, while CreamFL needs ~2× computation. When modality warm-up is applied, costs drop further. This efficiency-strength combination is practically significant.
+- **Verification experiment.** Figure 7 provides direct evidence of cross-modal knowledge transfer by showing a positive correlation between one modality's capacity and the other's performance, going beyond raw benchmark comparisons.
 
 ## Weaknesses
 
@@ -22,62 +16,54 @@ This paper introduces Modality-Collaborated Federated Learning (MCFL), a novel F
 None.
 
 ### Major
-None.
+- **No statistical uncertainty reported for any result.** Every table (1, 3, 4, 5) reports only point estimates with no standard deviations, confidence intervals, or indication of the number of independent runs. Federated learning involves stochasticity from client sampling, Dirichlet data partitioning, and initialization. Without multiple trials, the reader cannot assess whether the reported improvements (including some small margins, e.g., +0.51% for Modality Compensation in Table 5) are robust or within noise. The FedCola-vs-baseline gaps in Table 4 are large enough to likely be real, but the complete absence of any statistical grounding is a significant methodological gap. This concern was also raised in the accepted FedGLCL paper (avg 6.00) but was noted as a weakness there too; here the issue is more acute because the paper makes "significantly outperforms" claims without any supporting variance estimates.
 
 ### Minor
-
-- **Insufficient detail on CreamFL adaptation**: The paper states CreamFL was "adapted to MCFL with MS-COCO as the public dataset, which follows their original design" but provides no algorithmic detail on how this adaptation handles the absence of multi-modal clients. CreamFL's original design relies on multi-modal clients for cross-modal alignment; how this is done when no client has paired data is left unspecified. The comparison is therefore hard to evaluate. However, this does not threaten the paper's core claim — FedCola's main comparison is against Uni-FedAVG, where the improvement is clear and clean.
-
-- **Modality Compensation is heuristic and delivers marginal gains**: The theoretical motivation (citing a generalization bound from Mansour et al., 2020) does not derive a concrete connection to the proposed fix — it simply notes that models aggregated from different numbers of clients may have misaligned generalizability. The practical improvement in Table 5 is ~0.5% average accuracy (72.92% → 73.43%), and the paper's own language ("marginal but crucial") acknowledges this. The scheme essentially copies missing-modality weights from the previous global round, which is a form of momentum averaging with a specific motivation. While not a fatal issue — the paper is transparent about the gain size — the presentation somewhat overstates the theoretical grounding relative to the measured impact.
-
-- **Only two modalities and classification tasks tested**: All experiments use vision + language and classification benchmarks. The paper claims the framework "can be directly extended to scenarios with more modalities" but provides no evidence. Adding a third modality (e.g., audio) would require new embedding layers and could introduce different transformer block behaviors not tested here. Non-classification tasks (retrieval, generation) are similarly unexplored. Since the paper introduces a *new setting*, demonstrating broader applicability would strengthen the claims.
+- **CreamFL adaptation may disadvantage that method.** CreamFL was designed for FMML with multi-modal clients and aligned data. Adapting it to MCFL (uni-modal clients, no intra-client alignment) by using MS-COCO as a public dataset is a reasonable attempt, but the paper provides no analysis of whether CreamFL's hyperparameters were tuned for this new setting or whether the public dataset choice is near-optimal. CreamFL underperforms even the simple Uni-FedAVG baseline in 3 of 8 scenarios (e.g., 16 clients α=0.1: CreamFL image 59.09% vs. Uni-FedAVG 62.77%), which raises the question of whether the comparison fully captures CreamFL's potential. The paper partially acknowledges this ("with the absence of multi-modal clients for direct feature alignment, CreamFL cannot always outperform Uni-FedAVG"), but more analysis would strengthen the claim of surpassing the "state-of-the-art."
+- **Theoretical motivation for Modality Compensation is hand-wavy.** Section 5.2 invokes Rademacher complexity and generalization bounds but never establishes a formal connection to the proposed compensation scheme—no theorem, lemma, or proof that modality compensation achieves aligned generalizability. The paper is predominantly empirical, and the compensation scheme is presented as an empirical fix, which is fine. The brief theoretical framing adds little and could be removed without loss.
+- **Limited modality scope.** The paper focuses on vision and language only. While the authors state the framework "can be directly extended to scenarios with more modalities," no evidence is provided. A third modality (e.g., audio) would substantially strengthen the claim of generality.
 
 ### Trivial
-None.
+- Table 5 formatting shows a garbled number: "$\bar{7}3.\bar{4}3\%$" — appears to be a LaTeX rendering issue (likely \overline intended to strike through a placeholder).
 
 ## Nice-to-Haves
-
-- Experiments with a third modality (e.g., audio on Speech Commands) would directly test the claimed extensibility.
-- Statistical significance or variability across multiple runs (3–5 seeds) for the main results in Table 4 would increase confidence, especially since improvements over Uni-FedAVG are sometimes small (1–2%).
-- Sensitivity analysis of Modality Warm-up parameters (choice of warming modality, number of warm-up rounds) would strengthen Section 5.3.
-- A brief analysis of what the shared attention layers actually learn (e.g., attention map visualizations on both modalities) would make the "cross-modal knowledge transfer" claim more concrete.
+- A simple weighted-aggregation baseline (inversely proportional to modality dataset size) would isolate the benefit of the more complex FedCola components.
+- Representation analysis (e.g., CKA similarity or attention map visualization) of the shared attention layers across modalities would provide direct architectural evidence for cross-modal feature transfer.
+- Adding error bars to Table 4 (or at least reporting the number of seeds used) is the single highest-leverage improvement.
 
 ## Removed Points
-
-These points were flagged by reviewers but are removed or weakened after verification against the paper:
-
-- **CreamFL adaptation "undermines SOTA comparison" (from Harsh Critic)**: The critic claims the adaptation is "likely unfair" and the comparison is invalid. However, the paper states it adapted CreamFL "following their original design," and FedCola's primary baseline is Uni-FedAVG — the CreamFL comparison is secondary. The paper's main empirical claim (FedCola > Uni-FedAVG by modality collaboration via parameter sharing) does not depend on the CreamFL comparison. This criticism is overblown; the real issue is lack of detail, which is captured in the Minor section above.
-
-- **"Limited modality and task scope reduces generalizability" (as stated at full force)**: The paper explicitly scopes to two modalities "for demonstration" and positions extension as future work. Criticism for not addressing problems outside the paper's stated scope is scope creep. The point is retained but weakened to a minor weakness and nice-to-have.
-
-- All formatting/style/typo concerns: Parser artifacts, not author errors.
-- Any criticism questioning existence or availability of cited references, models, or datasets.
+- **Criticism about resource requirements being misleading** (Claim 2 from the harsh critic). REMOVED as factually wrong. The modality compensation scheme operates server-side: the paper states "before aggregation, we extend each client model to have all the parameters" by copying missing modality weights from the *previous global model*. Clients do not upload extra parameters. Communication cost remains identical to Uni-FedAVG, as claimed.
+- **Criticism about missing appendix/proofs/related works.** REMOVED per instructions — the parser strips these sections.
+- **Criticism about unreleased models/baselines.** REMOVED per instructions — all cited entities are assumed to exist.
+- **Pure formatting/style nitpicks.** REMOVED per instructions.
+- Several generic strengths from Strength Finder (e.g., "problem is important") were filtered out as superficial or not specific enough.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The key insight — that parameter-sharing of attention layers alone suffices to achieve positive cross-modal transfer in FL without multi-modal clients — is the paper's own contribution.
+None beyond the paper's own contributions. The review process did not surface a novel synthesis that the paper itself does not already articulate.
 
 ## Suggestions
-
-1. Provide a detailed algorithm describing how CreamFL is adapted to MCFL, including the loss terms, which parameters are shared, and how the public dataset is used. This is necessary for comparison transparency.
-2. Add experiments with at least one additional modality (e.g., audio) to support the claimed extensibility beyond vision + language.
-3. Report mean and variance over multiple seeds (e.g., 3 runs) for Table 4's main results, particularly for scenarios where the gap over Uni-FedAVG is only 1–2%.
-4. Tone down the theoretical framing of Modality Compensation and characterize it more honestly as an empirically motivated regularizer rather than a theoretically derived solution.
+- **Add multiple independent runs (≥5 seeds) to all main tables.** Report mean ± std. This single change would address the most significant weakness and is standard for the field.
+- **Expand the CreamFL comparison.** Either tune its hyperparameters for MCFL or add a discussion analyzing the gap and why CreamFL struggles in this setting (e.g., dependence on intra-client feature alignment).
+- **Consider adding a third modality** (e.g., audio on a dataset like Speech Commands) to demonstrate the framework's generality beyond the vision-language pair.
+- **Remove or strengthen the theoretical framing in Section 5.2.** Either provide a formal proof of alignment for modality compensation or drop the Rademacher complexity discussion and present it as a purely empirical contribution.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration anchors (all from human-review corpus):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/5BXWhVbHAK.md` (Can One Modality Model Synergize...) | 6.33 | Stronger theory (mathematical proofs), 3 modalities, accepted; this paper is comparable in novelty but weaker in theoretical depth and modality breadth |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LuVulfPgZN.md` (Towards Out-of-Modal Generalization) | 6.00 | Accepted with strong empirical validation; FedCola has clearer problem framing and cleaner ablations but narrower scope |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/xiDJaTim3P.md` (pFedMoAP) | 5.75 | Accepted; similar tier of contribution — new FL paradigm with systematic experiments, comparable weakness profile |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/IEKQlWIN4w.md` (CAML) | 5.25 | Rejected; weaker novelty (extension of AML) and missing real-world validation; FedCola is stronger on both fronts |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/5BXWhVbHAK.md` (Unimodal Bias Theory) | 5.25 | Rejected; theory-only with limited experimental validation; FedCola has stronger empirical support |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Nb7Akh3SjN.md` (FedDistr) | 4.25 | Rejected with significant clarity and theoretical flaws; FedCola is substantially stronger |
+| Path | avg. score | How it compares |
+|------|-----------|----------------|
+| `Cc0qk6r4Nd.md` (InCo Aggregation) | 7.25 (Accept) | Significantly stronger: clear observations, thorough experiments, accepted with only minor weaknesses. Our paper is less experimentally rigorous. |
+| `giU9fYGTND.md` (FedImpro) | 7.00 (Accept) | Stronger: has theoretical analysis, extensive empirical validation with ablation. Better experimental rigor. |
+| `7pDI74iOyu.md` (FedGLCL) | 6.00 (Accept) | Comparable novelty; similar lack of error bars noted by reviewers but gaps were large; FedGLCL tested on more datasets. Our paper has a more novel problem setting but weaker experimental breadth. |
+| `Unz9zYdjTt.md` (FedNovel) | 5.50 (Reject) | Comparable: novel setting but concerns about baseline comparisons and overclaiming. Our paper is slightly cleaner but shares similar limitations. |
+| `ghyeMoj1gK.md` (CCFL) | 5.00 (Reject) | Similar: novel idea but practical relevance concerns and no error bars. Our paper has stronger experimental validation. |
+| `QuGnjxfLBH.md` (FSGG) | 3.50 (Reject) | Weaker: benchmark paper with limited novelty. Our paper has stronger conceptual contribution. |
+| `XWfjugkXzN.md` (Sampling Info Sets) | 1.67 (Reject) | Far weaker: not scientifically sound. Our paper is solid by comparison. |
 
-The paper's strengths — a genuinely new FL setting, systematic methodology, clean ablations, and resource efficiency — position it above the rejected anchors (4.25–5.25). However, the heuristic Modality Compensation component with marginal gains, limited scope (2 modalities, classification only), and the unclear CreamFL adaptation prevent it from reaching the level of the stronger accepted papers (6.0–6.33). It sits comfortably alongside mid-tier accepted papers (5.75).
+The paper introduces a genuinely novel and well-motivated FL setting (MCFL) and a systematically designed framework (FedCola) with consistently positive results. However, the complete absence of statistical uncertainty reporting, the limited scope (two modalities, one CreamFL adaptation without tuning analysis), and the weak theoretical scaffolding prevent it from rising to the level of the accepted anchor papers. It is better than the rejected mid-range papers (CCFL, FedNovel) in experimental clarity and strength of contribution, but not yet at the level of FedGLCL which achieved Accept with similar limitations.
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**Score: 5.0** — The core contributions are valuable, but the experimental methodology needs substantial strengthening. This paper would benefit from a major revision adding statistical validation and broader evaluation.
+
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

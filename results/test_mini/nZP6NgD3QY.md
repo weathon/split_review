@@ -1,77 +1,93 @@
-Now I have enough context. Let me produce the final consolidated review.
+Now I'll write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes AdaMerging, a method that learns per-task and per-layer merging coefficients for task-vector-based multi-task model merging via entropy minimization on unlabeled test data. The approach is well-motivated by the demonstrated sensitivity of task arithmetic to the global merging coefficient λ, and the paper shows substantial improvements over Task Arithmetic and Ties-Merging across eight classification tasks (e.g., 80.1% vs 69.1% average accuracy on ViT-B/32 for Layer-wise AdaMerging). Experiments also cover generalization to unseen tasks and robustness to distribution shifts.
+This paper proposes AdaMerging, an unsupervised method that learns per-task or per-layer merging coefficients for task-vector-based model merging via entropy minimization on unlabeled multi-task test data. The approach addresses the sensitivity of existing task arithmetic methods to a single global merging coefficient λ. Experiments on eight image classification tasks (VTAB-1k style) with ViT-B/32 and ViT-L/14 show that Layer-wise AdaMerging improves average accuracy by 11% over Task Arithmetic and 8.7% over Ties-Merging, with additional experiments demonstrating generalization to unseen tasks and robustness to distribution shifts.
 
 ## Strengths
 
-1. **Well-motivated and principled method**: The paper clearly identifies and experimentally demonstrates the sensitivity of task-vector merging to the global coefficient λ (Figure 1), and directly addresses this by making coefficients learnable. The use of entropy minimization as a surrogate objective is grounded in a correlation analysis (Spearman ρ = 0.87, Figure 2) that directly connects lower entropy to lower prediction loss, a step prior task-vector work does not take.
+- **Significant and consistent performance gains over SOTA task-vector methods.** On ViT-B/32, Layer-wise AdaMerging achieves 80.1% vs. Task Arithmetic's 69.1% and Ties-Merging's 72.4% (Table 1). Gains are consistent across both architectures and on the ViT-L/14 setting (90.8% vs. Task Arithmetic's 84.5% and Ties-Merging's 86.0% in Table 2). Task-wise AdaMerging (single coefficient per task) shows more modest gains (71.1%—slightly below Ties-Merging), indicating the key innovation is the layer-wise granularity rather than merely allowing per-task coefficients.
 
-2. **Large and consistent empirical improvements**: Layer-wise AdaMerging achieves an ~11% average accuracy improvement over Task Arithmetic on ViT-B/32 (80.1% vs 69.1%) and ~6.3% on ViT-L/14 (90.8% vs 84.5%). The gains hold across generalization to unseen tasks (Table 3, +8.3% average on held-out tasks) and all seven tested corruption types (Table 4), demonstrating the method's practical usefulness.
+- **Stronger generalization to unseen tasks.** When merging six task vectors and testing on two unseen tasks, AdaMerging achieves 4.4–9.1% higher average accuracy than Task Arithmetic and Ties-Merging (Table 3). This is the cleanest experiment in the paper because the unseen tasks were never part of coefficient optimization, providing a more rigorous evaluation.
 
-3. **Insightful analysis of learned coefficients**: Figure 3 reveals that shallow layers consistently learn smaller merging coefficients than deeper layers, aligning with the known property that shallow layers encode general features while deeper layers capture task-specific information. This provides interpretable evidence for why per-layer coefficients matter and offers insight unavailable from fixed-coefficient methods.
+- **Interpretable learned coefficients reveal differential layer importance.** The analysis of learned layer-wise coefficients (Figure 3) shows that shallow layers consistently rely more on pre-trained weights (smaller λ), while deep layers depend more on task vectors (larger λ). This aligns with representation learning intuitions and provides a principled explanation for why layer-wise merging outperforms task-wise merging.
 
-4. **Efficient practical setup**: The paper explicitly notes that only 0.1%–1% of unlabeled test data suffices for significant improvements and that the extra training cost is cheap (Section 3.2.2), addressing a practical concern about the method's overhead.
+- **Established correlation between entropy and test loss.** The Spearman correlation of 0.87 between entropy and prediction loss across eight tasks (Figure 2) provides empirical justification for using entropy minimization as a proxy objective — a non-trivial finding that the paper verifies rather than assumes.
+
+- **Robustness to distribution shifts.** AdaMerging consistently outperforms Task Arithmetic across seven corruption types (motion blur, impulse noise, Gaussian noise, pixelate, spatter, contrast, JPEG compression) with average improvements of 5.8–11.2% per corruption type (Table 4).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-1. **Conflated comparison: test-time adaptation vs. coefficient structure**: AdaMerging optimizes its coefficients via entropy minimization on unlabeled test data, while the baselines (Task Arithmetic, Ties-Merging) use a fixed global λ (chosen via grid search on a validation set). This asymmetry makes it impossible to determine how much of the reported gains come from (a) having per-task/per-layer coefficients versus (b) simply having access to test data for adaptation. The paper does not include an ablation where a single global λ is also optimized via entropy minimization on test data. Such an ablation would cleanly isolate the contribution of the coefficient structure from the benefit of test-time adaptation. Without it, the core claim that "learning per-task/per-layer coefficients is more effective than a single global coefficient" is not fully supported — the experiment shows that the *full method* outperforms baselines, but not *why*.
 
-2. **No reported variance or error bars**: None of the tables report standard deviations, confidence intervals, or any measure of result stability. Since AdaMerging uses stochastic optimization on batches of test data, results may depend on random seed, data subsampling, or initialization. This is especially important given the method's performance relative to baselines is often cited in specific percentage points (e.g., "11% improvement").
+1. **Evaluation protocol does not clearly separate adaptation and evaluation sets (structural).** The method optimizes merging coefficients via entropy minimization on batches of unlabeled test samples (Eq. 1, line 150). The paper then reports accuracy on "the test set" without specifying what fraction of test samples were used for adaptation versus held out for evaluation. The statement that "even if only 0.1% or 1% of unlabeled tests are available, our method can have significant performance improvements" (line 154) is presented as a generic claim without actual results showing this. Without knowing whether evaluation samples overlap with adaptation samples, the reported numbers in Tables 1–4 could be optimistically biased. This is the most consequential weakness because it affects the interpretation of all main results. (The paper's own generalization experiments in Table 3 partially mitigate this concern since unseen tasks were never adapted on, but the seen-task numbers in the same table suffer from the same ambiguity.)
+
+2. **Missing ablation studies on coefficient optimization.** The paper does not report the optimizer, learning rate, number of iterations, batch size, initialization scheme, or convergence behavior for the coefficient learning procedure (line 154 merely notes "This is trivial with automatic differentiation tools like Pytorch"). Without these details the method cannot be independently reproduced. Furthermore, there is no ablation showing how performance varies with the number of optimization steps, the amount of test data used for adaptation, or the sensitivity to random seeds. The claim that "0.1% or 1% of unlabeled tests" works is stated but never empirically demonstrated.
 
 ### Minor
-1. **Undisclosed baseline coefficient selection procedure**: The paper does not clearly state what data or procedure was used to select λ for Task Arithmetic and Ties-Merging (the caption of Figure 1 mentions λ=0.3 gave the best results, but does not describe the search protocol or what data it used). Without this, the fairness of the comparison is harder to assess.
 
-2. **Correlation analysis uses the same test data as optimization**: The strong entropy-loss correlation (Figure 2) is computed on the same test data that AdaMerging later optimizes on. While this does not create "circularity" (the correlation is a measurement, not a proof), demonstrating it on a separate held-out set would strengthen the argument that entropy is a general-purpose surrogate and not an artifact.
+3. **Robustness experiments omit Ties-Merging baseline.** Table 4 compares AdaMerging only against Task Arithmetic for robustness to corruptions, despite Ties-Merging being a central baseline in the main results. Since a detailed per-task analysis would be informative (e.g., EuroSAT under Impulse Noise where AdaMerging scores 30.8% vs. Task Arithmetic's 49.1%), including Ties-Merging would give a more complete picture of robustness trade-offs.
 
-3. **"Unsupervised" framing could be clarified**: The paper describes AdaMerging as "unsupervised" and "without relying on the original training data," which is technically correct (it uses unlabeled test data), but a reader could misinterpret this as requiring no data at all. The paper is transparent about this, but a brief clarifying remark would help.
+4. **Unfair comparison confounds adaptation with coefficient flexibility.** The baselines (Task Arithmetic, Ties-Merging) use a single global λ searched on validation data, while AdaMerging uses test-time adaptation with per-layer coefficients. This conflates two factors: (a) the benefit of per-coefficient flexibility and (b) the benefit of test-time adaptation. A control baseline that applies entropy- based test-time adaptation to the merged Task Arithmetic model (without per-coefficient flexibility) would help isolate the source of improvement. The generalization experiments (Table 3) partially address this by testing on unseen tasks, but the main results remain confounded.
+
+5. **Task-wise AdaMerging underperforms Ties-Merging.** In Table 1, Task-wise AdaMerging (71.1%) actually scores lower than Ties-Merging (72.4%), and Task-wise AdaMerging++ (73.7%) only matches it. This weakens the claim that adaptive coefficients broadly improve performance — the improvement is specific to the layer-wise variant. The paper should discuss this limitation more explicitly.
 
 ### Trivial
-- The abstract and introduction could more explicitly acknowledge that the method requires access to (unlabeled) test data, a practical constraint not shared by baseline methods.
-- No discussion of failure modes or scenarios where entropy minimization might be problematic (e.g., tasks with inherently high-entropy predictions).
+
+- None beyond those listed above.
 
 ## Nice-to-Haves
-- An ablation comparing AdaMerging against "Task Arithmetic + entropy-optimized single λ" or "Ties-Merging + entropy-optimized single λ" to isolate the coefficient-structure benefit.
-- Reporting computational cost (wall-clock time) for coefficient optimization relative to a grid search baseline.
-- An evaluation where AdaMerging learns coefficients from a held-out validation set (not the test set) to assess performance without transductive adaptation.
+
+- Evaluate with a proper hold-out protocol: adapt coefficients on a subset (e.g., 50%) of each task's test samples and evaluate on the remaining held-out portion for both AdaMerging and baselines given test-time adaptation access.
+- Include baselines that also use entropy-based test-time adaptation: (a) Task Arithmetic with λ tuned via entropy minimization, (b) a simple "entropy minimization on the merged model" without reweighting, to separate the effect of per-coefficient adaptivity from the effect of test-time adaptation.
+- Report per-task accuracy in all tables to expose cases where improvements are concentrated or drops occur (e.g., EuroSAT under corruption).
 
 ## Removed Points
-- **"Correlation analysis is circular"** (harsh critic point 2): The paper measures the entropy-loss correlation on test data. This is not circular — it is a measurement of a property used to justify a design choice. Showing the correlation on held-out data would strengthen the paper, but the critic's "circular argument" framing overstates the issue. The measurement is valid as presented.
-- **"Terminology concern about unsupervised"** (harsh critic): The paper clearly states it uses unlabeled test data; this is not misleading. Removed as a strawman.
-- **Strength Finder's supporting strength #3** (practical efficiency): This is just the paper self-reporting its efficiency. It is not a concrete finding or analysis, just a stated claim. Dropped as superficial.
+
+- **"Correlation analysis does not validate entropy minimization as a surrogate" (Harsh Critic point 3):** REMOVED. The critic claims this analysis is "circular" because the correlation is computed on test data. This is a misunderstanding. The paper establishes that entropy and prediction loss are correlated (Spearman ρ=0.87) on the test distribution, which straightforwardly justifies entropy as a proxy objective for loss minimization on that distribution. This is not a causal claim about held-out generalization — it is a correlational validation of a surrogate objective, which does not require a hold-out set. The analysis is sound for its intended purpose.
+
+- **"Claim about bridging the gap is not supported" (Critic, Introduction note):** REMOVED. The paper says AdaMerging "greatly reduces the gap" (line 218)—which is factually supported (80.1% vs. 88.9% traditional MTL, vs. 69.1% Task Arithmetic). The critic mischaracterizes this as claiming the gap is fully bridged.
+
+- **Various formatting/style nitpicks and minor presentation issues:** REMOVED per instructions (parser artifacts, not author errors).
+
+- **Strength Finder's generic strengths (e.g., "addresses an important problem"):** REMOVED. These are superficial and not specific to the paper's contributions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface an analytical perspective that the paper itself misses.
+None beyond the paper's own contributions. The key novel elements — using entropy minimization to optimize merging coefficients without training data, and the interpretable layer-wise coefficient patterns — are well-described in the paper itself.
 
 ## Suggestions
 
-1. Add an ablation that optimizes a single global λ via entropy minimization on test data and compare it to Task-wise and Layer-wise AdaMerging. This is the cleanest way to separate the contribution of per-task/per-layer coefficients from the contribution of test-time adaptation.
-2. Report error bars (e.g., over 3 random seeds) for all main results.
-3. Clearly describe the baseline λ selection procedure — what data (if any) was used, the search range, and the metric used to select the reported λ.
-4. Include a brief discussion of limitations: scenarios where test data is unavailable or privacy-sensitive, and cases where entropy minimization may be a poor surrogate (e.g., tasks with inherently ambiguous labels).
+1. **Most important: clarify the evaluation protocol.** Specify exactly what fraction of test samples per task were used for coefficient adaptation, whether evaluation was on the same samples or a held-out portion, and report results under both settings (including with 0.1%, 1%, 10% of test data). This single change would most improve the credibility of the empirical claims.
+
+2. **Add optimization details.** Report the optimizer (Adam/SGD?), learning rate, number of gradient steps, batch size per task, and initialization of λ values. Show a convergence curve (entropy vs. iteration) to demonstrate that the optimization is not overfitting.
+
+3. **Add a test-time adaptation baseline.** Apply entropy minimization directly to the merged Task Arithmetic model (without per-layer reweighting) as a control. This would isolate whether the gains come from per-layer flexibility or simply from test-time adaptation.
+
+4. **Include Ties-Merging in the robustness table** and discuss per-task trade-offs more honestly (e.g., EuroSAT drops).
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|---|---|---|
-| `/home/wg25r/split_review/.../lNtio1tdbL.md` (ATM) | 3.00 | Rejected — fundamental scenario mismatch (requires joint training data, defeats model merging purpose). AdaMerging is clearly stronger: it works within the standard merging paradigm and has proper baselines. |
-| `/home/wg25r/split_review/.../plflYGf23L.md` (CABS) | 4.75 | Rejected — small improvements, ad-hoc method, missing analyses. AdaMerging has a more principled approach and much larger improvements. |
-| `/home/wg25r/split_review/.../Bq3fEAGXUL.md` (Realistic Evaluation) | 5.33 | Rejected — evaluation paper with limited novel insight. AdaMerging presents a novel method. |
-| `/home/wg25r/split_review/.../McqVjmwdPe.md` (How to Weight) | 5.75 | Rejected — good motivation and experiments, but some novelty questions. Comparable to AdaMerging in overall quality. |
-| `/home/wg25r/split_review/.../irPcM6X5FV.md` (Submodule Linearity) | 6.00 | Accepted — clear contribution but improvements are modest. AdaMerging shows larger improvements but has a cleaner comparison due to the asymmetric data issue. Similar overall quality. |
-| `/home/wg25r/split_review/.../1VwWi6zbxs.md` (τJp) | 6.00 | Accepted — good theory but requires data from all tasks. AdaMerging's setting is more practical (only unlabeled test data needed). |
-| `/home/wg25r/split_review/.../4wk2eOKGvh.md` (Test-Time Ensemble) | 6.50 | Accepted — clean evaluation, integrates well with existing methods. AdaMerging has a stronger central idea but less clean evaluation. |
-| `/home/wg25r/split_review/.../dqMqAaw7Sq.md` (DAM) | 7.00 | Accepted — novel security angle, comprehensive experiments. AdaMerging's contribution is less novel in framing. |
+| Anchor | Avg Score | Comparison to AdaMerging |
+|--------|-----------|--------------------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/lNtio1tdbL.md` (ATM) | 3.00 | Much weaker — ATM misaligns with model merging goals by requiring joint training. AdaMerging works on independently-trained models. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/q3ztjJRQuJ.md` (TATR) | 5.75 | Similar topic. TATR is training-free, but AdaMerging has stronger empirical results. AdaMerging is slightly stronger overall. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1v7SRWsYve.md` (MAP) | 6.33 | Both accepted. MAP focuses on Pareto fronts. AdaMerging has more extensive experiments (generalization, robustness) and clearer novelty. Comparable quality. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/eaTqsptDPL.md` (SAM) | 5.75 | Both about improving model merging. AdaMerging has stronger experimental results and more dimensions of evaluation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/D7KJmfEDQP.md` (GradMatch) | 6.00 | Good theoretical grounding, but experiments are weaker than AdaMerging's. AdaMerging has more comprehensive empirical validation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/McqVjmwdPe.md` (Weight Multitask) | 5.75 | Rejected. AdaMerging has a clearer contribution and better experiments. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/plflYGf23L.md` (CABS) | 4.75 | Rejected. AdaMerging has stronger results and a more novel approach. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/lIdc5DUplq.md` (SUPERMERGE) | 4.33 | Rejected. AdaMerging is better positioned and has clearer evaluation. |
 
-The AdaMerging paper presents a well-motivated method with substantial experimental improvements, and its evaluation covers performance, generalization, and robustness more thoroughly than many of its peers. However, the asymmetric comparison (test-data adaptation vs. fixed λ baselines) and missing error bars prevent full confidence in attributing the gains. The paper is comparable to accepted papers in the 5.5–6.0 range and stronger than several rejected ones in the same topic area.
+### Assessment
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+The paper presents a well-motivated, novel idea with strong empirical results across multiple dimensions (accuracy, generalization, robustness, interpretability). The layer-wise coefficient analysis provides genuine insight. The main weakness is structural: the evaluation conflates adaptation and testing (no clear hold-out), and the method's optimization details are underspecified. These are addressable but real concerns. The paper is stronger than the rejected anchors in its topic area (ATM 3.00, CABS 4.75, SUPERMERGE 4.33) and comparable to the accepted ones (TATR 5.75, MAP 6.33, GradMatch 6.00).
+
+**Score: 6.0** — A solid paper with genuine contributions. The evaluation protocol concern prevents a higher score but does not invalidate the contribution, given that the generalization experiments (unseen tasks) partially address it.
+
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

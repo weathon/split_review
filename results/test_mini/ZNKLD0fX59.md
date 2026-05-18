@@ -1,20 +1,16 @@
-Now I have sufficient calibration context. Let me write the final consolidated review.
-
 ## Summary
 
-The paper proposes CasualHDR, a one-stage method for reconstructing 3D HDR scenes from casually captured videos with auto-exposure, unknown exposure times, and motion blur. The method jointly optimizes a continuous-time SE(3) camera trajectory, per-frame exposure times, camera response function (CRF), and a 3DGS-based HDR scene representation within a differentiable physical imaging model. The approach enables three downstream applications: novel view synthesis, image deblurring, and HDR editing.
+CasualHDR proposes a unified 3DGS-based framework for reconstructing HDR scenes from casually captured videos with auto-exposure, unknown exposure times, and motion blur. The method jointly optimizes a continuous SE(3) B-spline camera trajectory, per-frame exposure times, an implicit CRF, and an HDR 3D Gaussian scene representation within a differentiable physical imaging model. The paper also contributes a synthetic dataset (Blender) and a real-world dataset (CasualVideo) for evaluation.
 
 ## Strengths
 
-- **Physically motivated joint optimization over a genuinely challenging problem setup**: Section 3.3 (Eq. 4–6) presents a unified physical image formation model that couples exposure time, CRF, camera trajectory, and 3DGS scene representation. Unlike prior HDR-3D methods (HDR-NeRF, HDR-GS) which require known exposure times and static cameras, CasualHDR removes these constraints by treating exposure time as an optimizable quantity (stated explicitly: "we treat Δt as an optimizable quantity rather than a precisely known parameter"). This is a meaningful advance toward practical HDR 3D reconstruction with consumer-grade cameras.
+- **A unified differentiable imaging model that jointly optimizes exposure time, CRF, continuous camera trajectory, and the HDR 3DGS scene.** This is the paper's core technical contribution. Rather than requiring known exposure times (as in HDR-NeRF) or treating blur and exposure as separate problems, the model couples them in a single optimization. The ablation (Table 6) shows that jointly optimizing exposure time + CRF yields a 42% PSNR improvement over the unprepared baseline, and the continuous trajectory module provides 24% improvement.
 
-- **Continuous SE(3) B-spline trajectory covering the full video**: Section 3.2 introduces a cumulative B-spline representation (Eq. 3) that models camera motion continuously over the entire capture period. This contrasts with prior deblurring works (e.g., BAD-NeRF) that estimate separate short splines per frame, and enables cross-frame motion constraints.
+- **Simultaneous handling of motion blur and exposure variation in a single framework.** Prior methods address either blur (BAD-Gaussians, BAD-NeRF) or HDR (HDR-NeRF, HDR-GS), but not both with unknown exposure times. The paper's physical image formation model (Eq. 4–6) integrates both phenomena through the exposure time parameter that couples blur magnitude and brightness, which is a genuinely new capability.
 
-- **Ablation study isolates each component's contribution**: The paper reports (in text) that removing the continuous trajectory reduces PSNR by ~24%, removing exposure time optimization and CRF reduces PSNR by ~42%, and removing the deblur module reduces PSNR by ~9% (Table 6 / Section 4.6). These numbers directly support the claim that each module matters.
+- **Continuous SE(3) B-spline trajectory spanning the entire video, enabling cross-frame motion constraints.** Unlike prior multi-view deblurring methods (BAD-NeRF, BAD-Gaussians) that estimate short per-frame splines, CasualHDR uses a cumulative B-spline over the full video. The paper explains that this leverages temporal continuity and cross-frame constraints, which is methodologically sound and produces better pose estimates (Table 4).
 
-- **Multi-application capability from a single reconstruction**: The method demonstrates novel-view synthesis, image deblurring of training views, and HDR editing (Figure 3), showing practical versatility beyond methods that target only one task.
-
-- **New challenging dataset**: Section 4.1 describes a dataset combining synthetic Blender scenes and real captures (CasualVideo) with severe brightness variation and motion blur, including ground truth poses from Vicon and measured exposure times.
+- **Introduction of a new benchmark dataset with simultaneous blur and exposure variation.** The paper provides both a synthetic Blender dataset (with ground-truth exposure times and poses) and a real-world CasualVideo dataset (with Vicon ground truth for two sequences). This fills a gap — existing HDRI datasets use fixed-viewpoint multi-exposure captures — and provides a testbed that the community can use.
 
 ## Weaknesses
 
@@ -22,62 +18,68 @@ The paper proposes CasualHDR, a one-stage method for reconstructing 3D HDR scene
 None.
 
 ### Major
-None.
+
+1. **Baseline comparisons are tested in a setting they were not designed for, which overstates the claimed "state-of-the-art" performance.** HDR-NeRF requires multi-exposure *static* images with known exposure times; HDR-Plenoxels and Gaussian-W do not handle blur; BAD-Gaussians assumes consistent exposure. The paper tests these methods on its own challenging data (unknown exposure, auto-exposure, motion blur) where they cannot function as intended. Reporting their failure is informative, but the paper frames this as "outperforming existing reconstruction methods" (contribution 3, Tables 1–2) rather than as demonstrating capability in a new setting where no prior work applies. A fairer evaluation would: (a) adapt baselines where possible (e.g., providing estimated exposure times to HDR-NeRF or selecting exposure-consistent subsets), and (b) test on standard HDR benchmarks (e.g., HDR-NeRF's dataset) to show the method does not sacrifice quality in simpler settings. Without this, the headline quantitative results do not fully support the "SOTA" claim.
+
+2. **The ablation study (Table 6) does not isolate the contribution of the continuous trajectory from other components.** The baseline in Table 6 is vanilla 3DGS with none of the proposed modules. Adding the continuous trajectory to this unprepared baseline yields a 24% PSNR gain — a number the paper presents as evidence for the spline's importance. However, this gain may largely reflect compensating for the lack of exposure handling and deblurring in the baseline. A proper ablation would hold the other modules fixed (deblur + exposure opt + CRF) and compare per-frame pose optimization (as in BAD-Gaussians) against the continuous B-spline. Without this control, the paper cannot claim that the spline representation *per se* is the decisive factor.
+
+3. **No comparison against the most closely related concurrent work ($I^2$-SLAM) is provided.** The paper acknowledges $I^2$-SLAM (Bae et al., 2024) as a concurrent work that also handles exposure inconsistencies and blur, but does not compare because it is not open-source. While this is understandable, it means there is no direct competitor validated in the exact same setting. The evaluation therefore relies entirely on comparisons to methods designed for different input assumptions.
 
 ### Minor
 
-- **Unclear evaluation protocol on real-world data**: The paper states "we select 5 to 10 sharp images for each sequence to evaluate metric" (Section 4.4) but does not clarify whether these sharp images are held out from training or used during training. If they are training views, the NVS evaluation measures reconstruction fidelity rather than novel view synthesis. If held out, the test set is very small (5–10 images). The paper should explicitly state the train/test split and whether test images were excluded from the input to the method. This ambiguity makes the reported real-world numbers harder to interpret.
+1. **The discretization in Eq. (5) assumes constant velocity and uniform sub-exposure durations during each frame's exposure interval.** This is a common assumption in deblurring literature, but casual hand-held videos can contain non-constant motion (e.g., quick pans, camera shake). The paper provides no analysis of how performance degrades under non-uniform motion or how sensitive the method is to the number of virtual sub-frames (N=10 was fixed across all experiments).
 
-- **Baseline comparisons are informative but asymmetrically disadvantaged**: Baselines such as HDR-NeRF, HDR-Plenoxels, and Gaussian-W were designed for settings with known exposure times and static cameras. The paper acknowledges that "HDR-NeRF failed in all scenes on the real dataset" and that many methods "struggle without ground-truth camera poses." While demonstrating that a new method works where prior ones fail is legitimate, the claim of "state-of-the-art performance" would be strengthened by including an adapted baseline variant (e.g., giving prior methods estimated exposure times or Oracle poses) to isolate whether the gains come from the joint optimization or simply from the differing problem setup.
+2. **Exposure time is "assigned a random value" initially, but the paper does not analyze convergence sensitivity.** The loss landscape with respect to exposure time Δt is highly non-convex (it affects both brightness scale and blur kernel width). No experiment reports convergence behavior, sensitivity to initialization, or accuracy of the estimated exposure times against ground truth (available on synthetic and RealSense sequences). Showing that Δt converges to reasonable values would directly support the paper's claim that "camera motion blur can serve as an indicator of the exposure time."
 
-- **Exposure time initialization and constraints are unspecified**: Section 3.3 states that Δt "can be assigned a random value" but does not specify the initialization range, whether bounds are imposed during optimization, or how the method avoids trivial/degenerate solutions. This detail affects reproducibility.
+3. **The pose estimation comparison (Table 4) conflates different task scope.** The paper compares ATE against HLoc and DPV-SLAM (pure pose estimators) and BAD-Gaussians (joint reconstruction). CasualHDR optimizes poses within a full scene reconstruction framework with a continuous trajectory prior — this is a substantially different optimization landscape. While the comparison is not invalid, the paper over-interprets the result as demonstrating pose estimation "robustness" when the advantage may partly stem from the richer objective (render-consistency + smoothness prior) not available to pure pose estimators.
 
-- **Sensitivity analysis for the number of virtual cameras N is missing**: The paper fixes N=10 without ablation. This parameter directly controls the fidelity of motion blur modeling and the computational cost. A brief analysis would strengthen the paper.
+4. **The deblurring module's contribution appears modest.** In Table 6, adding deblurring yields only a ~9% PSNR improvement (approximately 1.14 dB), suggesting that exposure handling already accounts for most of the improvement on this data. The paper should discuss why deblurring is still presented as a major component when the gain is comparatively small.
 
 ### Trivial
-None.
+- Table 5 varies the ratio of knots to images but reports only rendering quality, not pose accuracy (ATE). The spline's ability to model the underlying trajectory is directly relevant to pose quality, which the paper evaluates elsewhere.
 
 ## Nice-to-Haves
-- Including a baseline variant where prior HDR methods are given ground-truth exposure times and poses would help quantify how much of the gain comes from the new problem formulation vs. the method itself.
-- A failure analysis on real data (which scenes/conditions cause the method to struggle) would improve completeness.
-- Additional tone-mapped qualitative comparisons against other HDR reconstruction methods would strengthen the visual evidence.
+- Reporting estimated vs. ground-truth exposure times (available on synthetic and RealSense-Vicon data) to validate the key claim that exposure time can be recovered from blur and brightness.
+- Show learned CRF curves compared against ground truth for synthetic scenes.
+- Test on fully hand-held smartphone video (without gimbal stabilization) to demonstrate robustness to more challenging camera shake.
+- Test the method on standard HDR datasets (e.g., HDR-NeRF's multi-exposure static captures) to show generality and that the method does not regress on simpler settings.
 
 ## Removed Points
-
-- **Criticism about tables being images / quantitative results inaccessible**: The tables are present in the original PDF as embedded images — this is a parser limitation, not a paper flaw. Moreover, the paper does report key summary statistics in text (e.g., "~24% PSNR improvement," "~42% increase") for the ablation study. Removed per rules on parser artifacts.
-
-- **Criticism that "no summary statistics outside tables"**: Factually incorrect — the paper reports the 24%, 42%, and 9% ablation numbers in plain text in Section 4.6.
-
-- **Claim that the paper does not establish its contribution**: Overstated. The method is clearly described, the ablation study shows meaningful improvements, and the problem is well-motivated. The contributions are verifiable in principle even if the evaluation clarity could be improved.
-
-- **Strength Finder claim about "SOTA quantitative results across multiple tasks"**: The exact numbers in tables are unverifiable from the text extraction, but the paper's textual claims and ablation percentages are legitimate. Kept as a qualified strength.
-
-- **Strength Finder generic/superficial strengths**: Filtered out generic praise about "important problem" that lacked specific evidence.
+- **"Main quantitative results are unverifiable (placeholder tables)"** — Parser artifact; tables exist in the original submission. Removed per formatting-artifact rule.
+- **"No comparison against $I^2$-SLAM is a fatal flaw"** — The paper acknowledges $I^2$-SLAM is concurrent and not open-source. Not a flaw. But the absence of any direct competitor is a notable gap, moved to Major.
+- **"Camera motion blur as indicator of exposure time is asserted without evidence"** — This is a well-established physical fact (longer exposure → more blur), used as motivation, not an evidence claim.
+- **"MCMC sampling is non-standard"** — The paper uses an existing framework (gsplat with MCMC). Not a contribution claim that needs ablating.
+- **"Dependency on pose initializer is a confound"** — The paper explains the choice (HLoc vs. DPV-SLAM) and it is standard practice to use initial poses from SfM/SLAM.
+- **"Figures lack zoomed-in crops"** — Minor presentation nitpick; not a substantive weakness.
+- **"$I^2$-SLAM not compared because not open-source"** — Not a weakness of the paper. Retained as note in Major because it means no direct competitor exists in the evaluation.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface a tension typical of papers proposing a new, harder problem setting: the baselines are necessarily disadvantaged (they were not designed for this setting), which makes the claimed SOTA meaningful but also makes it hard to attribute how much of the gain comes from the method vs. the relaxed problem assumptions. An insightful ablation would be to give baselines Oracle exposure times and poses to isolate this.
+The key insight in the reviews that goes beyond the paper's own framing is that the paper's evaluation strategy (testing baselines in a setting they were not designed for) creates a tension: it simultaneously demonstrates a genuinely new capability (HDR reconstruction from casual video) while making it difficult to quantify *how well* the method actually works relative to what was previously possible. The paper would benefit from disentangling the claim into two parts: (1) "we are the first to handle this harder setting" (a contribution claim the evidence supports) and (2) "in controlled comparisons on standard benchmarks, our method is competitive" (which requires additional experiments). The current framing mixes these two claims, making the paper stronger in scope than in evidence.
 
 ## Suggestions
-
-- **Clarify the train/test split for real-world sequences explicitly.** State whether the 5–10 sharp images used for evaluation are part of the input video or separate held-out captures. If they are part of the input, reframe the evaluation to distinguish reconstruction fidelity from novel view synthesis.
-- **Add an ablation giving baselines (HDR-NeRF, HDR-Plenoxels, Gaussian-W) ground-truth exposure times and/or poses** to separate the effect of the harder problem setting from the method's joint optimization.
-- **Report the initialization range and optimization bounds for exposure times** and include a brief sensitivity analysis for the virtual camera count N.
+1. Add an ablation holding deblur + exposure opt + CRF fixed, comparing per-frame pose optimization vs. continuous B-spline, to isolate the spline's contribution.
+2. Report estimated exposure time accuracy (vs. ground truth) on synthetic and RealSense sequences to validate the key claim that Δt is recoverable.
+3. Test on a standard HDR benchmark (e.g., HDR-NeRF's dataset) to show the method generalizes to simpler settings.
+4. Reframe the baseline comparisons as demonstrating a new capability rather than "outperforming" methods designed for different inputs. For baselines that partially apply (e.g., BAD-Gaussians), consider controlled subset experiments.
+5. Analyze sensitivity to the constant-velocity assumption and the number of virtual sub-frames N.
 
 ## Score and Decision
 
-**Anchor comparisons:**
+**Calibration Anchors (from retrieval):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/P4o9akekdf.md` (NoPoSplat) | 8.0 | Much stronger — feed-forward, no poses, broad generalization, tighter evaluation |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/xPxHQHDH2u.md` (Ref-Gaussian) | 6.5 | Stronger — more rigorous evaluation and clearer baseline comparison, similar level of technical contribution |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/dkrEoT68by.md` (Gaussian Splatting Lucas-Kanade) | 6.0 | Slightly stronger — evaluation is cleaner, but problem novelty is comparable |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/L3WnnnBRdu.md` (Hi-Gaussian) | 5.75 | Comparable — similar limitations in evaluation clarity and baseline fairness |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/nkeF3iRJRo.md` (SCISplat) | 5.0 | Weaker — less problem novelty, more incremental |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fRXAQfHlmr.md` (studentSplat) | 4.25 | Much weaker — questionable contribution, poor evaluation |
+| Anchor Path | Avg Score | How it compares |
+|---|---|---|
+| MoDGS (2prShxdLkX) | 6.75 (Accept) | Similar "casually captured" video setting; MoDGS has more rigorous controlled experiments and clearer isolation of contributions. This paper is weaker in evaluation rigor. |
+| LVSM (QQBPWtvtcn) | 7.67 (Accept) | Much stronger paper across all dimensions: originality, thoroughness, and experimental validation. |
+| HQGS (25Zlvl7JxW) | 6.50 (Accept) | Both handle degradation; HQGS has cleaner ablation studies. This paper tackles a more ambitious problem but with weaker evidence. |
+| Video Deblurring (8DW3aSOnou) | 4.75 (Reject) | Marginal-innovation paper. This paper has stronger contributions (new problem framing, unified framework) but similar evaluation gaps. |
+| Learn Dynamic 3DGS (xy9yv5siYQ) | 5.25 (Reject) | Similar "casual video" topic, rejected for limited novelty and evaluation gaps. This paper has better novelty but similar evaluation weaknesses. |
+| Camera Pose Est. (lgf2LW7fOJ) | 4.50 (Reject) | Lower quality overall. |
+| MOTIONFLOW (OBTmkKBmQW) | 4.00 (Reject) | Lower quality overall. |
+| HIWE (NLRo4qhg6t) | 3.00 (Reject) | Much weaker. |
+| Continuously Vol. Rendering (mYo9r0CwUf) | 2.33 (Reject) | Much weaker. |
 
-The paper addresses a genuinely novel and well-motivated problem with a physically grounded solution. However, the evaluation has clarity issues (unclear train/test split for real data, unspecified exposure time initialization details) and the baseline comparisons are asymmetrically disadvantaged in a way that is acknowledged but not fully disentangled. The core contribution is real, but the paper does not present it as convincingly as it could. Compared to the anchors, it sits below Ref-Gaussian (6.5) and Gaussian Splatting Lucas-Kanade (6.0) but above SCISplat (5.0), in the 5.5 range.
+The paper's core contribution — a unified framework for HDR 3D reconstruction from casual auto-exposure video — is genuinely novel and practically motivated. However, the experimental evaluation does not convincingly validate the headline claims. The baseline comparisons lack controlled adaptation, the ablation does not isolate the continuous trajectory contribution, and key analyses (exposure time convergence, non-constant motion sensitivity) are missing. Relative to the calibration anchors, the paper sits between the weaker accepted papers (~6.5) and the rejected papers (~4.75–5.25).
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

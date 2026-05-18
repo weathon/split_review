@@ -1,20 +1,20 @@
-Now I have sufficient information. Let me synthesize the final review.
+Now I have all the information I need. Let me produce the final review.
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
 
-This paper proposes Skip-Attention, a plug-in module that reuses self-attention computations from preceding layers to skip expensive MSA computation in subsequent layers of vision transformers. The authors identify that self-attention maps and MSA features are highly correlated across layers (particularly layers 3–8), and introduce a lightweight parametric function (depthwise conv + two linear layers) that replaces MSA in those layers. The method is evaluated across seven tasks (image classification, SSL, semantic segmentation, image denoising, video denoising) and achieves improved throughput while maintaining or improving accuracy.
+This paper proposes Skip-Attention, a plug-in module that replaces multi-head self-attention (MSA) blocks in selected layers of vision transformers with a lightweight parametric function (FC → depthwise conv → FC + ECA), motivated by empirical evidence that MSA representations are highly correlated across adjacent layers. The method is evaluated across 7 tasks (ImageNet classification, ADE20K segmentation, SIDD denoising, DAVIS video denoising, DINO self-supervised learning, attention probing, on-device inference), consistently showing throughput gains of 19–34% while maintaining or slightly improving accuracy over vanilla ViT baselines.
 
 ## Strengths
-1. **Broad empirical validation across diverse tasks**: The method is evaluated on image classification (ImageNet-1K), self-supervised learning (DINO), semantic segmentation (ADE20K), image denoising (SIDD), and video denoising (DAVIS) — demonstrating that the approach works beyond image-level classification and generalizes to both isotropic (ViT) and hierarchical (Uformer, UniFormer) architectures (Sec. 4–5).
 
-2. **ImageNet accuracy–throughput Pareto improvement**: Table 1 shows Skip-Attention outperforms baseline ViT-T/S/B by 0.1–0.4% top-1 accuracy while achieving 19–25% higher throughput, and surpasses all compared efficient-ViT methods (A-ViT, Dynamic-ViT, SPViT, ATS, etc.) on the accuracy–throughput trade-off simultaneously (Sec. 4.1, line 178).
+- **Broad and convincing empirical validation across 7 diverse tasks.** The method is tested on image classification (ViT-T/S/B on ImageNet), semantic segmentation (ADE20K), image denoising (SIDD), video denoising (DAVIS), self-supervised learning (DINO), attention map probing (Pascal-VOC), and on-device mobile inference. This breadth is unusual and strengthens the generality claim considerably. For example, Table 1 shows the method simultaneously improves accuracy (+0.4% on ViT-S) and throughput (+21%), while Table 4 shows 25% higher throughput on image denoising against Uformer baselines.
 
-3. **Systematic ablation of the parametric function**: Table 6 compares identity, convolution, depthwise convolution, and the full Skip-Attention module, showing identity causes a 4.7% accuracy drop while the full Φ outperforms the baseline, with controlled experiments on kernel size, channel expansion, and skip pattern (Sec. 5.6). This provides clear evidence for why the specific parametric design matters.
+- **The parametric function + skip combination is rigorously ablated.** Table 5 systematically tests the identity function (−4.7%, showing naive reuse fails), convolution-only, depthwise-conv-only, and the full Skip-Attention module. The ablation also varies kernel size (3×3, 5×5, 7×7), channel expansion ratio (0.5×, 1×, 2×), and alternate skip configurations. This provides a clear design space for practitioners and honestly reveals that the identity baseline destroys accuracy — the paper does not hide this inconvenient result.
 
-4. **On-device latency validation**: The mobile device experiment on a Samsung Galaxy S22 (NPU, 8-bit) reports 19% and 34% runtime improvements for 224×224 and 384×384 resolutions respectively (Table 2, Sec. 4.1) — going beyond FLOP-based estimates to real hardware measurements.
+- **On-device latency validation on actual mobile hardware.** Table 3 reports measured inference time on a Samsung Galaxy S22 (Snapdragon 8 Gen 1), showing 19% improvement at 224×224 and 34% at 384×384 resolution. This grounds the FLOP reductions in real-world latency gains, which many efficient ViT papers omit.
 
-5. **Self-supervised pretraining time reduction**: DINO pretraining with Skip-Attention achieves comparable linear probe accuracy (73.3% vs 73.6%) in 26% less training time (96 vs 131 GPU-hours), and outperforms DINO when matched for epochs (74.1% vs 73.6%) (Sec. 4.2).
+- **Quantified motivation via correlation analysis.** The paper provides CKA similarity (Figure 2) and cosine similarity (Figure 1) showing that attention maps and MSA features are highly correlated across adjacent layers (cosine similarity up to 0.97). This goes beyond intuition and concretely motivates the skip strategy, even though correlations change after training with Skip-Attention.
+
+- **Improved attention quality shown qualitatively and quantitatively.** Attention map visualizations (Figure 3), Jaccard similarity (Table 6), and CorLoc metrics all show that Skip-Attention produces sharper, more object-focused attention maps than vanilla ViT without any fine-tuning, indicating better learned representations.
 
 ## Weaknesses
 
@@ -22,54 +22,64 @@ This paper proposes Skip-Attention, a plug-in module that reuses self-attention 
 None.
 
 ### Major
-1. **Throughput measurement conditions are undisclosed for the main results**: The headline efficiency gains (19–25% on ImageNet, 40% on ADE20K) are reported without specifying the GPU hardware, batch size, precision, or inference framework used. The paper rightly cites Dehghani et al. on the importance of throughput over FLOPs (line 179), then provides no measurement details to allow verification or fair comparison with baselines. For a paper whose central contribution is efficiency, this is a significant reporting gap. The mobile device experiments (Samsung Galaxy S22, 8-bit NPU) are well-specified but cover only one small model. (Sec. 4.1, lines 178–179)
 
-2. **Inconsistent design choice in video denoising undercuts the claimed generality of the parametric function**: The paper builds its motivation around the necessity of the parametric function Φ (identity causes 4.7% drop on ImageNet, Table 6). Yet in video denoising (Sec. 5.5, line 245), the authors "simply adopt a naive \methodabbrev, where we reuse window self-attention matrix, $A$, of the corresponding encoder block using an Identity function" and state identity "works better in this task." No analysis is provided for why the parametric function is unnecessary here. This directly weakens the claim that Φ is the key to the method's success and calls into question whether the approach is principled or a collection of task-specific tricks. The claim that the method is "general-purpose and can be applied to a ViT in any context" (line 36) is not well supported when the core component is sometimes discarded without explanation.
+- **The paper's causal claim — that attention redundancy is being exploited — is not cleanly separable from the benefit of adding the parametric function itself.** The identity-function ablation (−4.7%) shows that naive reuse destroys accuracy, while the parametric function (+0.1–0.4%) outperforms baseline. A critical control is missing: train ViT with the parametric function inserted as an *additional* residual branch *without removing any MSA block*. If that variant matches or exceeds Skip-Attention, the improvement comes from the conv module, not from "skipping attention" — which would reframe the contribution as "add a lightweight conv module to ViT." If it underperforms, the combination of skipping + parametric function is validated. This experiment would cleanly resolve what the paper's core contribution actually is. Without it, the "pay less attention" framing in the title and abstract is not fully supported by the evidence.
+
+- **The framing of the parametric function as an "approximation" of MSA is imprecise.** The paper repeatedly states that the parametric function "approximates" attention (abstract: "approximate attention at one or more subsequent layers"; §3.3: "the approximation of Z^{MSA}_{l}"). However, the parametric function is FC₁ → DwC → FC₂ → ECA — a depthwise-convolution-based module that learns entirely new cross-token relations, not a mathematical reduction or approximation of MHA. The CKA analysis in Figure 5 shows that after training, the representations are *less* correlated across layers than in vanilla ViT, which is the opposite of what an "approximation" would produce. The paper would be more accurate to describe this as a *replacement* rather than an *approximation*.
 
 ### Minor
-3. **Correlation analysis does not directly validate the parametric function**: The paper shows that attention maps and MSA features are correlated across layers (Fig. 2), motivating the idea of skipping MSA. However, the proposed Φ (depthwise conv + FC) is never directly compared to the actual MSA output it replaces — e.g., via cosine similarity or CKA between Φ's output and the ground-truth MSA output at skipped layers. The CKA analysis of the trained model (Fig. 5) only shows that features become decorrelated except in skipped layers, which is an expected consequence of the skip structure rather than evidence of good approximation. An experiment directly validating Φ's output quality would substantially strengthen the motivational chain. (Sec. 3.2, Fig. 5)
 
-4. **Selective framing of segmentation comparisons**: In the ADE20K results (Sec. 5.3, line 232), the text highlights "SA-S achieves 8% higher mIoU while being faster than ViT-T" and "SA-S has comparable mIoU with Swin-T while having 3× fewer FLOPs" — both cross-size comparisons. The direct same-size comparison (SA-S vs ViT-S) is stated in the preceding sentence but the cross-size results are positioned more prominently, creating an inflated impression of the advantage. The data is all in the table, but the presentation could be more balanced.
+- **The ImageNet accuracy gains (0.1–0.4%) are small relative to expected training noise, and no statistical significance is reported.** For a method that claims to *improve* accuracy over baseline (not merely match it), single-run results without confidence intervals are insufficient to distinguish genuine improvement from run-to-run variation. The semantic segmentation gain of +1.1 mIoU on ViT-S is more substantial and partly mitigates this concern, but the classification claims would be strengthened by multi-seed reporting.
+
+- **DINO self-supervised experiments use only 100 epochs vs. the standard 300.** The paper reports 0.5% gain over baseline DINO at 100 epochs (74.1% vs. 73.6%) and a 26% training time reduction. However, the 0.5% gain may be a short-training artifact that could vanish at convergence. Reporting 300-epoch results (standard in the SSL literature) would confirm whether the efficiency advantage persists at full convergence.
+
+- **The paper does not explain why identity-function skipping works in video denoising (DAVIS, on par with baseline) but catastrophically fails in image classification (−4.7%).** Section 4.6 (video denoising) states that identity is used "because reusing attention works better in this task," but no analysis is provided for this discrepancy. This limits the generality claims slightly — the method's success is setting-dependent, and understanding when identity suffices vs. when the full parametric function is needed would be insightful.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-- An experiment directly computing the similarity (cosine or CKA) between Φ's output and the actual MSA output at skipped layers, to validate the approximation claim.
-- Ablation of skipping layers 1–2 or 10–12 to show the skip pattern is not overfit to the correlation peak observed in layers 3–8.
-- Reporting the parameter overhead of the parametric function and the net parameter change after removing MSA projections.
-- For the DINO experiments, results after a full training schedule (300+ epochs) would confirm the 26% time reduction holds at convergence.
+
+- Reporting throughput/FLOPS comparison against token-reduction methods like ToMe or EViT under the same training settings would strengthen the positioning relative to prior work.
+- Testing on larger ViT variants (ViT-L) or downstream tasks like object detection (COCO) would further validate scalability.
 
 ## Removed Points
-- **"Throughput comparisons against token-pruning baselines are suspect"**: This is a subset of weakness #1 (missing measurement details), not a separate issue. The missing details affect all comparisons equally.
-- **"The method is a bag of heuristics"**: Overstated. The paper provides a systematic ablation and the core idea is clear. The video denoising identity choice IS a genuine inconsistency, but the method is otherwise principled.
-- **"The CKA analysis is an unsurprising consequence of skip structure"**: This is a valid observation (kept as weakness #3), but the harsh critic's framing that "the motivational link between observation and design is weak" somewhat overstates the issue — the ablation study does show the parametric function works empirically.
-- Various strengths from the Strength Finder that are generic (e.g., "tackles well-motivated problem") have been merged into the specific strengths above.
+
+These points are flagged to be removed; treat them with caution.
+
+- **Criticism that the paper does not compare against Swin, Twins, MetaFormer, etc.** — The paper explicitly scopes its comparison to methods that "improve the efficiency of ViT without modifying its underlying architecture." Comparing against fundamentally different architectures (window-based attention, hierarchical designs) would be scope creep and is not required.
+- **Criticism that the video denoising identity function "contradicts" the claim that the parametric function is essential.** — The paper is reporting honestly that different settings have different redundancy levels. This is a feature, not a bug. It shows that in video denoising, encoder-decoder skip connections already provide enough cross-layer correlation, so identity suffices.
+- **CKA analysis "circularity" concern** — The initial CKA analysis is performed on a pretrained ViT, which the paper later acknowledges changes during Skip-Attention training (§4, visualization paragraph). This is standard practice for motivation analysis and does not invalidate the idea.
+- **Criticism about missing comparisons to token sampling methods on dense tasks** — The paper correctly states that token sampling methods produce spatially discontinuous outputs. This is a known limitation of those methods, and Skip-Attention keeps all tokens, making it applicable to dense tasks.
+- **Claims about missing appendix content** — The parser strips appendix sections; they exist in the original submission.
 
 ## Novel Insights
-None beyond the paper's own contributions. The synthetic reviews do not add observations that the paper itself does not make.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Disclose full throughput measurement conditions** for all GPU-based efficiency claims: GPU model, CUDA version, batch size, inference precision (FP32/FP16), and framework (PyTorch version). This is essential for a paper where throughput is the central evidence.
-2. **Explain the video denoising identity choice**: Discuss why identity works in the U-shaped video denoising setting (e.g., encoder-decoder feature alignment, U-Net structure, noise level) while the parametric function is needed in ViT. This would turn a weakness into a strength by demonstrating when each variant is appropriate.
-3. **Add a direct validation experiment**: Compare Φ's output to the actual MSA output at skipped layers using cosine similarity or CKA on a held-out set. This would close the gap between the correlation-based motivation and the specific method design.
-4. **Report SA-S vs ViT-S comparison explicitly** in the segmentation text to avoid any perception of selective reporting.
+
+1. **Run the missing control experiment** (parametric function + full MSA, without removing any MSA block) and report accuracy and throughput. This will definitively establish whether the gains come from the conv module, from the act of skipping MSA, or from their combination.
+2. **Reframe the paper's language.** Replace "approximation" with "replacement" when describing the parametric function's relationship to MSA. The depthwise-conv-based module is not reducing MSA's complexity mathematically; it is providing a fundamentally different (cheaper) computation.
+3. **Report ImageNet accuracy over 3 seeds** (mean ± std) for the baseline and Skip-Attention to establish whether the 0.1–0.4% gains are statistically significant.
+4. **Run DINO for 300 epochs** to confirm that the 0.5% gain at 100 epochs persists at convergence.
 
 ## Score and Decision
 
-**Calibration Anchors:**
+### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/.../RtDok9eS3s.md` (Simplifying Transformer Blocks) | 7.33 | Stronger theoretical grounding via signal propagation; narrower evaluation (language only). Our paper has broader task coverage but weaker theoretical support. |
-| `/home/.../gJeYtRuguR.md` (Multi-Exit ViT + Token Reduction) | 7.50 | Clearer motivation, focused experiments, SOTA results on token reduction. Our paper has comparable breadth but less crisp motivation and missing throughput details. |
-| `/home/.../2dnO3LLiJ1.md` (Vision Transformers Need Registers) | 8.00 | Landmark paper with broad impact and clean solution. Our paper is substantially weaker in novelty and impact. |
-| `/home/.../Jwgw3znxT3.md` (IBTM Token Merging) | 5.75 | Comparable level but different weaknesses (finetuning overhead). Our paper has broader evaluation and doesn't require finetuning existing models, but shares reproducibility gaps. |
-| `/home/.../PWtx9fJqM5.md` (Study of Linear Transformations) | 5.00 | Limited evaluation scale, weak baselines. Our paper has stronger baselines and broader evaluation, but is similar in having methodological gaps between motivation and method. |
-| `/home/.../pjNjlJN7up.md` (big.LITTLE ViT) | 4.00 | Unclear FLOPs-to-latency translation, reliance on distillation. Our paper is clearly stronger — broader evaluation, no distillation, cleaner method. |
-| `/home/.../vnp2LtLlQg.md` (Optimizing Attention) | 3.00 | Severe methodological flaws, inferior results. Our paper is substantially better in method quality and results. |
+| Path | Avg Score | Comparison to This Paper |
+|------|-----------|------------------------|
+| `RtDok9eS3s.md` (Simplifying Transformer Blocks) | 7.33 | Stronger theoretical grounding (signal propagation theory) but narrower task scope; comparable quality of empirical work. |
+| `gJeYtRuguR.md` (METR token reduction) | 7.50 | SOTA results on classification, but limited to one task type. This paper has wider task coverage but weaker attribution evidence. |
+| `Jwgw3znxT3.md` (IBTM token merging) | 5.75 | Similar scope and quality; both have some missing controls. This paper has broader task validation. |
+| `PWtx9fJqM5.md` (Study of Linear Transformations) | 5.00 | Weaker experimental scale; this paper is substantially stronger empirically. |
+| `jIAKjjEmWi.md` (A-MoD routing) | 4.00 | Narrower scope and weaker empirical support; this paper is clearly stronger. |
+| `pjNjlJN7up.md` (big.LITTLE ViT) | 4.00 | Lacks actual throughput measurements; this paper provides concrete on-device latency. |
+| `vnp2LtLlQg.md` (Optimizing Attention) | 3.00 | Weak results and missing efficiency metrics; this paper is much stronger. |
+| `2DD4AXOAZ8.md` (MixAttention) | 2.00 | Limited novelty, technical-report quality; this paper is substantially stronger. |
 
-The paper proposes an intuitively appealing approach and provides broad empirical evaluation. However, the central efficiency claims rest on unreproducible throughput numbers (no hardware/software disclosure), the method's generality is undercut by an unexplained identity-based design choice in video denoising, and the motivational analysis does not directly validate the proposed module. These issues are addressable but collectively prevent the current submission from being a convincing contribution relative to the accepted anchors above.
+The paper has genuine strengths: unusually broad task coverage, thorough ablation, and hardware-validated latency gains. However, the core attribution is somewhat muddled — the missing control experiment prevents cleanly separating whether the gains come from the conv module or from attention skipping, and the "approximation" framing is imprecise. The small ImageNet accuracy gains (0.1–0.4%) would benefit from statistical validation. The paper makes a real empirical contribution but would need the missing control experiment and reframing to fully support its core claim.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

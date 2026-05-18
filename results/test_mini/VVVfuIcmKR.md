@@ -1,18 +1,20 @@
-Now I have all the evidence needed. Let me synthesize the final review.
+Now I have all the information I need. Let me compose the consolidated review.
 
 ## Summary
 
-This paper investigates and demonstrates that CLIP's intra-modal representations (image-image, text-text) are fundamentally suboptimal for intra-modal tasks due to the inter-modal contrastive training objective. The authors employ optimization-based modality inversion (OTI for images→text, OVI for text→images) to convert intra-modal tasks into inter-modal ones, achieving consistent improvements across 15+ datasets and 5 VLMs. A critical control experiment — where the same OTI-inverted features *improve* image retrieval but *degrade* zero-shot classification — cleanly isolates the benefit as stemming from exploiting inter-modal alignment rather than from the inversion technique itself.
+This paper identifies and systematically investigates a genuine issue with contrastively trained VLMs (like CLIP): the inter-modal contrastive loss that aligns image-text pairs leaves intra-modal similarities (image-image, text-text) uncalibrated, causing "intra-modal misalignment." The authors propose converting intra-modal tasks (e.g., image retrieval) into inter-modal ones by applying optimization-based modality inversion (OTI for images, OVI for text) at the single-feature level. Across 15+ datasets and 5 model variants (CLIP, OpenCLIP, SigLIP), they show that inter-modal comparisons (OTI-image) consistently outperform intra-modal baselines (image-image). Converging evidence from zero-shot classification (where inversion hurts), SLIP (where intra-modal losses narrow the gap), and modality-gap manipulation experiments further supports the causal story tying the modality gap to the observed misalignment.
 
 ## Strengths
 
-1. **Clear problem identification with quantitative evidence**: The "Dogs vs. Cats" toy experiment (Section 2) directly measures intra-modal misalignment: even after filtering to ensure perfect inter-modal alignment, intra-modal R-Precision is only 71.5%, meaning ~28.5% of relevant images are ranked below irrelevant ones. This cleanly motivates the paper's thesis.
+1. **Well-framed problem with a clear root cause.** The paper provides a rigorous formal argument (Sec. 4) that CLIP's contrastive loss explicitly ignores intra-modal relationships, creating uncalibrated similarities. The toy experiment in Sec. 2 nicely illustrates the issue in concrete terms (81.4% mAP even after perfect inter-modal filtering).
 
-2. **Broad and consistent empirical evidence**: The core claim holds across 15 image datasets, 4 image retrieval datasets for text, 5 different VLMs (OpenAI CLIP ViT-B/32 & ViT-L/14, OpenCLIP DataComp variants, SigLIP-B/16, SLIP), and both image-to-image and text-to-text retrieval. This breadth makes the phenomenon unlikely to be an artifact of a particular model or dataset.
+2. **Consistent, broad empirical support.** Table 1 reports improvements on every combination of 15 datasets × 5 models — the consistency (not just the magnitude) is strong evidence that the phenomenon is systematic, not dataset- or architecture-specific. The pattern holds for text retrieval (Table 2 left) as well.
 
-3. **Well-designed control experiment isolating the cause**: The zero-shot classification experiment (Section 6.3, Table 2 right) is the strongest piece of evidence. The *same* OTI-inverted features that raise retrieval lower classification on identical datasets, because one task is converted intra-modal→inter-modal while the other is converted inter-modal→intra-modal. This reversal cleanly rules out the alternative that OTI simply produces better features in general.
+3. **Critical control experiment (zero-shot classification).** Table 2 (right) shows that applying OTI to an inherently inter-modal task (image→text classification) *hurts* performance dramatically (e.g., 56.0→17.9 on CIFAR100). This is the paper's strongest piece of evidence that the benefit comes from crossing modalities, not from inversion artifacts — the same inverted features help on intra-modal retrieval but hurt on inter-modal classification.
 
-4. **Analysis of the modality gap's role** (Section 6.6, Table 4): Fine-tuning CLIP to close the modality gap (high temperature) eliminates the OTI improvement, while a low-temperature reference retains it. This directly ties the inversion advantage to the existence of the gap. The SLIP experiments (Table 3) further corroborate that adding intra-modal loss during pre-training mitigates the misalignment.
+4. **Converging causal evidence from SLIP and modality-gap manipulation.** Table 3 shows that SLIP (which adds intra-modal losses) substantially reduces the OTI advantage, and Table 4 shows that closing the modality gap via high-temperature fine-tuning eliminates it entirely. These experiments tie the narrative together convincingly.
+
+5. **Introduction of OVI for text→image inversion.** While OTI is adapted from prior work, OVI is new and extends the analysis to the text modality, showing the phenomenon is symmetric.
 
 ## Weaknesses
 
@@ -20,60 +22,58 @@ This paper investigates and demonstrates that CLIP's intra-modal representations
 None.
 
 ### Major
-- **Computational cost limits practical applicability**: The paper honestly acknowledges this as a limitation (150 optimization steps for OTI, 1000 for OVI), but it remains a significant gap between diagnosis and remedy. The paper convincingly shows that intra-modal CLIP representations are suboptimal, but does not offer a practical alternative. This does not invalidate the paper's analytical contribution but does limit its impact.
+None.
 
 ### Minor
-- **Missing statistical variance estimates**: Both OTI and OVI involve randomly initialized parameters (pseudo-word tokens at L143, pseudo-patches at L156), which introduces randomness. Yet all tables (1–4) report single-point mAP/accuracy without error bars. While the consistency of improvements across 15+ datasets makes the main finding robust, variance estimates would strengthen claims for the smaller-gain cases (e.g., +1.3 on Art in Table 1). This is a standard rigor concern in an otherwise well-executed empirical study.
 
-- **Incomplete symmetry demonstration for OVI**: The paper shows that OTI features improve image retrieval but hurt zero-shot classification (a clean reversal). For OVI, the analogous control experiment (e.g., using OVI-inverted text features for text-to-image retrieval, which is inherently inter-modal, and showing it *hurts* performance) is not presented. The paper mentions a third evaluation setting in zero-shot classification (applying OVI to prompts, L221) but does not report those results. While the OTI control already provides strong evidence for the core claim, the OVI-side symmetry would further strengthen the argument.
+1. **Improvement magnitudes are modest.** Many gains in Table 1 are 0.2–2.0 mAP. While the consistency across 75 (15×5) settings is impressive, the practical significance is limited, especially given the computational cost (150 optimization steps per query for OTI, 1000 for OVI). The paper honestly acknowledges cost as a limitation, but the modest gains and the computational overhead together constrain the approach's practical utility.
+
+2. **No variance or significance reporting.** The paper reports single-run results without standard deviations or significance tests. Given the small improvements, one cannot rule out that some individual results could be within noise range — though the cross-dataset consistency mitigates this concern somewhat.
+
+3. **The zero-shot classification degradation hints at information loss.** The dramatic drop in zero-shot classification (56→18 on CIFAR100) suggests OTI is lossy — it trades away semantic information. The paper frames this as supporting evidence, which it is, but the magnitude of the loss is worth deeper discussion. If OTI loses enough information to drop classification by ~38 points, why should readers be confident the retrieval gains come from better alignment rather than from some other artifact of the degraded representations? The paper's causal experiments (SLIP, modality gap) help here, but a direct analysis of what information is lost would strengthen the story.
 
 ### Trivial
-- The paper does not quantify the computational overhead in concrete terms (e.g., wall-clock seconds per query vs. a forward pass), which would help ground the limitations discussion.
-- Some datasets (Cars, CIFAR100, etc.) appear in both image retrieval and classification tables, but the relationship between the two settings is not explicitly discussed beyond noting that the same OTI features are reused.
+None.
 
 ## Nice-to-Haves
 
-- **Comparison with a trained linear projection/adapter**: A lightweight mapping trained on a small validation set could serve as a practical efficiency baseline. The paper explicitly scopes itself to "single-feature level" inversion without auxiliary data (L16, L132), so this is outside the paper's stated scope, but including such a comparison would strengthen the claim that the inversion-based approach is genuinely leveraging inter-modal alignment rather than simply being a more expressive mapping.
-
-- **Analysis of per-dataset variation**: Some datasets show larger gains (e.g., +17 on iNaturalist) than others (e.g., +1.3 on Art). A brief discussion of what properties correlate with larger improvements — dataset granularity, number of classes, domain specificity — would deepen the analysis.
+- **OTI–OTI intra-modal baseline:** An experiment comparing OTI-inverted queries to OTI-inverted gallery features (both in text space) could further isolate whether the benefit is purely from crossing modalities. If OTI–OTI ≈ image–image, the inter-modality story is strengthened. If OTI–OTI > image–image, the inversion process itself contributes. The paper's zero-shot experiment partially addresses this concern, but a direct OTI–OTI comparison would be cleaner.
+- **Image-text-image chaining baseline:** Comparing to a simple baseline that retrieves text nearest to the query image, then retrieves images nearest to that text, would test whether the benefit of OTI comes from optimizing individual query features versus simply exploiting the modality crossing more cheaply.
+- **Qualitative examples of where OTI helps/fails:** A few case studies showing retrievals where OTI succeeds and the intra-modal baseline fails (and vice versa) would help build intuition for when this approach matters most.
 
 ## Removed Points
 
-- **"Compare with a simple linear projection/adapter" (from Harsh Critic's "Missing Parts")**: Removed because the paper explicitly states it operates at the "single-feature level . . . without any need for auxiliary data or additional trained adapters" (L16, L132). This is a deliberate scope choice, and the paper should not be penalized for not doing something it explicitly rules out. Moved to Nice-to-Haves.
-
-- **"Directly analyze why intra-modal similarities are suboptimal" (from Harsh Critic's "Strengthening the Paper")**: The paper already does this — Section 2 quantifies the misalignment on Dogs vs Cats, and Section 6.4 (Figure 3c) analyzes pairwise similarity distributions. This criticism misreads the paper's existing content.
-
-- **"Optimization overhead in FLOPS"**: Not standard practice for this type of empirical paper; the paper already honestly acknowledges the computational limitation. Moved to a mention in Trivial.
-
-- **"Strength Finder generic strengths"**: Several strengths from the Strength Finder that were generic ("important problem," "timely topic") have been removed. Only concrete, evidence-backed strengths are retained.
+- **"Missing OTI-OTI control invalidates the core claim"** — The harsh critic presents this as a critical weakness, but the paper already addresses the same underlying concern via the zero-shot classification experiment (Table 2 right): the *same* OTI features help when the resulting comparison is inter-modal (OTI-image) and hurt when it is intra-modal (OTI-text). This directly shows the benefit is modality-dependent, not inversion-dependent. The OTI–OTI experiment would be a useful addition but is not required to support the core claim, and calling the evidence "insufficient" overstates the gap.
+- **"The asymmetry between retrieval gains and classification losses suggests OTI is lossy and retrieval gains come from a different mechanism"** — The paper explicitly uses this asymmetry as supporting evidence for its claim (Sec. 6.3: "This experiment demonstrates that modality inversion does not inherently improve performance... Performance improvement is observed only when an intra-modal task is converted into an inter-modal one"). Framing this as an unaddressed weakness misreads the paper.
+- **Claim that 81.4% mAP on Dogs vs Cats shows the problem "is not catastrophic"** — The paper never claims the problem is catastrophic; it quantifies it (28.5% of relevant images ranked below irrelevant ones) and uses it to motivate the investigation. The critic's characterization is a strawman.
+- **Demand for ablation on regularization loss in OTI** — The paper explicitly justifies omitting the regularization loss to avoid external data influence (Sec. 5.1, "we aim to avoid influencing the inversion process with external data"). The cosine loss and Fig. 3c provide evidence the features stay on the text manifold. This is adequately addressed.
+- **"No discussion of the possible lossiness of inversion in the Limitations section"** — The paper mentions computational cost as the primary limitation but also could have discussed lossiness. However, this is a minor omission, and the zero-shot experiment already surfaces the trade-off.
 
 ## Novel Insights
 
-The key insight that emerges from this paper — beyond its individual experimental results — is that CLIP's contrastive training creates a structural asymmetry: the model learns a kind of "null" intra-modal geometry because it never needs to compare two images or two texts directly during training. This is a subtle but important point: the modality gap is not just a geometric curiosity but has measurable, practical consequences for how these models should be deployed. The paper's most valuable contribution is demonstrating that the conventional practice of treating CLIP encoders as general-purpose feature extractors for any similarity task is naive, and that task-modality alignment matters even at the level of individual feature vectors.
+None beyond the paper's own contributions. The reviews largely concur with the paper's framing and contribution claims.
 
 ## Suggestions
 
-1. Add error bars (mean ± std over 3–5 runs with different random seeds for OTI/OVI initialization) to the main retrieval tables to address the randomness concern.
-
-2. Complete the OVI symmetry experiment: run text-to-image retrieval using OVI-inverted text features as queries and show that performance degrades relative to the standard text-to-image baseline.
-
-3. Include a brief section quantifying how the magnitude of improvement correlates with dataset properties (number of classes, domain specificity, etc.) — this would help readers understand when the phenomenon matters most.
+1. Add variance estimates (or at minimum note single-run vs. multi-run status) to allow readers to assess the reliability of small improvements.
+2. Consider adding the OTI–OTI control experiment and/or an image-text-image chaining baseline to further isolate the mechanism.
+3. Include a brief analysis (or at least discussion) of what information OTI loses — a simple correlation study between OTI features and image features vs. class prototypes could help explain the classification degradation.
+4. Add a few qualitative retrieval examples showing cases where OTI markedly improves or degrades results.
 
 ## Score and Decision
 
-**Calibration Anchors (retrieved from corpus):**
+**Calibration anchors (all from the human-reviewed corpus):**
 
-| Anchor Path | Avg Human Score | Comparison |
-|---|---|---|
-| `aPTGvFqile.md` (Mitigate the Gap) | 6.29 | Similar topic (modality gap). That paper proposes a method to close the gap; this paper diagnoses why intra-modal tasks suffer. Current paper has broader experiments but less of a practical solution. Slightly weaker overall. |
-| `bb2Cm6Xn6d.md` (Intriguing Properties of LLVMs) | 5.50 | Both are empirical analysis papers. Current paper has cleaner experiments, clearer claims, and stronger control experiments. Current paper is stronger. |
-| `wE8wJXgI9T.md` (It's Not a Modality Gap) | 4.75 | Analysis paper about contrastive loss creating the gap. Current paper has more comprehensive evaluation and more convincing controls. Current paper is stronger. |
-| `Dyo2tS5A8b.md` (What do we learn from inverting CLIP?) | 4.25 | CLIP inversion for bias analysis. Current paper is more rigorous and its claims are better supported. Current paper is stronger. |
-| `OZdr2mV5EI.md` (Instruction Contrastive Tuning) | 4.25 | ZS-CIR method paper. Different task but similar venue tier. Current paper has cleaner methodology. Current paper is stronger. |
-| `HfJxXbXlYJ.md` (LLM2CLIP) | 3.00 | CLIP+LLM paper with serious evidentiary shortcomings. Current paper is substantially stronger in experimental rigor and clarity. |
-| `rwdeKOdAwY.md` (RetFormer) | 3.00 | Poorly motivated retrieval-augmented classification paper. Current paper is far stronger in motivation, execution, and presentation. |
+| Anchor | Avg Score | Comparison to this paper |
+|--------|-----------|------------------------|
+| `Dyo2tS5A8b` (What do we learn from inverting CLIP models?) | 4.25 | Much weaker — mostly qualitative, limited scope. This paper has far more rigorous and extensive experiments. |
+| `wE8wJXgI9T` (It's Not a Modality Gap) | 4.75 | Similar topic area but less convincing empirical case. This paper is stronger. |
+| `b2UlHeyyC0` (Retrieval-Enhanced Contrastive Vision-Text Models) | 5.67 | Proposes a method with larger practical gains. This paper has a stronger scientific analysis and broader evaluation. |
+| `aPTGvFqile` (Mitigate the Gap) | 6.29 | Comparable empirical rigor but proposes a new training method. This paper is more of an analysis contribution. |
+| `S5yOuNfSA0` (Understanding Transferable Representation Learning in CLIP) | 6.50 | Theoretical analysis of CLIP. Similar quality tier — both make solid contributions with thorough evaluation. |
+| `uAFHCZRmXk` (Two Effects, One Trigger) | 8.00 | Deeper theoretical analysis with more novel insights. This paper is less theoretically ambitious. |
 
-The paper sits above most rejected empirical analysis papers (3.0–5.5) and is comparable to the accepted modality-gap paper (6.29), though somewhat weaker because it primarily diagnoses the problem rather than providing a practical solution. Its strengths — broad evaluation, clean controls, and a well-founded central claim — are genuine. The weaknesses (missing error bars, incomplete OVI symmetry, computational cost) are substantive but do not undermine the core finding.
+This paper makes a clear, well-supported scientific point about intra-modal misalignment in CLIP, backed by extensive experiments across 15+ datasets and 5 models with converging evidence from multiple controlled studies. The improvements are consistent but modest, and the practical applicability is limited by computational cost. The contributions are solid but not transformative. Positioning against the anchors, this paper sits comfortably above the 4–5 range papers and around the level of well-executed empirical analyses like aPTGvFqile (6.29) and S5yOuNfSA0 (6.50), though below the top tier of deep analytical work like uAFHCZRmXk (8.00).
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

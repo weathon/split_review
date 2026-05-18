@@ -1,91 +1,89 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
 ## Summary
 
-This paper observes that small-scale CLIP models (trained on CC3M/CC12M) plateau in accuracy, and shows that resetting the learning rate scheduler and training for a few extra epochs yields large gains (e.g., 31% → 41% ImageNet zero-shot for ResNet-50 on CC12M). The paper frames this as evidence that these models are "undertrained" and demonstrates the practical effectiveness of this simple procedure.
+This paper demonstrates a simple yet effective finding: CLIP models trained on small-scale datasets (CC12M, CC3M) benefit substantially from resetting the learning rate scheduler and training for a few additional epochs. The intervention yields consistent gains of 4–11% absolute on zero-shot ImageNet accuracy across multiple architectures (ResNet-50, ViT-B-32, ViT-B-16), saturates after only 3 extra epochs, and produces results competitive with far more complex CLIP modifications. The paper also shows that the improvement disappears at large scale (LAION-400M) and that training from scratch with a multi-cycle cosine schedule outperforms the standard single-cycle schedule.
 
 ## Strengths
 
-- **Genuinely surprising and practically useful empirical finding.** Figure 1 shows a CLIP model plateauing at ~31% ImageNet accuracy after 75 epochs on CC12M, then jumping to ~41% after just 10 additional epochs with a reset LR schedule — a 10% absolute gain. This is a striking result that could benefit researchers with limited compute budgets.
+- **Large, consistent, and reproducible gains from a trivial intervention.** A ResNet-50 CLIP trained on CC12M jumps from 31% to 41.7% ImageNet zero-shot accuracy solely by resetting the LR scheduler and training for 10 more epochs (Table 2, Figure 1). This ~10-point absolute gain is striking for a method that requires no architectural changes, no loss modification, and no additional data.
 
-- **Remarkable efficiency.** Figure 3 shows the performance gain saturates after only 3 extra epochs across multiple architectures (ResNet-50, ViT-B-32, ViT-B-16). The overhead is negligible.
+- **Gains are consistent across architectures and evaluation tasks.** Table 2 reports improvements of 4–11% for ResNet-50, ViT-B-32, and ViT-B-16 on ImageNet, ImageNetV2, and ObjectNet, establishing the phenomenon is not architecture-specific.
 
-- **Early restart surpasses full training.** Figure 4 shows that restarting after just 10 of 75 planned epochs yields a model reaching 37% accuracy after 20 total epochs, surpassing the full 75-epoch model (31%). This suggests the standard cosine schedule is suboptimal and the paper's procedure recovers lost potential.
+- **Computational overhead is minimal.** Figure 3 shows that performance saturates after only 3 extra epochs across all three architectures, making the procedure nearly free.
 
-- **Negative result on LAION-400M validates the scope.** Table 6 shows the restart procedure does not improve a ViT-B-32 trained on LAION-400M. This controlled comparison strengthens the paper's claim by showing the effect is specific to small-scale training, and the paper honestly reports this limitation.
+- **Compelling boundary condition via negative result.** Table 6 shows that applying the same restart procedure to a ViT-B-32 trained on LAION-400M yields no improvement, cleanly demonstrating the phenomenon is specific to the small-data regime.
 
-- **Multi-cycle cosine schedule from the start also helps.** Section 3.4 shows that using a cyclic LR schedule from the beginning of training outperforms the standard single-cycle cosine schedule, providing a complementary actionable recommendation.
+- **Figure 5 (multi-cycle cosine from scratch) is a clean, standalone result.** Training with a multi-cycle cosine schedule from the start outperforms the standard single-cycle schedule with fewer total epochs. This is practically useful for anyone training CLIP from scratch on small data.
+
+- **Figure 4 (early restart)** shows that stopping training at epoch 10 and restarting reaches 37% after only 20 total epochs — outperforming the standard model's 31% after 75 epochs. This suggests a far more efficient training pathway.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **The central "undertrained" claim is not cleanly isolated from the LR-restart mechanism.** The paper attributes the improvement to "undertraining" — i.e., the model simply needs more training. However, the experiment conflates two factors: (a) more training steps and (b) a reset to a high learning rate that can escape sharp minima. The paper does **not** test the obvious control: *continue training with a very small constant LR* (no restart). If constant-LR continuation also improves accuracy, the "undertrained" label is plausible. If it does not, the improvement is an LR-reset artifact (escaping a sharp basin), and the paper's central framing is misleading. This is the single most important missing experiment, and it affects whether the paper's main claim can be taken at face value.
+- **Missing experimental details prevent full reproducibility.** The paper never specifies the optimizer (AdamW? SGD? betas?), learning rate value, batch size, weight decay, warmup steps, exact schedule parameters (initial LR, minimum LR, cycle length), how "resetting the scheduler" is implemented (back to the full initial LR and full schedule, or a shortened cycle?), dataset preprocessing/deduplication, or whether results are single-run or averaged over seeds. For a paper whose entire contribution is a training protocol, these omissions are serious.
+
+- **The "undertrained" framing overclaims what the evidence supports.** The paper's own results in Section 3.4 (Figure 5) show that using a multi-cycle cosine schedule from scratch outperforms the single-cycle schedule. Section 3.1 states that accuracy saturates after epoch 40 under the original schedule. Together, these results suggest the core issue is *schedule suboptimality*, not insufficient training. The term "undertrained" implies the model has not been trained long enough, but the evidence points to a poor schedule choice. A model trained for 75 epochs that plateaus after 40 is not undertrained in any standard sense — it has been trained with a suboptimal schedule. The paper would be stronger and more honest if it framed the contribution around recovering from a poor LR schedule post-hoc.
+
+- **The comparison with prior methods (Table 7) is not controlled.** The paper compares its method against SLIP, FLIP, CLIP+CR, etc., but does not establish whether these baselines were trained under comparable conditions (same dataset, backbone, compute budget, hyperparameters). The paper also does not test whether the baseline methods could themselves be improved by the same restart strategy. If they can (which is plausible), the claim of competitiveness is weakened. Additionally, only ImageNet accuracy is reported for this comparison, while the paper's own method is evaluated on more tasks in Table 2 — an asymmetry that makes the comparison less informative.
 
 ### Minor
 
-- **Unequal compute in Table 7 comparison.** Table 7 compares the paper's method (41.7% on ImageNet) against methods that train from scratch with modified objectives (e.g., SLIP: 34.0%). The competing methods are trained for some fixed budget (typically 75 epochs on CC12M), while the paper's method uses the baseline checkpoint *plus* extra epochs — effectively more total compute. While the accuracy gap is large enough (41.7% vs. next best 36.2%) that unequal compute alone cannot explain it, the comparison would be fairer by either (a) using equal total epochs for all methods or (b) applying the restart to each competing method's checkpoint. The authors should at minimum discuss how the extra compute affects the comparison.
+- **No analysis of why the restart works.** The paper treats the improvement as a black-box result. Understanding why — e.g., analysis of loss landscapes, gradient norms, representation similarity before/after restart, or whether the benefit comes from escaping a sharp minimum — would significantly strengthen the contribution. As it stands, readers are left to speculate about the mechanism.
 
-- **No error bars or multiple seeds.** All figures and tables report single-run results. Given that some comparisons involve small gaps, the lack of variance estimates weakens confidence in the reported numbers.
+- **Limited evaluation of the negative result on LAION-400M.** Section 3.5 tests only one model (ViT-B-32) and one dataset. While the result is suggestive, it is insufficient to support the sweeping claim "CLIP models trained on large datasets are less likely to be undertrained."
 
-- **Baseline provenance in Table 2 is underspecified.** The table says "performance reported by the literature" without citing which specific papers or confirming whether training setups match. The paper should train its own baselines under identical conditions or at least clearly cite the sources.
-
-- **Why 15 extra epochs for LAION (Section 3.5) when 3 sufficed for small-scale?** The paper does not justify this choice. If the method is meant to be simple with a fixed heuristic, this inconsistency needs explanation.
+- **No discussion of overfitting.** The paper does not report training loss or validation loss trajectories, only zero-shot accuracy. On small datasets like CC12M, additional training could in principle cause overfitting, but this is not examined.
 
 ### Trivial
-
-- The paper's title ("Your CLIP Model Might Be Undertrained") is somewhat broader than the evidence supports, which is limited to small-scale models. The paper acknowledges this in Section 3.5, so the issue is solely about presentation scope. The title is not factually wrong given the "might be" qualifier.
+None.
 
 ## Nice-to-Haves
 
-- An ablation comparing the proposed restart with simply continuing training at a constant small LR (this is listed as a Major weakness, not a nice-to-have — it genuinely affects the core claim).
-- Extending the analysis to additional smaller-scale datasets beyond CC3M/CC12M to further validate the generality of the finding.
-- Application of the restart procedure to checkpoints of the competing methods from Table 7, if available, for a fairer comparison.
+- A control experiment showing what happens if training continues without resetting the LR (i.e., with LR fixed at the final cosine minimum) would cleanly isolate whether the benefit is from the restart mechanism or merely from seeing more data.
+- Testing whether the restart strategy is additive on top of other CLIP improvements (SLIP, FLIP, etc.) would strengthen the practical relevance.
+- A breakdown of the restart's effect on the text encoder vs. the image encoder would be informative.
 
 ## Removed Points
 
-- **Criticism that the title/abstract are too sweeping given the LAION negative result.** The paper explicitly studies this in Section 3.5 and reports it honestly. The title says "might be" — this is appropriately cautious, and the abstract states "especially those trained on smaller datasets." This is not a real weakness. → Moved from review.
+- **"The paper never isolates whether the benefit comes from the restart mechanism (high LR) or from the extra epochs."** The paper partially addresses this: Section 3.1 states accuracy saturates after epoch 40 and "simply training for longer does not significantly affect accuracy," and Figure 3 shows saturation after 3 restart epochs. This does not fully isolate the mechanism (a true control would hold LR fixed), but the paper does provide relevant evidence. Weakened to a minor point and moved to Nice-to-Haves.
 
-- **Strength Finder's claim that Table 7 comparison shows the method is "competitive with" other approaches without caveats.** I've kept this strength but qualified it with the unequal-compute concern in Weaknesses.
+- **"Baseline comparisons are uninformative and potentially unfair."** The strength of this criticism is reduced because the paper's claim is modest ("competitive results") and the comparisons, while imperfect, are reported honestly. Moved from "Evidential" (fatal-level framing) to Minor weakness.
 
-- **Critic's point about "why 15 epochs for LAION" is noted but is a minor detail, not a structural weakness.** Kept in minor weaknesses.
+- **Strength Finder's generic strengths removed:** "The paper provides direct, testable alternative training schedule" — this is already covered by other strengths. "All experiments use standard public datasets" — this is generic and not a distinctive strength.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an insight not fully explored in the paper: the observed phenomenon may be more about the *design of the LR schedule* than about undertraining per se. Figure 4's finding that restarting after just 10 epochs surpasses the 75-epoch baseline suggests the standard cosine schedule is actively harmful in the later stages of training on small datasets. This could point to a more general principle — that aggressive LR schedules designed for web-scale training are poorly calibrated for smaller datasets where gradients remain informative for longer. The multi-cycle cosine result (Section 3.4) partially addresses this, but the mechanism (sharp minima escape vs. genuine undertraining) remains unexamined.
+None beyond the paper's own contributions. The key observation — that a simple LR reset gives large gains on small-scale CLIP models — is itself the novel insight. The reviewers' analyses add no fundamentally new interpretation beyond what the paper already states.
 
 ## Suggestions
 
-1. **Run the constant-LR continuation experiment.** Without this control, the paper's central claim is ambiguous. This one experiment would either validate or reframe the entire contribution.
-
-2. **Report all results with at least 3 random seeds** and include error bars or confidence intervals.
-
-3. **Equalize the total training budget** in Table 7, or apply the restart to the checkpoints of competing methods, or at minimum discuss the unequal compute honestly.
-
-4. **Cite the exact sources** for baseline numbers in Table 2, or train those baselines under identical conditions.
-
-5. **If the constant-LR baseline does not improve**, reframe the paper around "LR restarts improve small-scale CLIP models" rather than "CLIP models are undertrained."
+1. Add a dedicated "Experimental Setup" section specifying optimizer, hyperparameters, LR schedule parameters, dataset versions, and whether results are averaged over multiple seeds.
+2. Add a control experiment: continue training for 10 epochs with LR fixed at its cosine-decayed minimum (no reset). This would cleanly separate the benefit of the restart from the benefit of additional data exposure.
+3. Add an analysis section investigating the mechanism (e.g., loss landscape visualization, gradient norm trajectories, or representation similarity between original and restarted models).
+4. Reframe the contribution around recovering from suboptimal LR schedules rather than "undertraining," which more accurately reflects what the evidence shows.
+5. In Table 7, report whether the baseline methods could also benefit from an LR reset, or at minimum discuss this caveat explicitly.
+6. Add standard deviation/error bars to all quantitative results.
 
 ## Score and Decision
 
-I read the following anchor papers from the calibration set for comparative scoring:
+**Calibration Anchors (all retrieved from calibration search, one batch):**
 
-| Path | Avg Human Score | Comparison to This Paper |
-|------|----------------|--------------------------|
-| S5yOuNfSA0 — Understanding Transferable Representation Learning and Zero-shot Transfer in CLIP | 6.50 (Accept) | Stronger theoretical depth and more rigorous experiments; our paper has a more surprising empirical finding but weaker controls |
-| tnBaiidobu — Does CLIP's generalization mainly stem from high train-test similarity? | 5.75 (Accept) | Better experimental design (multiple seeds implied) and clearer scope; our paper has a more actionable finding but weaker methodology |
-| qm46g9Ri15 — AlignCLIP | 5.25 (Reject) | Similar level of technical contribution; our paper has a more surprising finding but similar concerns about evaluation breadth |
-| a4nSE2kpoq — HyperCLIP | 4.00 (Reject) | Our paper has a clearer and more impactful empirical finding |
-| JetCx7Tpgb — OrthSR | 4.20 (Reject) | Our paper's finding is more novel and surprising; OrthSR has marginal gains over baselines |
-| FbQLFsBbTe — FastCLIP | 3.67 (Reject) | Our paper reports a simpler, more striking finding with broader practical utility |
-| G9Ea7mlqGO — CLIP as Efficient Online Continual Learner | 3.80 (Reject) | Our paper faces fewer confounding issues in its experimental design |
-| HfJxXbXlYJ — LLM2CLIP | 3.00 (Reject) | Our paper is better written and has a cleaner contribution |
+| Anchor | Avg Score | Comparison to This Paper |
+|--------|-----------|--------------------------|
+| Interpreting CLIP's Image Representation via Text-Based Decomposition | 8.00 | Deep, rigorous analysis with extensive experiments and clear applications — far stronger than this paper |
+| Compositional Entailment Learning for Hyperbolic VLMs | 8.00 | Novel method with large-scale training and strong empirical results — substantially stronger |
+| Understanding Transferable Representation Learning in CLIP | 6.50 | Theoretical + empirical contribution with rigorous experimental design — stronger |
+| CityAnchor: City-scale 3D Visual Grounding | 6.50 | Extensive experiments and clear engineering contribution — stronger |
+| When, Why and How Much? Adaptive LR Scheduling | 5.80 | Theoretical grounding + comprehensive evaluation across 10 problems — stronger in rigor |
+| Leveraging Knowledge Graphs for Efficient CLIP Training | 5.33 | Dataset contribution with solid experiments and clear scope — slightly stronger |
+| FastCLIP | 3.67 | CLIP optimization paper with limited novelty and unclear writing — this paper is clearer with a more surprising finding |
+| CLIP Model is an Efficient Online Continual Learner | 3.80 | Missing comparisons and methodological concerns — similar quality, this paper has cleaner results |
+| Hybrid Classification-Regression Adaptive Loss | 3.00 | Incremental, limited experiments — weaker |
 
-**Relative positioning:** This paper has a genuine and surprising finding, but the missing constant-LR control and the absence of error bars place it below the well-executed empirical papers (tnBaiidobu at 5.75, S5yOuNfSA0 at 6.50). It is stronger than the papers scoring 3–4, which either have marginal gains, unclear framing, or presentation issues. The paper's central thesis is not fully validated by the current experiments, pulling it down.
+This paper reports a genuinely useful and surprising observation, and the core experiments are clearly communicated. However, it suffers from (a) missing reproducibility-critical experimental details, (b) an overclaimed "undertrained" framing that its own evidence undercuts, (c) no analysis of the mechanism, and (d) uncontrolled baseline comparisons. Relative to the calibration anchors, it sits between the weaker CLIP papers (FastCLIP, CLIP Continual Learner) and the moderately-rated papers (Knowledge Graphs, Adaptive LR Scheduling). It is more insightful and practically useful than FastCLIP, but far less rigorous than the 5.5+ papers.
 
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

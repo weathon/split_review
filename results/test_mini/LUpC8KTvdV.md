@@ -1,82 +1,86 @@
-Now I have everything I need. Let me write the consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes MaskTAS, the first self-supervised transformer architecture search (TAS) method for vision transformers. It adapts the one-shot NAS framework to masked image modeling (MIM) by designing a siamesed teacher–student supernet where the teacher is a pre-trained MAE model that provides feature-level distillation targets, enabling stable supernet training without labels. A novel unsupervised evaluation metric based on teacher–student feature consistency drives an evolutionary search for optimal subnets. On ImageNet, MaskTAS-base achieves 83.8% top-1 accuracy, outperforming the supervised AutoFormer-base (82.1%) while using only 100 pre-training epochs versus 800.
+This paper proposes MaskTAS, a self-supervised neural architecture search method for Vision Transformers (ViTs) based on masked image modeling (MIM). The key ideas are: (1) a siamese teacher-student supernet where a pre-trained MAE teacher provides supervision via feature distillation to stabilize co-training of diverse subnets, (2) an unsupervised evaluation metric for evolutionary search based on teacher-student feature consistency, and (3) the first application of self-supervised NAS specifically to ViTs. Results on ImageNet, CIFAR-10/100 show competitive accuracy against supervised TAS methods like AutoFormer and ViTAS.
 
 ## Strengths
 
-1. **First self-supervised NAS pipeline for vision transformers.** Prior TAS methods (AutoFormer, ViTAS) all require labeled data. MaskTAS demonstrates that the entire NAS pipeline — supernet training, architecture search via evolutionary search, and fine-tuning — can be executed without manual labels, establishing a new paradigm for the field.
+- **First self-supervised NAS framework for Vision Transformers.** The paper genuinely breaks new ground by adapting NAS to a self-supervised MIM paradigm specifically for ViTs, whereas prior self-supervised NAS work (e.g., MAE-NAS) focused on CNNs. The pipeline in Figure 1 and Algorithm 1 concretely demonstrate a complete label-free supernet training and search process, addressing a real gap in the literature.
 
-2. **Significant training efficiency.** MaskTAS's distillation-based supernet converges stably within 100 epochs, whereas the supervised AutoFormer supernet remains far from convergence even after 500 epochs (Figure 4). This efficiency gain (8× reduction) is substantial and practically meaningful.
+- **Siamese teacher-student supernet design stabilizes MIM-based supernet training.** Section 2.3 and Algorithm 1 describe a clever architecture where a frozen pre-trained teacher (via feature prediction loss) provides the strong supervision that prevents the divergence of co-trained subnets — a problem the paper identifies and addresses directly. Figure 4 shows MaskTAS converges in ~100 epochs versus AutoFormer's 500+ epochs, which is a substantial practical improvement.
 
-3. **Competitive ImageNet results.** MaskTAS-base achieves 83.8% top-1 accuracy, outperforming supervised AutoFormer-base (82.1%) and ViTAS-Twins (83.7%, which uses more parameters). The searched MaskTAS-small (82.5%) matches ViT-B/16 fine-tuned from MAE at 100 epochs, despite being a searched architecture rather than a fixed one. These results hold across three model sizes (tiny, small, base), showing consistent improvement.
+- **Unsupervised evaluation metric for evolutionary search.** The teacher-student feature consistency metric (Eq. 14-17 in Section 2.4) is a principled approach to rank architectures during search without labeled data, addressing the need for label-free search in self-supervised NAS. This is a non-trivial component that goes beyond simply swapping a supervised loss for an unsupervised one.
 
-4. **Robustness to extreme masking ratios.** MaskTAS maintains stable accuracy up to a 90% masking ratio (Figure 3), whereas standard MAE degrades past 75%. The ablation attributes this to the distillation objective, which enables the student to extract more information from limited visible patches.
+- **Strong empirical results given significantly less pre-training.** MaskTAS-base achieves 83.8% top-1 accuracy on ImageNet with only 100-epoch pre-training, vs. AutoFormer-base at 82.4% with 800-epoch supervised training (Table 1). This efficiency claim is well-supported by the convergence analysis in Section 3.3.
 
 ## Weaknesses
 
 ### Major
 
-1. **No validation of the self-supervised search metric.** The paper's core claim of "self-supervised architecture search" hinges on the teacher–student feature consistency metric (Eq. 11–13) used to rank candidates during evolutionary search. Yet there is no experiment demonstrating that this metric correlates with downstream fine-tuned accuracy — not even a correlation study on a handful of sampled architectures. Without evidence that architectures ranked higher by this metric actually perform better after fine-tuning, the search stage is a black box. A simple baseline — picking a random subnet from the well-trained supernet — could achieve similar results. This is a structural gap that directly undermines the claimed contribution.
+- **Uncontrolled comparison with supervised NAS baselines conflates pre-training benefit with architecture search benefit.** MaskTAS leverages a pre-trained MAE teacher (trained on ImageNet-1K without labels but requiring substantial compute) and then fine-tunes with labels. The compared baselines (AutoFormer, ViTAS) are trained from scratch with supervised learning — they do not benefit from any self-supervised pre-training. To substantiate the claim that MaskTAS finds better *architectures*, the paper must include a baseline of the teacher model itself (e.g., MAE ViT-B fine-tuned under identical conditions) fine-tuned directly. Without this, the observed improvements could simply reflect the known advantage of MAE pre-training over training from scratch, rather than any contribution from architecture search. The paper's headline result conflates two factors.
 
-2. **Missing critical baseline: MAE fine-tuning of a standard architecture.** The paper compares against supervised NAS methods but omits the most natural baseline: fine-tuning the pre-trained MAE teacher (or a standard ViT architecture pretrained with MAE) on ImageNet with the same 100-epoch fine-tuning protocol. The MAE paper reports that a ViT-B/16 fine-tuned for 100 epochs achieves ~82.5% top-1 accuracy — almost exactly what MaskTAS-small achieves (82.5%). MaskTAS-base (83.8%) is only ~1.3% above this baseline. Without this comparison, it is impossible to attribute the reported performance to the *architecture search* rather than to the inherent strength of MIM pre-training.
-
-3. **No ablation isolating the distillation loss.** The paper asserts that distillation is necessary to prevent divergence during self-supervised supernet training (Section 2.3), yet no experiment compares the full objective (pixel loss + feature distillation) against a variant with pixel loss only. The convergence curves in Figure 4 compare against *AutoFormer* (supervised), not against a self-supervised supernet trained without distillation. This is a key methodological claim left unsubstantiated.
+- **The unsupervised search metric (teacher-student feature similarity) is unvalidated.** Section 2.4 defines the evolutionary search ranking via cross-entropy over pairwise feature relations (Eq. 14-17), but zero evidence is provided that this metric correlates with downstream fine-tuned accuracy. The paper should report Spearman rank correlation between the proposed similarity score and actual fine-tuned accuracy over a held-out set of subnets. If this correlation is low, the search could be optimizing for teacher-student mimicry rather than genuine performance. This is a methodological gap in the core search algorithm.
 
 ### Minor
 
-1. **No comparison to a random-subnet baseline.** Since the search metric is unvalidated, the paper should compare the performance of the searched architecture against a randomly sampled subnet from the same supernet, fine-tuned under identical conditions. This would at least bound the contribution of the search stage.
+- **Claims about "without using manual labels" are overstated.** The abstract states that MaskTAS achieves state-of-the-art accuracy "even without using manual labels." However, Figure 1 shows stage (c) is "supervised re-training of searched architecture" and Section 3.1 describes fine-tuning with labels (batch size 2048, learning rate 5e-3, drop path 0.1). The paper is transparent about this (Figure 1 explicitly labels it), but the abstract and conclusion (Section 4, "without using manual labels") give the impression that the entire pipeline is label-free. This should be clarified to say "self-supervised architecture search with supervised fine-tuning" — a standard formulation, but the current wording risks misleading readers.
 
-2. **Unsupervised evaluation metric presented without any analysis.** The cross-entropy-based similarity function (Eq. 11–13) is introduced without intuition, sensitivity analysis (e.g., to temperature τ), or any qualitative demonstration that it distinguishes good from bad architectures.
+- **Insufficient ablation studies.** Only two ablations are presented: masking ratio (Figure 3) and training loss curves (Figure 4). Key design choices are not ablated: (1) the distillation loss weight β in Eq. 6, (2) the choice of Smooth L1 on layer-normalized features vs. alternatives for feature prediction, (3) the projection network architecture, (4) the size of the teacher (only "larger teacher" unspecified), and (5) alternative unsupervised evaluation metrics for search (e.g., cosine similarity, negative entropy). Without these ablations, the contribution of individual components cannot be isolated.
 
-3. **No error bars or confidence intervals.** The main results table (Table 1) reports single-run accuracy. Given that the evolutionary search involves multiple stochastic components, some measure of variance is expected.
+- **Teacher architecture and size are not specified.** Section 3.1 mentions "MIM pre-trained models released from the official MAE implementations" as the teacher, but does not state the teacher's size (e.g., ViT-L, ViT-H). The reader cannot assess whether the method's success relies on an extremely large teacher or is robust to teacher size. Parameter counts for ViTAS-Twins in Table 1 are also missing, making the "much less parameters" claim unverifiable.
 
 ### Trivial
 
-None.
+- The training loss equation (around line 137) is garbled in the extracted text ("twivheelrye; nadn..."), but this is a PDF parsing artifact, not an author error. The actual loss is clear from context (Eq. 6-9).
+
+- The restriction to visible patches only in the feature similarity metric (Section 2.4) is stated but not motivated, and the O(N_v²) pairwise computation could be expensive — a brief efficiency note would help.
 
 ## Nice-to-Haves
 
-- Include a standard MAE ViT-B fine-tuning baseline to isolate the contribution of architecture search from MIM pre-training.
-- Add a correlation study (e.g., Spearman rank correlation) between the self-supervised metric and fine-tuned accuracy on 10–20 sampled subnets. This single experiment would either justify or invalidate the central contribution.
+- Adding a baseline of MAE ViT-B fine-tuned directly (from official MAE results) would cleanly isolate the value added by architecture search. This is the single most important missing experiment.
+- Ablating the distillation loss weight β would help readers understand its sensitivity.
+- Reporting Spearman correlation between the unsupervised search metric and fine-tuned accuracy over ~50 random subnets would validate the core search algorithm.
+- Testing with a smaller teacher (e.g., ViT-B as teacher) would reveal whether the method depends on teacher capacity.
 
 ## Removed Points
 
-- **Weakness about missing transfer results on CIFAR-10/100, PETS, Flowers, ADE20K in the main paper** — removed per policy: these results may appear in the appendix (stripped by parser). The paper explicitly mentions these datasets in the abstract and Section 3.1.
-- **Strength finder claim that "final accuracy on ImageNet validates that this metric correlates well with downstream supervised performance"** — removed as overstated. Final accuracy of one searched architecture does not constitute a correlation study.
-- **Strength finder point about "novel unsupervised metric" being validated** — weakened; the metric itself is novel, but the claim of validation is not supported by evidence in the paper.
-- **Harsh critic point about "no analysis of correlation between search metric and final accuracy" was converted into a Major weakness (kept the substance).**
-- **Formatting/style nitpicks and references to missing appendices** — removed per policy.
+- *"Missing related works (self-supervised NAS for CNNs)"* — The hard rule says not to mention missing related works since I cannot independently verify their existence. Removed.
+- *"Formatting/style nitpicks and typos"* — These are parser artifacts, not author errors. Removed.
+- *"The paper does not discuss efficiency of the O(N_v²) similarity computation"* — This is a minor point about a detail not central to the contribution; moved to Trivial.
+- *Strength Finder strength about "importance of the problem"* — Generic; not specific to this paper. Removed.
+- *"Unfair comparison" when criticizing AutoFormer's slower convergence (Figure 4)* — The criticism that the convergence comparison is unfair because AutoFormer uses a supervised loss while MaskTAS uses distillation is correct in isolation, but the paper's point is specifically that distillation enables faster convergence — this is a feature of the method, not a bug. The comparison is asymmetric by design. However, I've kept the broader unfair comparison issue (pre-training advantage) as a major weakness since it actually threatens the core claim.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface the standard concerns about uncontrolled comparisons and insufficient ablations but do not reveal a deeper flaw or overlooked opportunity beyond what the authors already partially acknowledge (e.g., the supervised re-training in Figure 1).
 
 ## Suggestions
 
-1. **Validate the search metric.** Sample 10–20 architectures from the trained supernet, compute their self-supervised scores, fine-tune them all, and report the rank correlation (Spearman/Kendall between score and fine-tuned accuracy). If correlation is high, it validates the core claim. If near zero, the contribution reduces to self-supervised *supernet training* (still interesting) but not architecture search.
-
-2. **Add the MAE fine-tuning baseline.** Fine-tune the official MAE ViT-B/16 (or the actual teacher architecture used) on ImageNet for 100 epochs under the same protocol as MaskTAS, and include it in Table 1.
-
-3. **Ablate the distillation loss.** Train the supernet with pixel reconstruction loss only (no feature distillation) for the same 100 epochs. If it diverges, the claim is supported. If it converges reasonably, the motivation weakens.
-
-4. **Add a random-subnet baseline.** Report the accuracy of a randomly selected subnet from the supernet (averaged over 3–5 random draws) to bound what the search contributes.
+1. **Correct the framing.** In the abstract and conclusion, replace "without using manual labels" with "with self-supervised architecture search followed by supervised fine-tuning" to accurately describe the pipeline.
+2. **Add a critical baseline.** Include MAE ViT-B fine-tuned directly (or the same MAE teacher model fine-tuned under identical conditions) in Table 1. This is essential to separate the contribution of architecture search from the benefit of pre-training.
+3. **Validate the unsupervised search metric.** Compute Spearman rank correlation between the proposed feature similarity score and downstream fine-tuned accuracy over at least 30-50 sampled subnets. Report this in Section 3.3.
+4. **Expand ablations.** Ablate at minimum: the distillation weight β, the choice of feature prediction loss (Smooth L1 vs. MSE vs. cosine), and the projection network. Also specify the teacher architecture size.
+5. **Add teacher model direct comparison for transfer learning tasks.** On CIFAR-10/100, PETS, Flowers, compare not just against supervised NAS results but also against the teacher model fine-tuned directly on those datasets.
 
 ## Score and Decision
 
-**Calibration Anchors (All from deepreview_13k_calibration):**
+**Calibration anchor comparisons:**
+- **l5EYUpoTrZ.md (avg 4.00)** — MAE-NAS for CNNs, rejected. The current paper is stronger: it targets ViTs (not CNNs), has a more novel siamese architecture design, and addresses a harder problem. MaskTAS is clearly better.
+- **Z3waKPN7DG.md (avg 4.00)** — UNAST for LLM compression, rejected. The current paper has more technical novelty. MaskTAS is better.
+- **PqiDHCLkB9.md (avg 3.50)** — NTK-score zero-shot NAS, rejected. Both have empirical gaps, but MaskTAS proposes a full pipeline while the NTK paper is a proxy metric. MaskTAS is slightly better.
+- **NoiaAT0eec.md (avg 6.50)** — MI-MAE, accepted. Has theoretical grounding (information bottleneck) and thorough ablations. MaskTAS has comparable novelty but weaker empirical validation. MaskTAS is weaker.
+- **HsHxSN23rM.md (avg 7.00)** — STAR, accepted. Thorough evaluation, novel search space, strong results. MaskTAS is significantly weaker in experimental rigor.
+- **T7YV5UZKBc.md (avg 7.33)** — NFTS, accepted. Well-executed, thorough. MaskTAS is weaker.
+- **PdaPky8MUn.md (avg 8.00)** — Never Train from Scratch, accepted. Exceptionally clear and well-supported. MaskTAS is much weaker.
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `l5EYUpoTrZ.md` (MAE-NAS) | 4.00 | Similar topic (self-supervised NAS with MAE) but applied to CNNs via DARTS; this paper targets ViTs with one-shot NAS and stronger results, making it moderately stronger. |
-| `3ijmMNaSJk.md` (Towards Understanding Masked Distillation) | 3.00 | An analysis-only paper with limited novelty; this paper proposes a concrete method with empirical results, making it substantially stronger. |
-| `YlleMywQzX.md` (ATLAS tabular NAS) | 5.75 | Well-executed NAS paper with thorough evaluation, but narrower scope (tabular data); this paper addresses broader ViT NAS but has weaker validation. |
-| `cINwAhrgLf.md` (Aux-NAS) | 7.20 | Strong paper with extensive experiments across multiple tasks and backbones; this paper has comparable breadth of vision but significantly weaker experimental validation. |
-| `HsHxSN23rM.md` (STAR) | 7.00 | Strong novel search space with thorough evaluation; this paper lacks that level of experimental rigor. |
-| `gJeYtRuguR.md` (METR) | 7.50 | Very strong paper with clear motivation and extensive experiments; this paper is notably weaker on both motivation and experimental support. |
+The paper has genuine novelty (first self-supervised NAS for ViTs with a non-trivial siamese teacher-student design) and demonstrates promising efficiency gains. However, the empirical validation is insufficient in several critical respects: the comparison with supervised baselines does not control for pre-training benefits, the core search metric is not validated, and the ablations are too shallow to attribute improvements to specific components. These issues prevent the paper from meeting the acceptance bar in its current form. Score reflects a paper with interesting ideas but requiring substantial revision before the claims are convincingly supported.
 
-**Rationale:** The paper introduces a genuinely novel idea (first self-supervised NAS pipeline for ViTs) and demonstrates impressive training efficiency. However, the core claim — that the *search* component (as opposed to the supernet training) adds value — is entirely unvalidated. The missing MAE fine-tuning baseline further clouds whether performance comes from search or from MIM pre-training. These are not fatal flaws (they can be fixed with additional experiments), but in the paper's current form they are major gaps that prevent acceptance at a competitive venue. The paper sits between the MAE-NAS paper (4.00, rejected) and the ATLAS paper (5.75, rejected), closer to ATLAS due to greater novelty but pulled down by weaker evidence.
+**Score:** 5.0
+
+**Decision:** Reject
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,92 +1,104 @@
-Now I have all the information I need. Let me write the final consolidated review.
+Now I have all the verification I need. Let me write the authoritative consolidated review.
 
 ## Summary
 
-The paper proposes Hierarchical Side-Tuning (HST), a PETL method that trains a lightweight Hierarchical Side Network (HSN) alongside a frozen ViT backbone, leveraging intermediate activations via a Meta-Register and Transformation Bridge to model multi-scale features. The method is evaluated on image classification (VTAB-1K, FGVC, CIFAR-100), object detection (COCO), instance segmentation (COCO), and semantic segmentation (ADE20K).
+This paper proposes Hierarchical Side-Tuning (HST), a parameter-efficient transfer learning method for Vision Transformers. HST introduces a lightweight Hierarchical Side Network (HSN) that operates in parallel with a frozen ViT backbone, using a Meta-Register token, a Transformation Bridge (T-Bridge), and cross-attention-based Side blocks to fuse multi-scale features. Extensive experiments across image classification (VTAB-1K, FGVC, CIFAR-100), object detection, instance segmentation, and semantic segmentation show that HST achieves state-of-the-art results among PETL methods and, on several benchmarks, approaches or surpasses full fine-tuning with substantially fewer trainable parameters.
 
 ## Strengths
 
-- **Consistently outperforms existing PETL methods across diverse tasks**: On VTAB-1K, HST-B achieves 76.12% with only 0.78M parameters, surpassing SSF (73.10%), LoRA (72.25%), AdaptFormer (73.10%), NOAH (73.20%), and VPT-Deep (69.43%). On COCO detection (Cascade Mask R-CNN 3×+MS), HST achieves 49.5 AP^b vs the best PETL competitor (LoRA at 46.9 AP^b), and on ADE20K semantic segmentation (UperNet), HST achieves 47.0 mIoU vs the next best (SSF at 44.9 mIoU). This breadth of consistent improvement across classification and dense prediction is the paper's strongest evidence.
+1. **Strong and consistent classification results with high parameter efficiency.** On VTAB-1K, HST achieves 76.1% average Top-1 accuracy using only 0.78M trainable parameters, outperforming strong PETL baselines (SSF, LoRA, AdaptFormer, NOAH) by 2.9–3.85%. The gains are consistent across all 19 tasks and the comparison on classification is fair — all methods share the same backbone and classification head with no architectural advantage in multi-scale features (Table 1).
 
-- **First PETL method to match/exceed full fine-tuning on dense prediction**: Tables 3–5 show HST achieves AP^b 49.5 vs full fine-tuning 48.7 (Cascade Mask R-CNN) and AP^m 43.0 vs 42.2, while other PETL methods lag behind by 1.8+ AP^b. This is a genuine advance — prior PETL methods struggled on dense tasks.
+2. **Surpasses full fine-tuning on several dense prediction benchmarks.** On COCO with Cascade Mask R-CNN 3×+MS, HST achieves 49.5 AP^b and 43.0 AP^m, exceeding full fine-tuning's 48.7 AP^b and 42.2 AP^m while using 68.4M vs 151.4M trainable parameters (Table 3). On ADE20K semantic segmentation with UperNet, HST achieves 47.5 mIoU (MS), the strongest among PETL methods (Table 4). This is the first PETL method to surpass full fine-tuning on several dense prediction settings.
 
-- **Well-designed architecture with clear motivation**: The hierarchical side network with multi-scale feature modeling directly addresses the limitation of prior PETL methods in dense prediction. The Meta-Register (1 trainable token) avoids the expensive prompt-length search required by VPT. The linear-complexity cross-attention ($O(2Ld)$) is a concrete efficiency contribution.
+3. **Linear-complexity cross-attention for efficient global injection.** The Side block uses cross-attention where K and V have only 2 tokens (Meta-Global), resulting in O(2Ld) complexity — linear in sequence length L (Equation 3, Figure 4). This enables efficient multi-scale feature fusion that prior PETL methods lack.
 
-- **Informative ablation study**: Table 9 systematically shows each component's contribution. LN-tuning (+2.2% on VTAB-1K), GlobalT (+0.2%), and Fine-Grained Injection (+3.7% on VTAB-1K) are all shown to be necessary. The ablation on Meta-Register count (Table 6) convincingly justifies the choice of a single token.
+4. **Robust across pre-training paradigms.** Under MAE pre-training, most PETL methods fall significantly below full fine-tuning, but HST matches or exceeds it on 4/5 FGVC datasets (Table 2). For example, HST achieves 91.2% on Oxford Flowers vs full fine-tuning's 90.9%, while VPT-Deep only reaches 87.4%.
 
-- **Robustness across pre-training strategies**: Table 2 shows results under both ImageNet-21K and MAE pre-training. Under MAE (where other PETL methods degrade significantly), HST maintains competitive performance and even surpasses full fine-tuning on Oxford Flowers (91.2% vs 90.9%).
+5. **Thorough ablation study.** The paper systematically ablates each component (LN tuning, weight sharing, GlobalT, FG injection) in Table 6, demonstrating that each contributes positively on both classification and dense prediction. Notably, weight sharing reduces params from 1.10M to 0.78M while *improving* classification accuracy (74.3% → 75.0%).
+
+6. **Single Meta-Register token suffices.** Unlike VPT which requires searching for prompt lengths (sometimes hundreds), ablation (Table 5) shows that going from 1 to 32 Meta-Register tokens yields marginal gains (76.1% → 76.2%), simplifying deployment.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-1. **Unclear VTAB-1K full fine-tuning baseline**: The paper reports full fine-tuning at 65.57% on VTAB-1K, citing the VPT paper (Jia et al., 2022). However, the VPT paper's main table reports ViT-B/16 full fine-tuning at approximately 72.67% on the same benchmark. While different training protocols can yield different numbers, this ~7 point gap is large and the paper provides no explanation for the discrepancy. The headline claim of "10.5% improvement over full fine-tuning" (76.1% vs 65.6%) and the claim of "outperforming full fine-tuning on all 19 tasks" directly depend on this baseline. The PETL-to-PETL comparisons remain valid, but the central claim of surpassing full fine-tuning on classification is weakened if the correct baseline is ~72.7%. The authors should either run their own full fine-tuning under identical conditions or explain why the cited number differs from widely-used figures in the literature.
+1. **Unfair comparison in dense prediction tasks — architectural advantage is confounded with tuning method.** For object detection, instance segmentation, and semantic segmentation, HST builds a complete Hierarchical Side Network (HSN) with its own convolutional stem, cross-attention, and feature pyramids at four scales (13.21M params for ViT-B). This HSN generates multi-scale feature maps that are fed into FPN and task heads. In contrast, baseline PETL methods (VPT, AdaptFormer, LoRA, SSF) only insert lightweight modules inside the frozen backbone — they have no external side network and thus no architectural capacity comparable to HSN's multi-scale processing. The paper states (lines 185–186) that all methods follow Li et al. 2021 to upsample/downsample ViT features for FPN, but HST *additionally* processes the input image through its own convolutional stem and performs cross-attention with frozen backbone features. The performance gains on dense tasks may therefore be driven substantially by this architectural enrichment rather than by a more effective parameter-efficient tuning scheme per se. The paper would be strengthened by equipping baseline PETL methods with a multi-scale feature extractor of comparable capacity (without HST's tuning innovations) to disentangle architecture from tuning method. *Note: this does not invalidate the classification results, which are fairly compared.*
 
-2. **Missing training hyperparameters**: The paper provides no training hyperparameters — learning rate, optimizer, batch size, number of epochs, learning rate schedule, weight decay, data augmentation, or training resolutions — for any experiment (classification, detection, or segmentation). This is especially problematic for VTAB-1K where the 1k-sample regime is sensitive to hyperparameter choices. Without these, the experiments cannot be reproduced or meaningfully compared to future work. This is a basic reproducibility requirement that needs to be addressed.
+2. **Empty "Efficiency Analysis" section (§4.6).** The paper includes the subsection heading "Efficiency Analysis" (line 376) but provides no content, figures, tables, or discussion. Efficiency (computational/memory cost, inference latency, training throughput) is a core motivation for PETL methods. HST's inference requires running both the frozen ViT backbone and the HSN (with multi-scale convolutions and cross-attention), so FLOPs likely exceed simpler PETL methods significantly. The absence of any efficiency data — even a basic FLOPs or latency comparison — leaves a critical gap in supporting the paper's efficiency claims. This is a structural omission in the main paper body (not a stripped appendix issue).
+
+3. **Discrepancy in VTAB-1K full fine-tuning baseline inflates claimed improvement.** The paper reports full fine-tuning on VTAB-1K with ImageNet-21K pre-trained ViT-B at 65.57% average accuracy (line 199), citing Jia et al. (VPT, CVPR 2022). The VPT paper reports 68.9% for the identical configuration. The paper does not explain this 3.33% gap — whether it stems from a different pre-training checkpoint, training schedule, or data split. Since the headline result "outperforms full fine-tuning by 10.5%" (76.1% vs. 65.6%) is built on this baseline, the claim is not reliably established. Even with the VPT number (68.9%), the improvement would be 7.2% — still impressive — but the paper should clarify the discrepancy or rerun the baseline consistently. This concern applies to the *magnitude* of the claim, not the relative ranking among PETL methods (which uses consistent comparisons).
 
 ### Minor
 
-3. **Full fine-tuning comparisons are not controlled by the authors**: The full fine-tuning numbers for detection and segmentation appear to be taken from other papers (e.g., VPT, SSF) rather than run under the same conditions (pre-training, data pipeline, optimizer settings). While this is common practice, the paper would be stronger if the authors ran full fine-tuning under their own setup, especially given the VTAB-1K baseline discrepancy.
+1. **Abstract overclaims relative to full fine-tuning on dense tasks.** The abstract states HST "even surpassed full fine-tuning" on dense prediction tasks. However, on Mask R-CNN 1× with ViT-B, HST achieves 40.3 AP^b vs. full fine-tuning's 43.1 AP^b (a 2.8 gap), and on Mask R-CNN 3×+MS, the AP^b gap is 1.2 (Table 2). The paper acknowledges these gaps in the text (line 344–345) but the abstract does not qualify the claim. The "surpassing" result is specific to Cascade Mask R-CNN 3×+MS and certain semantic segmentation settings.
 
-4. **Dense prediction results, while strong, still trail full fine-tuning in some configurations**: HST achieves 43.9 AP^b vs full fine-tuning 45.1 AP^b (Mask R-CNN 3×) and 47.0 vs 49.5 mIoU (UperNet ADE20K). The paper's title claim of "surpassing full fine-tuning" is too broad — it's more nuanced: HST exceeds full fine-tuning on some tasks/backbones and is competitive on others.
+2. **HST is not the most parameter-efficient among PETL methods on dense tasks.** On Mask R-CNN 1× with ViT-B, HST uses 30.6M params vs. LoRA's 28.4M and SSF's 28.0M (Table 2). While still far below full fine-tuning (113.6M), the paper should explicitly acknowledge this trade-off rather than emphasizing parameter efficiency uniformly.
 
-5. **No training time or GPU memory comparison**: The "Efficiency Analysis" section (§4.5, line 376) is empty in the paper — no training time, peak GPU memory, FLOPs, or inference throughput are reported. Since parameter efficiency is only one dimension of the claimed advantage, this gap limits practical utility assessment.
+3. **LST discussion is superficial and lacks empirical comparison.** The related work (§2) mentions LST (Sung et al.) but only says "it has not been proven to be effective in vision models and initializing the side network poses a challenge." Since HST is essentially a vision-adapted hierarchical version of LST, the paper should explain how HST specifically overcomes LST's limitations and ideally include an empirical comparison (e.g., adapting LST to vision). This weakens the positioning of HST's novelty.
 
-6. **Pre-training specification for detection/segmentation is ambiguous**: Section 4.1 states ViT pre-trained on ImageNet-21K and MAE are used, but the detection (Tables 3–4) and segmentation (Table 5) tables do not specify which pre-training was used for each experiment. The FGVC table explicitly annotates "ImageNet-21K / MAE", making this omission inconsistent.
+4. **Cosine similarity analysis (Fig. 3) lacks statistical rigor.** The paper shows cosine similarity between Meta-Register and image tokens across layers but does not specify whether this is averaged over multiple images or based on a single example. No error bars or variance information is provided. While LN tuning plausibly helps, the visual evidence is anecdotal.
+
+5. **No analysis of why HST excels on specific VTAB-1K tasks.** On tasks like Clevr/count, dSprites/loc, and SmallNORB/ele, HST shows very large gains (≈3–7%) over the next-best PETL method. The paper notes this but offers no analysis of whether the side network's multi-scale inductive bias is responsible. This is a missed opportunity for insight.
+
+6. **Different side network sizes for classification vs. dense tasks not discussed.** HSN dimensions are [32,48,64,72] for classification (0.78M params) and [64,128,256,384] for dense tasks (13.21M params). The paper should discuss whether a smaller HSN would suffice for dense tasks and what performance trade-off this entails, to clarify how much of the dense-task gain comes from added capacity.
 
 ### Trivial
-
-7. The "Efficiency Analysis" section heading (§4.5) appears with no content between it and the next section. Either the content was stripped or the section was left empty — either way, this should be fixed.
-
-8. The blank line before "\begin{abstract}" and the multiple blank lines in the introduction suggest formatting issues, though these are likely parser artifacts.
+None.
 
 ## Nice-to-Haves
 
-- Adding a single-scale side network ablation would isolate whether the hierarchical design (not just having a side network) drives the dense prediction gains.
-- Confidence intervals or multiple-seed runs on VTAB-1K would strengthen the ranking claims given the small-sample regime.
-- Comparing training/inference speed (images/sec) and peak GPU memory against other PETL methods on a representative task.
+- **Controlling for architectural capacity in dense prediction:** Implementing baseline PETL methods (LoRA, AdaptFormer, SSF) with an identical HSN attached to the frozen backbone but without HST's tuning innovations would disentangle architecture from tuning method.
+- **FLOPs and inference time measurements** for all methods on at least one detection and one classification task.
+- **Error bars / multiple seeds** on the main results (VTAB-1K, COCO) to establish statistical significance.
+- **Qualitative detection/segmentation examples** (side-by-side predictions of HST vs. full fine-tuning vs. leading PETL baseline).
+- **Ablation with smaller HSN on dense tasks** to explore the parameter-performance trade-off.
 
 ## Removed Points
+*These are flagged for removal; treat them with caution.*
 
-These points are flagged to be removed, treat them with caution:
-
-- **Missing parts/appendix content**: The harsh critic points about absent appendix content or stripped sections are not verifiable from the parsed text. The instruction notes that the parser strips appendix sections from all papers, so these cannot be assessed.
-
-- **"Efficiency Analysis section is empty" treated as reproducibility criticism**: Moved to minor weakness #5 above rather than treated as fatal.
-
-- **Strength Finder generic strengths**: Some claimed strengths about the paper "addressing an important problem" or being "extensive" are generic and dropped. Only concrete, evidence-backed strengths are retained.
+- **Missing training details (learning rates, batch sizes, optimizer, etc.):** The paper's appendix (stripped by the parser) likely contains these details. Per instructions, weaknesses about missing appendix content are removed.
+- **Inference speed/memory measurements as a separate point:** Subsumed into the empty "Efficiency Analysis" weakness above.
+- **"HST is not versatile because evaluation limited to four task families":** The paper covers classification, detection, instance segmentation, and semantic segmentation — four major vision task families. This is a reasonable scope.
+- **Strength Finder strength about "state-of-the-art VTAB-1K accuracy":** Kept (it is valid). Only generic/superficial strengths from the Strength Finder were considered for removal; this one is concrete and well-supported.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews do not surface a deeper observation about the method or its failure modes that the authors themselves did not articulate.
+None beyond the paper's own contributions. The core architectural insight — a hierarchical side network with linear-complexity cross-attention for parameter-efficient multi-scale feature fusion — is the paper's genuine contribution.
 
 ## Suggestions
 
-1. Report full training hyperparameters (LR, optimizer, batch size, epochs, schedule, weight decay, augmentation) for every experimental setting.
-2. Either run your own full fine-tuning under identical conditions on VTAB-1K, or explicitly state why the cited baseline differs from the numbers commonly reported in the literature (e.g., VPT's main table).
-3. Fill the Efficiency Analysis section with at minimum training time and peak GPU memory on a representative dense prediction task.
-4. Specify the pre-training (ImageNet-21K or MAE) used for each detection/segmentation table.
-5. Tone down the "surpassing full fine-tuning" language to reflect the more nuanced finding: HST exceeds full fine-tuning on some tasks and is competitive on others.
+1. **Fill the Efficiency Analysis section** with at minimum: FLOPs comparison (training + inference), peak GPU memory, and training/inference throughput for HST vs. the leading baseline and full fine-tuning on one classification and one detection task. This is the single highest-leverage addition.
+
+2. **Clarify or rerun the VTAB-1K full fine-tuning baseline.** If the 65.57% number is from a different training recipe or checkpoint than VPT's 68.9%, explain this explicitly. Better yet, run full fine-tuning under consistent settings to establish a reliable baseline for the claimed 10.5% improvement.
+
+3. **Disentangle architecture from tuning method for dense prediction.** Either (a) equip baseline PETL methods with an equivalent multi-scale side network (without HST's tuning innovations) and compare, or (b) explicitly reframe the contribution to acknowledge that HST's edge on dense tasks is a combined result of the side network architecture and the tuning scheme, and that the architecture itself provides a significant advantage.
+
+4. **Qualify the abstract claim** about surpassing full fine-tuning to reflect that this holds on certain settings (Cascade Mask R-CNN 3×+MS, UperNet) but not universally (Mask R-CNN 1× shows a gap).
+
+5. **Add error bars or multiple seeds** to the main results tables to establish statistical significance, especially for the VTAB-1K results where per-task variances could be meaningful.
 
 ## Score and Decision
 
-### Calibration Anchors
+### Calibration Anchors (batch retrieval results)
 
-**High-scoring anchor**: `bJx4iOIOxn.md` (avg 7.50, Accept) — "Facing the Elephant in the Room: Visual Prompt Tuning or Full finetuning?" An analysis paper on VPT vs full fine-tuning with thorough experiments and clear writing. The HST paper has a different contribution type (method vs analysis) and has documentation/reproducibility issues that this well-written analysis paper does not. The HST paper is weaker than this anchor.
+| Path | Avg Score | Comparison to HST |
+|------|-----------|-------------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/bJx4iOIOxn.md` (VPT analysis) | 7.50 | Stronger analytical depth and more insights; HST is weaker in analysis but stronger in proposing novel architecture |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/YNbLUGDAX5.md` (ProPETL) | 6.00 | Similar-tier paper: both propose new PETL methods with strong results but have evaluation concerns; HST covers more tasks |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vJkktqyU8B.md` (META) | 6.00 | Similar-tier paper: both address PETL for dense prediction; HST has stronger VTAB-1K results but META provides efficiency data HST lacks |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Fb93MfxX7T.md` (PETL survey) | 4.75 | HST proposes a novel method with stronger empirical contributions; clearly stronger |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/sOHVDPqoUJ.md` (SubTuning) | 4.00 | HST has clearer novelty and more comprehensive evaluation; clearly stronger |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0Xc6o1HKXD.md` (test-time prompt tuning) | 3.67 | HST has far stronger methodology and results; clearly stronger |
 
-**Medium-scoring anchor**: `YNbLUGDAX5.md` (avg 6.00, Accept) — "Progressive PETL for Semantic Segmentation." A PETL method for segmentation with clear motivation and competitive results, but with some concerns about task selection methodology and missing efficiency metrics. HST has a broader evaluation (classification + detection + segmentation) and stronger ablation studies, making it comparable or slightly better.
+**Relative positioning:** HST is stronger than the Reject-tier anchors (4.0–4.75) and comparable to Accept-tier anchors at ~6.0. It is weaker than the exceptional 7.5 anchor. The empty Efficiency Analysis section and the dense prediction fairness concern prevent it from reaching the high-6/low-7 range, but the genuine architectural contribution, thorough ablations, and strong classification results place it solidly in Accept territory.
 
-**Medium-scoring anchor**: `vJkktqyU8B.md` (avg 6.00, Accept) — "Memory Efficient Transformer Adapter for Dense Predictions." A ViT adapter focusing on memory efficiency for dense tasks. Similar scope and quality. HST's evaluation is more comprehensive (more tasks, more baselines), but lacks the efficiency reporting that this paper provides. Approximately comparable.
+This paper presents a genuinely novel architecture (hierarchical side network for ViT PETL) with carefully designed components and strong empirical results across multiple task families. The two major concerns — the uncontrolled dense-prediction comparison and the empty efficiency analysis — are addressable in revision. The paper's core contributions on classification are clean and independently convincing.
 
-**Low-scoring anchor**: `Fb93MfxX7T.md` (avg 4.75, Reject) — "Lessons Learned from a Unifying Empirical Study of PETL." A survey/analysis paper that was criticized for lack of novelty and not covering dense tasks. HST is clearly stronger — it proposes a novel method with broad experimental validation.
+**Score:** 6.0
 
-**Low-scoring anchor**: `pjNjlJN7up.md` (avg 4.00, Reject) — "big.LITTLE Vision Transformer." A dual-transformer architecture with unclear efficiency gains and reliance on distillation. HST is clearly stronger in terms of experimental validation and methodological clarity.
-
-**Low-scoring anchor**: `RxQOKupaui.md` (avg 5.00, Reject) — "Towards Optimal Adapter Placement." A study on adapter placement strategies with limited experimental scope. HST is stronger across the board.
-
-**Low-scoring anchor**: `wMRFTQwp1d.md` (avg 4.00, Reject) — "VideoEval." A benchmark paper. Not directly comparable but included as a low anchor.
-
-**Score distribution check**: The paper is clearly stronger than the 4.00–5.00 papers and comparable to the 6.00 papers (ProPETL, META). It is not as polished as the 7.50 analysis paper (different contribution type). The baseline discrepancy issue is significant but does not invalidate the core PETL contribution. The paper is in the 5.5–6.5 range.
+**Decision:** Accept
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,97 +1,84 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
----
+Now I have all the evidence I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes GrCPA (Gradient Regularized-based Cross-Prompt Attack), a method that improves cross-prompt transferability of adversarial examples against Vision-Language Models by zeroing out the k largest and smallest gradient values per token in Transformer blocks (Attention and MLP) during backpropagation. The paper identifies non-stationarity (fluctuating attack success across iterations) in multi-prompt VLM attacks as a key challenge and attributes it to overfitting. GrCPA is evaluated on Flamingo, BLIP-2, LLaVA-1.5, and InstructBLIP across VQA, classification, and captioning tasks.
+The paper identifies that adversarial examples optimized for Vision-Language Models (VLMs) suffer from "non-stationarity" when using multiple prompts — attack success fluctuates heavily across iterations, which the authors attribute to overfitting. To address this, they propose Gradient Regularization-based Cross-Prompt Attack (GrCPA), which clips the single largest and smallest gradient values per token in the Attention and MLP components of the last λN Transformer blocks during backpropagation. The method is evaluated on Flamingo, BLIP-2, LLaVA-1.5, and InstructBLIP, and compared against Single-P, Multi-P, and CroPA baselines.
 
 ## Strengths
 
-1. **The problem is well-motivated and practically relevant.** Cross-prompt transferability is a genuine challenge for VLM adversarial attacks: the same adversarial image often fails when users input different prompts. The paper correctly identifies that single-modal transferability methods (MI-FGSM, Input Diversity, Variance Tuning) are ineffective in this setting, though the claim lacks supporting data (see Weaknesses).
+- **Identifies a real and practically relevant problem**: The paper focuses on cross-prompt transferability of adversarial examples for VLMs — an important issue since real-world users naturally vary their prompts. The observation that naively optimizing with multiple prompts leads to unstable attack success rates is genuine and underexplored in the VLM attack literature.
 
-2. **The proposed gradient regularization is simple, computationally cheap, and architecturally grounded.** The operation of zeroing extreme gradient values per token in Attention and MLP components is a small modification to the backward pass that adds negligible overhead. Targeting Transformer internals is a sensible place to intervene, and the method is clearly described in Algorithm 1 and Figure 2a.
+- **Simple and computationally lightweight method**: The proposed gradient clipping operation modifies only the single largest and smallest gradient element per token in the last quarter of Transformer blocks. This is conceptually clean, easy to implement, and adds negligible overhead. The paper draws a nice connection showing that adjusting hyperparameters can recover prior methods (Single-P, Multi-P, CroPA) as special cases (Figure 2b).
 
-3. **GrCPA consistently outperforms baselines on Flamingo across all four task types.** Table 1 shows GrCPA exceeding both Multi-P and CroPA on VQA<sub>general</sub>, VQA<sub>specific</sub>, classification, and captioning (e.g., 0.75 vs. 0.69 average ASR vs. CroPA). Table 3 further shows consistent improvement over Multi-P on BLIP-2 under varying prompt counts.
+- **Evaluation across multiple VLMs and tasks**: The approach is tested on four diverse models (Flamingo, BLIP-2, LLaVA-1.5, InstructBLIP) and across multiple task types (VQA, classification, captioning), lending breadth to the empirical assessment.
 
-4. **The ablation on λ (proportion of Transformer blocks regularized) provides useful guidance.** Table 6 indicates that regularizing only the last 1/4 of layers works best, with relatively minor differences across settings — a practical finding for practitioners.
+- **Ablation on block proportion (λ) and modality**: The paper investigates how the proportion of regularized Transformer blocks affects performance and validates that regularizing both visual and textual modalities outperforms single-modality regularization.
 
 ## Weaknesses
 
 ### Major
 
-1. **Quantitative results are missing for two of the four claimed models.** The abstract and introduction claim experiments on Flamingo, BLIP-2, LLaVA-1.5, and InstructBLIP. However:
-   - **Flamingo**: full comparison in Table 1 ✓
-   - **BLIP-2**: results in Table 3, but only vs. Multi-P (not CroPA) ✗
-   - **LLaVA-1.5**: mentioned only in a single sentence in Section 4.2 ("we also conduct experiments on LLaVA-1.5") with zero quantitative results ✗
-   - **InstructBLIP**: listed in the models section (4.1) but never appears in any results table ✗
-   
-   The paper's central claim of effectiveness across multiple architectures is therefore unsupported for half the models. This is not a formatting artifact — the paper genuinely does not include these results.
+- **Unsupported motivation claim (negative results for MI-FGSM, DIM, VTM)**: The paper states (line 30) that methods like MI-FGSM, Input Diversity, and Variance Tuning "did not increase, but even decreased" cross-prompt transferability. This is a core argument motivating the proposed method, yet no experimental results, settings, or comparisons are presented in the visible text. While an appendix (stripped by the parser) may contain these results, the main paper's central motivation lacks evidential support. Readers cannot assess whether these methods were applied correctly or whether the negative result is genuine.
 
-2. **No sensitivity analysis for k (number of extreme gradients zeroed).** The paper fixes k=1 without any ablation. Since k is the core hyperparameter controlling how aggressively gradients are regularized, a sweep (e.g., k ∈ {1, 3, 5, 10}) is needed to justify this choice and understand the method's behavior. The paper sweeps λ but not k, leaving the method's most defining parameter unjustified.
+- **Unjustified CroPA hyperparameter setting**: The paper sets CroPA's text perturbation update frequency to T=1 without any rationale, while the original CroPA paper (Luo et al., 2024a) uses T=10. Since the paper's own description states that T controls "the number of visual updates per text update," deviating from the published setting without justification raises concerns about whether CroPA is fairly configured. This matters because the headline result — GrCPA (0.78 avg ASR) vs. CroPA (0.76 avg ASR) — shows only a 2 percentage point improvement. A properly tuned CroPA could potentially erase or reverse this margin.
 
-3. **The paper claims orthogonality to CroPA but never tests the combination.** Since GrCPA regularizes gradients and CroPA optimizes text perturbations via a min-max procedure, combining them is a natural experiment that would (a) validate whether the methods are truly complementary and (b) potentially establish a new state-of-the-art. Its absence weakens both the orthogonality claim and the empirical contribution.
+- **Missing ablation on k (number of clipped gradient elements)**: The method clips only the single largest and smallest gradient per token (k=1), described as an "extremely mild operation." Yet the paper never varies k to investigate whether k=1 is critical, whether larger values improve or degrade performance, or whether the specific value matters at all. Without this, the claim that gradient clipping is the mechanism driving improvement is incompletely supported. (The paper does ablate λ and modality, but k is equally fundamental.)
 
-4. **No quantitative data is provided for the claim that single-modal transferability methods (MI-FGSM, DIM, Variance Tuning) fail on VLMs.** The paper states this as a key finding motivating the new method (Section 1), but the reader is given no table, no numbers, and no experimental setup for this claim. A reader cannot independently verify this important negative result, which is central to establishing the need for GrCPA.
+- **No direct evidence that gradient clipping reduces overfitting**: The paper attributes the improvement to "mitigating overfitting" but provides no causal evidence — e.g., no comparison of training-prompt vs. held-out-prompt ASR, no gradient distribution analysis before/after clipping, no diagnostic showing reduced variance. The overfitting story remains a plausible but untested hypothesis.
 
 ### Minor
 
-1. **The mechanism linking gradient regularization to reduced overfitting is asserted, not demonstrated.** The paper states that large gradients cause overfitting and that zeroing extremes mitigates this, but provides no diagnostic evidence (e.g., showing that GrCPA reduces gradient variance, or that baseline gradient norms correlate with ASR degradation on held-out prompts). The connection to Deng et al.'s work on low-level features in CNNs is invoked for Transformers without justification. The claim that "modifying only a very small number of gradients does not affect the convergence of the chain rule" is stated without analysis of whether the biased gradient estimates actually slow convergence.
+- **Marginal improvement over CroPA**: On the main Flamingo benchmark, GrCPA achieves 0.78 average ASR vs. CroPA's 0.76 — only a 2-point gain. While GrCPA also improves over Multi-P (0.40) by a larger margin, the improvement over the most relevant prior method is small, and the T=1 concern clouds interpretation.
 
-2. **The non-stationarity phenomenon is not rigorously characterized.** Figure 1 is described as an "illustration" — it is unclear whether it comes from an actual experiment or is a schematic. Table 2's stability measure (consistency over five specific checkpoints at 900, 925, 950, 975, 1000 iterations) is ad hoc; a standard measure of optimization instability (e.g., gradient norm variance, loss landscape analysis, or output variance over a sliding window) would be more convincing. The attribution of the observed fluctuations to "overfitting" is asserted without any diagnostic check.
+- **Stability metric (Table 2) is ad-hoc**: The paper measures attack stability by checking output consistency at five arbitrarily chosen iterations (900, 925, 950, 975, 1000) without justifying why these specific steps or this particular operationalization is meaningful.
+
+- **Non-stationarity claim is qualitatively but not quantitatively characterized**: The paper claims to "first identify the non-stationary phenomenon" but only provides a qualitative illustration (Figure 1). No quantitative measure (e.g., variance of ASR over iterations, comparison to stationary optimization) is given.
 
 ### Trivial
 
-- Line 32: "overftiting" typo.
-- The paper's Figure references (images) could not be verified from the text extraction, though this is a parser issue, not an author error.
+- None of note — the paper is reasonably well-written and the parser artifacts explain the absent figures/tables.
 
 ## Nice-to-Haves
 
-- A comparison to adapted single-modal transferability methods (MI-FGSM, DIM, SIM) with actual numbers, even if the result is negative.
-- An analysis of whether GrCPA reduces attack success on the *training* prompts (the intended trade-off if it reduces overfitting), to clarify whether GrCPA truly improves transferability or simply weakens the attack overall.
-- A convergence analysis showing whether the biased gradient estimates affect optimization efficiency.
+- Reporting single-run results without error bars or standard deviations is standard in this subfield, but providing them would strengthen the reliability of the comparisons.
+- Testing whether GrCPA and CroPA can be combined, since the paper describes them as "orthogonal."
+- Testing against adversarial defenses (adversarial training, input purification) to assess whether the improved transferability is meaningful under realistic conditions.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points are flagged for removal; treat them with caution.
 
-- **Harsh Critic: "The paper cannot verify CroPA's results / reproducibility concern"** — REMOVED per Hard Rules (citing CroPA suffices; questioning its existence is not allowed).
-- **Harsh Critic: "Missing appendix sections / Tables 5 and 6 not shown"** — REMOVED per Hard Rules (parser strips tables that are images; they exist in the original submission).
-- **Strength Finder: "Section 1 provides experimental evidence that single-modal transferability methods decrease cross-prompt transferability"** — REMOVED because the paper states this claim but provides **no actual evidence/numbers** for it. The claim is present but the "evidence" descriptor is fabricated by the strength finder.
-- **Strength Finder: "First systematic identification of non-stationarity"** — WEAKENED to Minor strength in the Strengths section above, since the CroPA paper (Luo et al., 2024a) studied the same cross-prompt setting and characterized instability; the novelty of this specific framing is unclear.
-- **Harsh Critic: "No quantitative results shown for BLIP-2"** — PARTIALLY REMOVED. BLIP-2 *does* have results in Table 3. The critic was correct about LLaVA-1.5 and InstructBLIP, which remain in Major weakness #1.
-- **Strength Finder: generic strengths about "important problem"** — REMOVED as generic/superficial.
+- **Criticism about missing Algorithm 1, missing Tables 1/4/5/6**: Parser artifacts — these exist in the original submission. Removed.
+- **Criticism about unclear per-token vs. global gradient clipping**: The paper clearly states "This clipping will be performed on each token" and defines the gradient vector as G∈R^d with respect to visual or textual tokens. The description is adequate. Removed.
+- **Criticism about missing standard deviations**: Single-run evaluation is the prevailing standard in this literature; this is not a distinguishing flaw. Moved to Nice-to-Haves.
+- **Strength about "first identification" being purely qualitative**: Partially accurate — Table 2 provides a quantitative stability measure, so the claim is not purely qualitative. However, the characterization is still shallow. Not removed entirely but downgraded from core strength.
+- **Strength about "SOTA across multiple VLMs"**: The margin over CroPA is marginal and the CroPA hyperparameter issue weakens this claim. Moved to minor observation.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the standard gap between claiming and demonstrating: the paper has a plausible intuition and an initial positive result on one model, but the evidential bar for claiming effectiveness across multiple VLM architectures is not met. The most useful insight from the reviews is that gradient regularization at the per-token level inside Transformer blocks is a design space worth exploring — but the current paper does not provide enough evidence to establish its value.
+None beyond the paper's own contributions. The reviews surface the standard tension in attack papers: a plausible mechanism coupled with incomplete diagnostic evidence. The observation that gradient clipping in Transformer blocks can marginally improve cross-prompt transferability is the paper's core finding; neither the reviewers nor the calibration anchors provide a deeper synthesis.
 
 ## Suggestions
 
-1. **Provide full comparison tables for LLaVA-1.5 and InstructBLIP**, comparing GrCPA against Single-P, Multi-P, and CroPA, matching the format of Table 1. Without these, the claim of general effectiveness cannot be accepted.
-
-2. **Add a sensitivity analysis for k** (the number of extreme gradients zeroed) across a range of values (e.g., 1, 3, 5, 10, 20) to justify the choice k=1 and characterize the method's behavior.
-
-3. **Combine GrCPA with CroPA** and report results — this directly validates (or refutes) the orthogonality claim and would substantially strengthen the contribution.
-
-4. **Provide quantitative results for the failure of MI-FGSM, DIM, and Variance Tuning** on the cross-prompt VLM setting, ideally in a supplementary table. This is presented as a key motivation but currently has no supporting data.
-
-5. **Add a diagnostic of overfitting:** show ASR on training prompts vs. held-out prompts across iterations for Multi-P and GrCPA, and/or report gradient norm statistics, to ground the core mechanistic claim.
+1. **Provide experimental support for the negative results claim**: Add a table in the main paper (or restore from appendix) showing ASR for MI-FGSM, DIM, and VTM on at least one VLM, so readers can assess the validity of the motivation.
+2. **Justify or align CroPA's T hyperparameter**: Either adopt CroPA's published T=10 setting, or run a sweep over T for both methods to demonstrate that the comparison is fair.
+3. **Ablate over k**: Vary k ∈ {1, 2, 5, 10} to show the effect of clipping more gradient elements. This directly tests whether the mechanism works as claimed.
+4. **Provide overfitting diagnostics**: Show the gap between ASR on prompts used during optimization vs. held-out prompts for GrCPA and baselines. If gradient clipping reduces overfitting, this gap should shrink.
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison to This Paper |
-|------|-----------|--------------------------|
-| nc5GgFAvtk.md (CroPA) | 6.80 | Directly comparable prior work; has complete results across 3+ models with clear tables. This paper's evaluation is substantially less thorough. |
-| wvFnqVVUhN.md (Transferable Jailbreaks) | 6.25 | Extensive empirical study over 40+ models. This paper is far less comprehensive. |
-| 1BuWv9poWz.md (Gradient Norm for ViTs) | 5.33 | Similar gradient-regularization idea but with thorough ablations and SOTA claims. This paper has weaker empirical support. |
-| DYVSLfiyRN.md (Transferable Attack on VLLMs) | 4.00 | Rejected; had insufficient baseline comparisons. Similar evidential gaps to this paper. |
-| YzFNJ571A7.md (DynVLA) | 4.00 | Rejected; limited model coverage and overclaimed results. Comparable issues. |
-| q8XGHj7yrC.md (Adversarial Visual Transformations) | 3.50 | Rejected; conceptual issues. This paper's concept is sounder but evidence is similarly insufficient. |
+| Paper | Avg Score | Comparison |
+|-------|-----------|------------|
+| **nc5GgFAvtk.md** (CroPA — "An Image Is Worth 1000 Lies") | 6.80 | Directly on the same problem; accepted. Cleaner evaluation, stronger experimental protocol, clearer novelty. Current paper is weaker. |
+| **wvFnqVVUhN.md** (Transferable VLM Jailbreaks) | 6.25 | Large-scale empirical study (40+ models), accepted. Far more comprehensive. Current paper is substantially weaker. |
+| **iR5qF9N1Ge.md** (MAA — Meticulous Adversarial Attack) | 5.80 | Similar-level contribution on VLM transferability; rejected despite avg 5.80. Current paper is comparable in contribution depth but has more significant evaluation gaps. |
+| **7OO8tTOgh4.md** (MIE — Non-targeted VLM Attacks) | 5.25 | Simpler contribution, rejected. Current paper is slightly stronger in motivation and method. |
+| **DYVSLfiyRN.md** (Transferable Attack on VLLMs) | 4.00 | Rejected; has some similar issues (missing comparisons). Current paper is somewhat stronger. |
+| **4NtrMSkvOy.md** (Channel Pruning Transferability) | 3.00 | Clearly weak paper, rejected. Current paper is notably stronger. |
 
-The paper proposes a simple, architecturally motivated idea with promising initial results on one model. However, the experimental evaluation is substantially incomplete: results for two of four claimed models are absent, the defining hyperparameter k is not ablated, a natural combined experiment with the concurrent CroPA method is missing, and a key motivating claim (failure of single-modal methods) is stated without supporting data. These gaps are significant enough that the paper's central claims cannot be accepted in the current form.
+The paper identifies a genuine problem and proposes a reasonable, simple method. However, the core empirical comparison is undermined by an unjustified hyperparameter choice for the primary baseline (CroPA T=1), the central motivation relies on unsupported negative results, the mechanism analysis is shallow (no ablation over k, no overfitting diagnostics), and the improvement over CroPA is marginal (2 points). These issues are fixable, but in the current form, the evaluation does not convincingly support the claims.
 
-MY FINAL SCORE: <score>3.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**MY FINAL SCORE: <score>4.5</score>**
+**MY FINAL DECISION: <decision>Reject</decision>**

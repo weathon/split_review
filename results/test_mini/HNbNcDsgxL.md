@@ -1,84 +1,89 @@
-Now I have a thorough understanding of the paper and all reviews. Here is my consolidated final review:
-
----
+Now I have all the evidence needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper introduces Delta, an inference-time contrastive decoding method that randomly masks a portion of input tokens, computes logits from both the original and masked inputs, and subtracts the masked logits (weighted by hyperparameter α) from the original logits. The intuition is that masking amplifies hallucination-prone outputs, so subtracting them reduces hallucinations. Experiments on Llama 3.1 8B (4-bit quantized) across SQuAD v1.1/v2, TriviaQA, and Natural Questions show consistent improvements (2–8 percentage points on EM/accuracy), with a striking 14.53 point gain on SQuAD v2's "no-answer" exact match. The method requires no retraining and is robust to hyperparameter choices.
+Delta is an inference-time contrastive decoding method for mitigating hallucinations in LLMs. The key idea is to randomly mask a portion of input tokens, feed the masked input to the model to generate hallucination-prone outputs, and then subtract those logits from the original (unmasked) logits during token generation. The method is evaluated on QA benchmarks (SQuAD v1.1/v2, TriviaQA, Natural Questions) and two context-free benchmarks (CommonsenseQA, MMLU), using Llama 3.1 8B Instruct with 4-bit quantization. The strongest result is a ~14.5 percentage point gain on SQuAD v2's no-answer exact match, directly showing that Delta helps the model refrain from fabricating answers when none exist.
 
 ## Strengths
 
-- **Large gain on unanswerable questions directly measures a form of hallucination reduction.** On SQuAD v2's "no-answer" category, Delta improves exact match by 14.53 percentage points under sampling — a concrete demonstration that the model learns to refrain from fabricating answers when the context provides no support. This is arguably the strongest piece of evidence in the paper.
-- **Consistent gains across multiple context-rich QA benchmarks.** Delta improves over the baseline on SQuAD v1.1 (+4.44 EM), SQuAD v2 (+6 EM), TriviaQA (+7.84 accuracy), and Natural Questions (+2.55 accuracy) under sampling (Table 1). The pattern of improvement is systematic, not a one-dataset fluke.
-- **Inference-only, no retraining, no extra data.** The method operates purely through logit manipulation on masked and unmasked forward passes (Equations 3 and 5). As noted in the abstract and Section 3, this is a genuine practical advantage over methods that require fine-tuning, external models, or additional training data.
-- **Robustness to hyperparameter choice.** The ablation study (Section 6, Figure 2) shows that varying both the masking ratio (0.3–0.7) and logit ratio α (0.1–0.5) yields all configurations above the baseline, with standard deviations of only 0.66 (EM) and 0.21 (F1). This suggests the method does not require delicate tuning.
-- **Honest handling of limitations.** The paper explicitly evaluates Delta on context-free benchmarks (CommonsenseQA, MMLU), reports marginal performance declines (−0.25 and −0.29 pp), and clearly states that the method is intended for context-rich scenarios (Section 5.3). This transparency strengthens credibility.
+- **Large and direct improvement on SQuAD v2 unanswerable questions**: Delta improves the "no answer" exact match by 14.53 points (sampling) and 11.81 points (non-sampling) over baseline (Section 5.1). This is a direct measure of hallucination suppression — the model is less likely to fabricate an answer when the context provides no support. This is the paper's single most compelling piece of evidence and genuinely interesting.
+
+- **Inference-only, training-free operation**: Delta requires no retraining, additional data, or external models (Section 3). The method works entirely through logit manipulation at decoding time, making it computationally efficient and easy to deploy. This is a genuine practical advantage over approaches that require fine-tuning.
+
+- **Hyperparameter robustness**: The ablation study (Section 6) varies masking ratio (0.3–0.7) and α (0.1–0.5) on SQuAD v1.1 and finds standard deviations of only 0.66 (EM) and 0.21 (F1), with all configurations exceeding the baseline. This robustness is a practically desirable property.
+
+- **Honest reporting of limitations**: The paper explicitly reports marginal declines on context-free benchmarks (CommonsenseQA –0.25%, MMLU –0.29%) in Sections 5.3 and 7, and correctly attributes this to the method's design for context-dependent tasks. This helps practitioners understand where Delta is and is not applicable.
+
+- **Concrete adaptation of vision-language contrastive decoding to text**: The paper adapts Visual Contrastive Decoding (Leng et al. 2024) by replacing Gaussian noise on images with random token masking — a non-trivial cross-modal translation. The "moldy banana" example (Section 3.2) provides a clear intuition for how masking amplifies hallucinatory priors that can then be subtracted.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The paper's central claim — that Delta "mitigates hallucinations" — is not directly tested.** The evaluation uses only standard QA accuracy metrics (Exact Match, F1). Hallucination is a specific failure mode (factually incorrect or fabricated content), yet no dedicated hallucination metric is employed: no TruthfulQA, no HaluEval, no NLI-based contradiction scoring, no faithfulness evaluation. The SQuAD v2 "no-answer" results are a relevant proxy (they show the model avoids fabricating answers when context is absent), but they do not constitute a comprehensive hallucination evaluation. A method could improve accuracy by being more conservative or by better exploiting context without actually reducing hallucination rate in the general sense. This gap between the paper's framing and its evaluation is significant. The title itself promises hallucination mitigation, yet the experiments measure reading comprehension accuracy.
+- **Missing empirical comparison to the most directly related method, Context-Aware Decoding (CAD)**: The paper acknowledges CAD (Shi et al. 2024) in Section 2 ("a similar outcome to our Delta method") and even claims Delta is "more generalizable." However, not a single experiment compares Delta to CAD, DoLa (Chuang et al. 2024), or any other inference-time hallucination mitigation method under identical conditions. Since CAD's core mechanism — contrasting outputs from complete vs. context-ablated inputs — is structurally nearly identical (empty context vs. masked context), the paper cannot substantiate that its specific perturbation choice (random masking) offers any improvement over the existing standard. The paper's central claim of novelty rests on an untested comparison.
 
-- **No experimental comparison to CAD (Context-Aware Decoding).** The paper discusses CAD in its related work (Section 2, line 23) as "a similar outcome to our Delta method" and notes it is also training-free. CAD is a directly comparable text-based contrastive decoding method that amplifies context-driven tokens by contrasting with a no-context prior — the exact same family of techniques as Delta. Despite this acknowledged similarity, the experiments compare Delta only to a plain Llama 3.1 baseline. Without a CAD baseline, the reader cannot determine whether Delta offers any advantage over an existing, well-known method. VCD (Visual Contrastive Decoding) is less relevant since it requires visual inputs, but CAD is a critical omission.
+- **Narrow experimental scope limits generalizability**: All experiments use a single model (Llama 3.1 8B Instruct with 4-bit quantization). Results are not shown on other model families (e.g., Mistral, Falcon, GPT-2, Gemma) or model sizes. Similarly, the evaluation is confined to extractive/open-domain QA — no results on summarization, free-form generation, or dialogue tasks where hallucinations are a known problem. The single-model, single-task-family design makes it difficult to assess how broadly Delta's benefits extend.
+
+- **No dedicated hallucination benchmarks beyond SQuAD v2 no-answer**: While SQuAD v2's unanswerable questions are a valid hallucination probe, the paper would substantially benefit from evaluation on dedicated hallucination benchmarks (TruthfulQA, HaluEval, or factuality annotation). The title promises "mitigates text hallucinations," but the evaluation infers this primarily from QA accuracy, leaving a gap between the claim and the evidence.
 
 ### Minor
 
-- **Theoretical grounding is heuristic rather than principled.** The paper argues that masking "exacerbates hallucinations" and thus subtracting masked logits removes hallucinations (Section 3.2). The banana example ("moldy banana" → masking "moldy" causes the model to predict "yellow" instead of "brown") illustrates the intuition, but it does not constitute a rigorous justification. Masked inputs produce broader, less certain distributions — the subtraction could preferentially amplify tokens that are lexically fluent or statistically frequent rather than factually correct. The empirical results suggest the method works, but the theoretical mechanism is underspecified.
+- **Ablation does not isolate the contrastive mechanism**: The ablation (Section 6) varies masking ratio and α but does not include a control where α=0 (which collapses to the baseline) or test logit scaling without the masked subtraction. Without these controls, it is unclear whether the improvement stems from the contrastive subtraction itself or from the (1+α) scaling factor on the original logits (which sharpens the distribution). The paper's claim that "all parameter configurations exceeded the baseline" is consistent with both explanations.
 
-- **Experiments use only a single model (Llama 3.1 8B, 4-bit quantized).** Demonstrating generality across at least one more model family (e.g., Mistral, a non-quantized model, or a different size) would substantially strengthen the claims. As it stands, the reader cannot tell whether the method's effectiveness is idiosyncratic to this specific model and quantization.
+- **Unsupported assertion about CAD's generalizability**: The paper claims CAD is "less generalizable than the Delta method, which, in theory, could apply to all textual inputs" (Section 2). No evidence supports this — CAD is already a text-based method applicable to all textual inputs with a context. The distinction between empty context and masked context does not inherently confer greater generalizability. This unsupported comparative claim weakens the paper's credibility.
 
-- **No qualitative or token-level analysis of what Delta actually changes.** The paper does not show example generations comparing baseline vs. Delta outputs, nor does it analyze whether the logit changes correspond to factual corrections vs. incidental shifts. Such analysis would help build trust that the method is actually targeting hallucinated content rather than generically improving accuracy.
-
-- **Key design choices are not justified.** The masking ratio is set to 0.7 (very high) and the EOS token is used as the MASK token, but no rationale or ablation is given for either choice. Do other mask tokens (e.g., a learned [MASK] or random token substitution) work differently? Is 0.7 optimal, or just the highest value tested?
+- **No statistical significance or variance reporting**: Results are reported as point estimates from what appears to be a single run. The reported gains (e.g., 14.53% on SQuAD v2 no-answer, 7.84% on TriviaQA) are large relative to typical improvements on these benchmarks, yet no confidence intervals, multiple seeds, or significance tests are provided. Without these, it is impossible to assess whether gains are robust.
 
 ### Trivial
-None.
+
+- **Input format for open-domain datasets is underspecified**: For TriviaQA and Natural Questions, which involve long documents, the paper does not describe how the input is structured — is the entire passage masked? Only the question? What is the truncation/max-length policy? The description "All experiments utilize the end-of-sequence (eos) token as the MASK token" is given, but the data preprocessing details are missing.
 
 ## Nice-to-Haves
 
-- Evaluating on a benchmark specifically designed for hallucination measurement (TruthfulQA, HaluEval, or using an NLI-based faithfulness scorer on the existing QA datasets) would directly support the paper's framing.
-- Including CAD as a baseline in all experiments would contextualize the contribution.
-- Testing on at least one additional model family and one non-quantized model.
-- Adding a qualitative analysis table with example generations showing both successes and failures of the method.
+- Testing with α=0 (no contrastive component) in the ablation to isolate whether the improvement comes from contrastive subtraction or from the (1+α) logit scaling.
+- Error analysis of what types of hallucinations Delta corrects vs. misses — does it simply favor shorter/safer answers, or does it genuinely correct factual errors?
+- Qualitative examples comparing baseline and Delta outputs to illustrate what hallucination mitigation looks like in practice.
 
 ## Removed Points
 
-- **Criticism about VCD comparison.** VCD requires visual inputs and operates on vision-language models; it is not a directly comparable baseline for purely textual QA. The point about CAD is retained as Major.
-- **Criticism that the theoretical motivation is "structurally flawed" and "ad hoc."** While the motivation is heuristic, calling it "structurally flawed" overstates the case. The paper provides a clear intuitive example and empirical validation. The concern is real but more accurately described as a lack of formal rigor (now listed as Minor).
-- **Criticism about inability to independently verify results / reproducibility.** This is a standard parser issue; the original submission contains the experimental setup.
-- **Strength Finder's generic strengths (e.g., "this paper addressed an important problem").** Removed as superficial. Concrete strengths are retained.
+- **"The method is not novel — it is a near-identical reimplementation of CAD"**: The paper uses random masking rather than empty context, which is a genuine operational difference. The similarity is real, but characterizing it as a "near-identical reimplementation" overstates the case. The lack of empirical comparison to CAD is already noted as a Major weakness.
+- **"Equation 3 is presented as a novel derivation with misleading interpretation"**: The paper cites Li et al. 2023a and Chuang et al. 2024 for contrastive decoding and APC respectively. While the mathematical framing could be clearer, it does not claim to have invented contrastive decoding. This criticism is overwrought.
+- **"SQuAD v1.1 EM of ~61 is low compared to published results"**: This is a speculation without citing specific numbers for Llama 3.1 8B Instruct with 4-bit quantization. Different setups yield different baselines.
+- **"the method might simply suppress diverse outputs and default to safe answers"**: Speculative; not supported by evidence in the paper.
+- **"The banana example is not tested empirically"**: It is an illustrative example, which is standard practice. Not a weakness.
+- **Strength from Strength Finder: "Novel adaptation of vision-language contrastive decoding to text"**: Kept in Strengths section as a substantive contribution.
+- **Strength "Honest documentation of limitations"**: Kept.
+- **"The method only works on context-rich datasets"**: The paper explicitly acknowledges this as a limitation, so this is not an incisive weakness.
 
 ## Novel Insights
 
-The most interesting pattern across the reviews is the tension between the paper's strong empirical signal on SQuAD v2's no-answer questions and the absence of direct hallucination measurement. The 14.53 pp gain on "no answer" EM is genuinely impressive and specifically tests one important form of hallucination (fabricating answers when context lacks support). This suggests that if the authors reframed the paper as "improving contextual faithfulness in reading comprehension" rather than "mitigating hallucinations" broadly, the evidence would support the claims substantially better. The reviews also reveal a recurring motif in contrastive decoding papers: every new method (DeCoRe, SID, Delta) claims to address hallucinations by introducing a different form of input perturbation (retrieval-head masking, token selection, random masking), yet few compare against each other. The community would benefit from a standardized evaluation protocol for this family of methods.
+None beyond the paper's own contributions. The main insight — that random masking can induce hallucination-prone outputs from an LLM, and that subtracting these logits from the original reduces hallucinations — is directly stated by the paper. The reviews do not surface any deeper theoretical analysis or unexpected empirical finding that the paper itself missed.
 
 ## Suggestions
 
-1. **Reframe the contribution.** If the paper's goal is to reduce hallucinations, add at least one hallucination-specific evaluation (e.g., TruthfulQA, or use an NLI model to measure contradiction rates on existing QA outputs). Alternatively, reframe the contribution as "improving contextual reading comprehension accuracy" — the evidence directly supports this weaker but honest claim.
-2. **Add CAD as a baseline.** This is the single most important comparison missing from the paper and is critical for positioning the contribution.
-3. **Add example generations.** Show several concrete cases where Delta changes the output — both successful hallucination corrections and any cases where it incorrectly alters a correct answer. This would build intuition and trust in the mechanism.
-4. **Ablate the mask token choice and justify the 0.7 masking ratio.** Testing alternative mask tokens (e.g., a dedicated [MASK] token, random token substitution) would clarify the design space.
-5. **Run at least one experiment on a different model** (e.g., Mistral 7B or a non-quantized Llama 3) to demonstrate generality.
+1. **Add CAD as an experimental baseline** (and optionally DoLa, contrastive search). This is the single most important addition — without it, the paper cannot demonstrate that its masking perturbation offers any benefit over existing empty-context contrastive decoding. The claim of being "more generalizable" should be tested on non-QA tasks.
+2. **Include at least one dedicated hallucination benchmark** (e.g., TruthfulQA for short-form, or factuality annotation for long-form generation) to directly support the paper's central claim.
+3. **Add ablation controls** — test α=0 (no contrastive), and test logit scaling without subtraction — to isolate which component drives improvements.
+4. **Evaluate on at least one additional model family** to show the method is not specific to Llama 3.1 8B.
+5. **Report variance** across multiple random seeds or provide statistical significance tests for the main results.
+6. **Describe the input format** for TriviaQA and Natural Questions in more detail so the experiments are reproducible.
 
 ## Score and Decision
 
-**Calibration anchors** (from human-reviewed corpus):
+### Calibration Anchors
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tkqNDbukWW.md` (DeCoRe) | 5.5 | Very similar paper (contrastive decoding for hallucination mitigation). DeCoRe used a more principled perturbation (retrieval-head masking), compared against CAD and other baselines, and evaluated on hallucination-specific tasks. **This paper is weaker**: simpler method, no CAD baseline, no direct hallucination evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/SzV37yefM4.md` (CD Improves Reasoning) | 4.33 | Also applies contrastive decoding to a new setting. Had more thorough evaluation and baselines but was considered insufficiently novel. **This paper is slightly weaker** due to missing baselines and evaluation gaps. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/YpWV7XRmFB.md` (DeCK) | 4.0 | Contrastive decoding for knowledge editing. Similar methodology, different application. Had some baseline issues. **Comparable quality** but this paper's evaluation gaps are more central to its claims. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/TOveLu4O51.md` (DetoxiGen) | 5.75 | Contrastive decoding for detoxification. More thorough experiments and baselines. **Stronger paper overall.** |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/EmQSOi1X2f.md` (Self-contradictory Hallucinations) | 6.0 | Comprehensive study on self-contradiction with evaluation, detection, and mitigation. **Much stronger** — broader scope and more rigorous evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/a2rSx6t4EV.md` (EDU-RAG) | 2.33 | Weak paper with unclear contribution and poor execution. **This paper is clearly stronger** — the method is well-defined and results are reproducible. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/RuY1r1PDdQ.md` (Instruction Following is not all you need) | 3.0 | Weak benchmark paper with limited novelty. **This paper is somewhat stronger** — the method at least shows clear empirical gains. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/SzV37yefM4.md` (Contrastive Decoding Improves Reasoning) | 4.33 | Similar pattern: applying contrastive decoding to new domains. Delta has stronger results on one task (SQuAD v2 no-answer) but narrower evaluation. Slightly stronger than this anchor. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tkqNDbukWW.md` (DeCoRe) | 5.50 | Same topic (contrastive decoding for hallucination). DeCoRe has broader evaluation (summarization, instruction following, QA), multiple model sizes, and comparison to CAD. Delta is significantly weaker on breadth. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/EmQSOi1X2f.md` (Self-contradictory Hallucinations) | 6.00 | More comprehensive study with detection + mitigation pipeline, new dataset, and human evaluation. Delta is much narrower. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4z3IguA4Zg.md` (Dynamic Correction Decoding) | 6.00 | Layer-wise analysis + novel decoding strategy + evaluation on multiple models. Delta lacks the mechanistic insight and model diversity. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/10fsmnw6aD.md` (How Out-of-Distribution) | 2.50 | Poorly written, unclear contributions, minimal experiments. Delta is much stronger — clear method, clear results, well-written. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Iyrtb9EJBp.md` (Trustworthiness of LLMs in RAG) | 8.00 | Novel metric + alignment method, extensive evaluation across models and datasets. Delta is not in this league. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/rYyu3jpk8z.md` (Open-Domain Text Evaluation via CDM) | 4.80 | Another contrastive-method paper with mixed results. Delta is slightly weaker due to missing baselines. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Ys1ZbGBzHJ.md` (Adversarial Contrastive Decoding) | 4.00 | Similar issue: applies contrastive decoding with a perturbation variant (adversarial). Delta has a clearer positive result. |
 
-The paper has a simple, well-motivated method and shows consistent empirical improvements. However, the central claim ("mitigates hallucinations") is not well-supported by the evaluation, and a critical baseline (CAD) is absent. Compared to the DeCoRe paper (5.5, rejected), which had similar framing but stronger evaluation and baselines, this paper is clearly weaker. I position it between the 3.0 level (papers with fundamental evaluation gaps) and the 4.33 level (papers where the contribution is modest but evaluation is passable).
+**Score rationale**: This paper is positioned between the 4.33 anchor (similar pattern of applying contrastive decoding to a new domain, but Delta has a genuinely strong result on SQuAD v2 no-answer) and the 5.50 DeCoRe anchor (same topic, but DeCoRe has much broader evaluation and baseline comparisons). The missing comparison to CAD is the critical gap — without it, the paper's contribution is fundamentally incompletely validated. The narrow evaluation (one model, QA-only tasks) and missing hallucination benchmarks further limit the paper. A score of 4.5 reflects that the paper has a clear, well-articulated method and at least one compelling result, but the evaluation infrastructure needed to support the claimed contribution is not yet in place.
 
-MY FINAL SCORE: <score>3.5</score>
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

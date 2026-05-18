@@ -1,69 +1,93 @@
-Now let me write the final review.
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
-This paper uses ECoG recordings (25 ms resolution) from participants listening to a 30‑minute narrative, together with all 48 layers of GPT2‑XL, to show that the DLM's spatial layer hierarchy maps onto the temporal dynamics of language processing in the human brain. The core finding—a strong positive correlation between DLM layer index and the time of peak neural encoding in IFG (r=0.85, p<10⁻¹³), along with analogous effects in aSTG and TP—is genuinely novel, and the paper includes thoughtful control analyses (linear interpolation control, best‑layer projection). However, the main evidence is restricted to words GPT2‑XL correctly predicts as its top‑1 next word, while the equal‑sized set of unpredictable words is deferred to supplementary material, and a key sub‑claim about increasing temporal receptive windows along the ventral stream rests on an inappropriate statistical test.
+
+This paper uses ECoG recordings (9 patients, 30-minute narrative) to show that the peak encoding lag of GPT2-XL layers correlates positively with layer index in high-order language areas (IFG: r=0.85, aSTG: r=0.92, TP: r=0.93), such that early layers peak earlier after word onset and later layers peak later. The effect is absent in early auditory cortex (mSTG), and the temporal spread increases along the ventral stream. The paper interprets this as a correspondence between the DLM's spatial layer hierarchy and temporal processing in the brain.
 
 ## Strengths
-- **ECoG reveals a layer‑to‑time mapping invisible to fMRI.** By recording neural activity at 25 ms increments over a 4000 ms window, the paper shows a strong Pearson correlation between DLM layer index and the lag of peak encoding performance in IFG (r=0.85, p<10⁻¹³), confirmed by permutation test (p<10⁻⁵) and a linear mixed‑effects model with electrode as random effect (p<10⁻¹⁵). Prior fMRI studies lacked the temporal resolution to detect this alignment.
 
-- **Control analysis rules out linear interpolation as an alternative explanation.** The lag‑layer correlation is significantly higher (p<0.01) than correlations obtained from linearly interpolated pseudo‑layers (Supp. Fig. 9), isolating the contribution of the DLM's non‑linear transformations.
+- **First temporal dissociation of DLM layers in the brain using ECoG**: Prior fMRI work found only an inverted-U encoding curve across layers and could not resolve temporal ordering. By using ECoG's millisecond resolution, this paper demonstrates that early GPT2-XL layers peak earlier after word onset and later layers peak later, with a lag-layer Pearson correlation of r=0.85 (p<10⁻¹³) in the IFG. This is a genuinely novel empirical observation that directly advances what was possible with fMRI.
 
-- **Regional specificity along the ventral language stream.** The effect is absent in early auditory area mSTG (r=–.24, p=.09) but strong in higher‑order areas aSTG (r=.92, p<10⁻²⁰) and TP (r=.93, p<10⁻²²), confirming that the temporal‑layer correspondence follows the known linguistic processing hierarchy rather than being a global artifact.
+- **Non-linear transformations are necessary for the alignment**: The control analysis (Section 5, Supp Fig. 9) linearly interpolates between layer 1 and layer 48 embeddings to create pseudo-layers. These linearly interpolated embeddings produce significantly lower lag-layer correlations than the actual non-linear GPT2-XL layers (p<0.01), ruling out the alternative that the effect is trivially driven by linear mixing of previous/current word representations.
 
-- **Robustness across individual electrodes confirmed via mixed‑effects modeling.** Linear mixed‑effects models with random intercepts/slopes per electrode show significant fixed effects of layer in IFG (p<10⁻¹⁵) and across ROIs (all fixed effects p<.001), demonstrating the effect is not driven by outliers.
+- **Multi-region anatomical specificity strengthens the claim**: The effect is present in IFG, aSTG, and TP but absent in mSTG (early auditory cortex), showing regional specificity that aligns with the known language hierarchy. The increasing temporal spread from aSTG to TP (Levene's test, p<0.02) further supports the claim that this is a language-related phenomenon.
 
-- **Control for the best‑performing intermediate layer.** After projecting out the embedding from the best layer (layer 22) from all other layer embeddings, the temporal ordering of peaks persists (Supp. Fig. 8), showing the mapping reflects unique contributions of each layer, not just the dominant representation.
+- **Robust multi-level statistical validation**: The lag-layer effect survives permutation tests (100,000 shuffles, p<10⁻⁵ in IFG/aSTG/TP), a linear mixed-effects model with electrode as random effect (p<10⁻¹⁵ for layer fixed effect), and a projection control that removes the best-performing layer's embedding (Supp Fig. 8). The effect is demonstrated in individual electrodes, not just in the average.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The core claim is established only for predictable words; the general claim about language processing is unsupported in the main text.** The central result (lag‑layer correlations of 0.85–0.93) is reported *only* for words that GPT2‑XL correctly predicted as its top‑1 next word (Section 4, Figures 2–3). Unpredictable words (1808 words, comparable in number to the 1709 predictable words) are explicitly separated (Section 3.1) and their analysis is relegated to supplementary figures (Supp. Fig. 4, Supp. Figs. 5–7). The paper's title, abstract, and discussion make unqualified claims about "language processing" *simpliciter*. The authors state in Section 2 that "even for unpredictable words, the temporal encoding sequence was maintained," but this claim is not supported by any main‑text figure, statistic, or confidence interval. If the temporal hierarchy is absent or substantially weaker for unpredictable words, the claim as stated is false. The data presumably exist in the supplement; moving that analysis to main‑text would either substantiate the claim or force a more nuanced interpretation (e.g., "the temporal hierarchy reflects processing of predicted linguistic content").
+- **The core interpretation is confounded by representational content**: The paper claims that the DLM's layer hierarchy "mirrors" temporal processing in the brain, but a simpler explanation fully accounts for the data: different DLM layers encode different linguistic content (early layers: local features; later layers: long-range dependencies), and the brain processes these different types of information at different times relative to word onset for independent psycholinguistic reasons. The temporal ordering of peak lags could reflect nothing more than the natural comprehension timeline (local structure first, global context later), with each DLM layer serving as a probe for the representational type that happens to be available at that time. The linear interpolation control (Supp Fig. 9) addresses whether the effect is linear mixing of previous/current words — a different alternative — but does not address the content confound. Without showing that the *representational geometry* of DLM layers matches the *temporal evolution of neural representations* (e.g., via representational similarity analysis across time and layers), the claim that the DLM's layer hierarchy "maps onto" temporal dynamics in any sense stronger than "different layers predict different lags" remains unsupported. This is a structural limitation of the experimental design, not a resolvable methodological oversight.
 
-- **The temporal receptive window analysis (Section 5) uses an inappropriate statistic.** The paper claims that "the timescales of the temporal progression gradually increased along the ventral linguistic hierarchy" and references "the increase in steepness of the slopes across language areas." However, the authors test *variances* of the peak lags across ROIs using Levene's test (mSTG vs. aSTG: F=48.1, p<.01; aSTG vs. TP: F=5.8, p<.02), not the *slopes* of the regression lines. Variance and slope measure different things: a steep slope can coexist with low variance (tight clustering around the regression line) or high variance. The appropriate test would compare the regression coefficients (layer × ROI interaction) or directly test whether the slope of the layer–peak‑lag relationship differs across ROIs. As it stands, the evidence for increasing temporal processing windows is not on solid statistical ground.
+- **The headline results are restricted to predictable words without adequate justification**: Figures 2 and 3 (the central empirical results) are computed only for words GPT2-XL predicted with highest probability (top-1 predictable). The paper does analyze unpredictable and all words in supplementary figures and claims the temporal sequence is maintained, but this relegation is consequential. If the claimed alignment is a *general* property of language processing, it should be the primary result across all words. The paper's justification ("prior studies have reported improved encoding results for words correctly predicted by DLMs") explains *why* one might split the analysis but does not justify making the predictable-word analysis the sole headline result. As presented, the main empirical support for the paper's central claim rests on a selected subset of the data.
 
 ### Minor
 
-- **Cross‑validation temporal autocorrelation is not clearly addressed.** The encoding models use 10‑fold cross‑validation with "10 non‑overlapping subsets" (Section 3.2). The paper does not describe whether folds were constructed as contiguous time blocks or randomly sampled, nor does it report diagnostics such as autocorrelation functions or lagged cross‑validation. For a continuous 30‑minute narrative, adjacent words may share autocorrelated neural signal; if training and test words are temporally close, correlation estimates could be inflated. This detail may be present in the stripped appendix (A.5), and the concern is addressable, but it should be clarified.
+- **The paper's claims are somewhat overstated relative to the evidence**: The language of "mirroring," "shared computational principles," and "connection" implies a mechanistic correspondence, but the evidence is purely correlational (linear encoding models predicting neural activity from static embeddings). The temporal shift in peak encoding lag could arise from low-level stimulus properties (acoustic features, word frequency) that correlate differently with different layers, and these confounds are not ruled out. Framing the contribution more modestly — as an empirical observation about encoding-model dynamics — would better match what the data support.
 
-- **Distribution of within‑electrode lag‑layer slopes is not shown.** The mixed‑effects model reports significance but does not reveal whether all electrodes show positive slopes or whether a minority drive the effect. A histogram of per‑electrode Pearson r values would strengthen confidence in the generality of the finding.
+- **Electrode pre-selection may bias results**: Electrodes were selected based on significant encoding performance for GloVe (static, non-contextual) embeddings. This could preferentially retain electrodes that align with the kind of semantic information that later DLM layers also capture, potentially inflating the observed temporal effect. Reporting results without this filter would help assess its impact.
+
+- **Peak estimation uncertainty is not reported**: The scatter plots in Fig. 2F and Fig. 3 show a single peak lag per layer without error bars or confidence intervals (e.g., via bootstrapping). Given that peaks could be noisy, the reliability of individual peak estimates is unclear.
+
+- **Linear mixed-effects model reports only p-values**: The LMM (lag ~ 1 + layer + (1+layer|electrode)) yields p<10⁻¹⁵, but the estimated slope and its confidence interval are not reported, making it difficult to assess the practical (not just statistical) significance.
 
 ### Trivial
-None.
+
+- PCA variance retention is not reported: The paper reduces embeddings to 50 dimensions per layer via PCA but does not report how much variance is retained in each layer. If early layers have lower variance explained by 50 PCs, encoding models for early layers could be noisier, potentially affecting peak lag estimation.
 
 ## Nice-to-Haves
-- Compare slopes across ROIs directly (layer × ROI interaction in a linear mixed model) instead of using Levene's test on variances, to support the "increasing temporal processing window" claim.
-- If the unpredictable‑word data confirm the pattern, move that analysis into a dedicated main figure on equal footing with the predictable‑word results. This would be the single most impactful revision.
+
+- **Representational Similarity Analysis (RSA)** would be a stronger test of the paper's core claim than encoding-model peak lags. Computing representational dissimilarity matrices (RDMs) for each DLM layer and for neural data at each lag, then comparing them, would directly test whether the *geometry* of early layers matches early neural activity and later layers match later activity. This is robust to the representational content confound because it compares representational structure rather than predictive fit.
+
+- **Direct comparison of ROI-wise slopes** (e.g., via bootstrapping or a linear mixed model with layer-by-ROI interaction) would be a more direct test of whether the temporal separation increases along the ventral stream than the current Levene's test on standard deviations.
+
+- **Single-electrode example**: Showing the lag-layer pattern for an example individual electrode (not just the ROI average) would demonstrate the effect is present at the single-neural-unit level.
+
+- **Comparison to a randomly initialized transformer** or a non-contextual baseline would help rule out that the temporal effect is driven by any high-dimensional feature set rather than by the specific hierarchical structure of the trained DLM.
 
 ## Removed Points
-- **The harsh critic's point about temporal autocorrelation in cross‑validation** is kept as a minor weakness above (it is a legitimate methodological question), but it may be addressed in the appendix (A.5) that was stripped by the parser. The concern is noted rather than fully removed.
-- **The harsh critic's criticism about the paper over-claiming** is integrated into the first major weakness above; it is not removed but framed precisely.
-- **All strengths from the Strength Finder** are concrete and specific; none are removed.
-- **No formatting/style nitpicks** were raised by the critic.
+
+These points are flagged to be removed; treat them with caution.
+
+- *Criticism that the Discussion speculates about recurrent architectures* — Speculation about implications is standard practice for discussion sections and does not constitute a weakness.
+- *Criticism that code will be made available "upon publication"* — This is standard practice across virtually all venues.
+- *Complaint that details are "only described in the supplementary"* — The parser strips appendix content from all papers; these details exist in the original submission.
+- *Complaint that reproducibility is limited* — The paper provides sufficient methodological detail in Section 3.2 for the core analyses.
+- *Formatting/style nitpicks* — Parser artifacts, not author errors.
 
 ## Novel Insights
-Beyond the paper's own contributions, the reviews surface an important tension: the paper wants to claim a *general* correspondence between DLM layers and brain temporal dynamics, but the data may be telling a more specific story about *predictive processing*. If the temporal hierarchy holds only for predictable words (and changes qualitatively for unpredictable ones), this would align more closely with predictive coding theories of language comprehension rather than a simple one‑to‑one mapping between layer depth and processing time. The paper's existing mention of a "difference in the neural responses for unpredictable words" (Section 2) hints at this, but the current framing obscures it.
+
+None beyond the paper's own contributions. The empirical finding — that DLM layer index correlates with peak encoding lag in high-order language areas — is itself the novel observation.
 
 ## Suggestions
-1. **Add a main‑text figure for unpredictable words** showing lag‑layer scatterplots, correlations, and permutation tests. State explicitly whether the temporal hierarchy holds, weakens, or reverses. This single change would either strengthen the generality of the claim or force a more nuanced interpretation.
-2. **Replace the Levene's test** with a direct comparison of regression slopes (layer × ROI interaction) to support the claim about increasing temporal receptive windows.
-3. **Clarify cross‑validation fold construction** — describe whether folds were contiguous time blocks or random splits, and provide evidence that temporal autocorrelation does not inflate the reported correlations.
-4. **Show a histogram of per‑electrode lag‑layer slopes** for the main ROIs to demonstrate that the effect is consistent across individual electrodes, not driven by a minority.
+
+1. **Reframe the contribution as an empirical observation** rather than a demonstration of "shared computational principles." The strongest claim supported by the evidence is: "peak encoding lag for DLM layers increases monotonically with layer depth in high-order language areas, and the non-linear structure of the DLM is required (not just linear interpolation) to produce this alignment." This is already an interesting finding.
+
+2. **Move the all-words and unpredictable-words analyses to the main text**, not supplementary. The primary result should be shown for all words. If the effect indeed holds for unpredictable words (as claimed), this would strengthen the paper considerably.
+
+3. **Add error bars or bootstrapped confidence intervals** around peak lag estimates in the scatter plots.
+
+4. **Report the LMM slope and its confidence interval**, not just the p-value.
+
+5. **Acknowledge the representational content confound explicitly** in a Limitations section. Discussing this limitation honestly would make the paper stronger, not weaker.
 
 ## Score and Decision
 
 ### Calibration Anchors
-- **TopoLM** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/aWXnKanInf.md`, avg: 8.0, Accept): Proposes a novel model architecture and provides thorough evaluation. The current paper has a weaker contribution (empirical finding vs. new model) and lacks the same level of completeness.
-- **Multi-modal brain encoding** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/0dELcFHig2.md`, avg: 6.67, Accept): Stronger methodological rigor and clearer framing. The current paper has a more novel core finding but weaker presentation.
-- **Brain-tuning (speech LMs)** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/KL8Sm4xRn7.md`, avg: 6.5, Accept): Stronger experimental validation; the current paper is slightly weaker in methodology and has unaddressed gaps.
-- **Speech language models lack semantics** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/eoB6JmdmVf.md`, avg: 4.75, Reject): Similar scope of work but the current paper has a more novel and surprising core finding.
-- **Aligning Brains into Shared Space** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/vE8Vn6DM0y.md`, avg: 4.67, Reject): Less novel than the current paper; the layer‑to‑time mapping finding is substantially more interesting.
-- **Discovering Divergences** (`/home/wg25r/split_review/datasets/deepreview_13k_calibration/J7AwIJvR3d.md`, avg: 3.75, Reject): Multiple methodological issues limit its contribution. The current paper is stronger in data quality and analysis.
 
-The paper presents a genuinely novel and interesting empirical observation that would be a solid contribution if the main claim were uniformly demonstrated. Relative to the calibration anchors, it falls between accepted papers with strong methodology (6.0–8.0) and rejected papers with limited novelty or methodological gaps (3.75–4.75). The two major weaknesses — restriction to predictable words and the inappropriate statistic for one sub‑claim — are fixable in revision but prevent acceptance in the current form.
+| Path | Avg Human Score | Comparison to This Paper |
+|---|---|---|
+| TopoLM (brain-like spatio-functional LM) | 8.0 | Stronger: introduces a new model architecture making a more fundamental contribution |
+| Multi-modal brain encoding models | 6.67 | Stronger: more comprehensive experimental scope across modalities |
+| Mind the Gap (nonlinear multimodal encoding) | 5.33 | Comparable: similar methodology with different focus |
+| Aligning Brains into Shared Space | 4.67 | Weaker: similar setup (ECoG+GPT2-XL, same podcast) but less novel finding |
+| Speech LMs lack important brain-relevant semantics | 4.75 | Comparable: similar encoding-analysis approach, different question |
+| Discovering Divergences (MEG+GPT2) | 3.75 | Weaker: less rigorous statistical validation |
+| Learning Multiple Representations (semantic pruning) | 2.33 | Weaker: lower-evidence claims, no temporal analysis |
+| Hopfield Encoding Networks | 3.0 | Unrelated, weaker methodology |
 
-MY FINAL SCORE: <score>5.0</score>
+This paper presents a genuinely novel empirical observation with strong statistical validation, but its central interpretive claim goes beyond what the correlational evidence can support, and the headline results are restricted to predictable words. It is stronger than mid-range calibration papers (3.75–4.75 range) due to its novel temporal finding and robust statistics, but weaker than top-tier papers (~8.0) that make deeper architectural or mechanistic contributions. Compared against all anchors, a score of 5.5 reflects an interesting empirical contribution held back by unresolved interpretive confounds and selective reporting.
+
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,88 +1,82 @@
-Now I have all the information I need. Let me compile the final review.
+Now I have all the evidence I need. Let me construct the final review.
 
 ## Summary
 
-The paper proposes an adaptation recipe (attention mask annealing + shift operation) to convert AR language models (GPT-2, LLaMA2, 127M–7B) into diffusion language models (DiffuGPT, DiffuLLaMA) with less than 200B additional training tokens. The adapted models achieve state-of-the-art results among existing DLMs, demonstrate inference speed advantages for long sequences, and show in-context learning capabilities for the first time in a diffusion language model.
+This paper proposes a recipe for converting pre-trained autoregressive language models (GPT2, LLaMA2) into diffusion language models (DiffuGPT, DiffuLLaMA) through attention mask annealing, a shift operation that preserves AR-style next-token prediction targets under noise, and a time-embedding-free architecture. The method is demonstrated at three scales (127M, 355M, 7B) using less than 200B training tokens. The paper includes a comprehensive evaluation across language modeling, reasoning, infilling, and in-context learning benchmarks, and releases trained models and code.
 
 ## Strengths
 
-- **Novel and practical adaptation recipe from AR to DLMs via attention mask annealing and shift operation (Sections 3.2–3.3):** The paper identifies and bridges two fundamental architectural differences between AR and diffusion objectives — causal vs. bidirectional masking, and the next-token prediction shift. The mask annealing procedure (progressively opening the causal mask) and retained shift operation are well-motivated engineering contributions that enable leveraging existing large-scale AR model weights.
+- **Practical adaptation recipe with clear design choices.** The paper identifies two concrete gaps between AR and diffusion modeling (causal vs. bidirectional attention; next-token prediction vs. masked-position prediction) and proposes targeted solutions: mask annealing to gradually transition from causal to bidirectional attention, and a shift operation to reuse the AR model's learned next-token prediction head. The ablation in Table 3 confirms both components contribute to performance. This is a practical, reusable recipe that others can apply.
 
-- **First 7B-parameter DLM with SOTA results among existing DLMs (Table 1):** DiffuLLaMA-7B outperforms all prior DLMs (Plaid 1B, SEDD Large, MD4) across a broad set of reasoning, commonsense, and infilling benchmarks. The training loss curve (Figure 2) shows a clear scaling trend from 127M → 355M → 7B, confirming that increasing model size improves DLM performance.
+- **Largest DLM demonstrated at the time.** Scaling DLMs to 7B parameters substantially exceeds prior DLM work (Plaid 1B, SEDD). The paper shows that the adapted 7B model exhibits in-context learning and math reasoning capabilities, moving DLMs beyond the small-scale feasibility demonstrations that preceded this work.
 
-- **Inference speed advantage over AR models for long sequences (Figure 5):** With 256 diffusion steps, DiffuLLaMA matches or beats LLaMA2-7B single-batch decoding time for sequences ≥1024 tokens. This is a practically meaningful result given the memory-bound nature of KV-cached AR decoding at long lengths.
+- **Comprehensive evaluation beyond perplexity.** Unlike prior DLM work that relied primarily on perplexity, the paper evaluates on 7+ benchmarks including reasoning (GSM8K), commonsense (HellaSwag, Winogrande), infilling (ROCStories, Humaneval), and in-context learning. Table 1 provides a useful benchmark for future DLM research.
 
-- **Comprehensive evaluation beyond zero-shot perplexity (Section 4.2, Table 1):** The paper evaluates across 10+ tasks including reading comprehension, commonsense reasoning, math, code infilling, and story infilling — a significant expansion over prior DLM work that focused mainly on perplexity.
-
-- **Ablation validation on GSM8K-symbolic (Table 3):** A controlled experiment where GPT-2 weights are fine-tuned on the same data with AR loss vs. discrete diffusion (DD) loss shows DD outperforming AR (45.4 vs. ~44.5 for small, 49.7 vs. ~47.8 for medium). Removing shift operation or attention mask annealing degrades performance, validating the design choices.
-
-- **First demonstration of in-context learning in a DLM (Table 2):** DiffuLLaMA shows improvement from zero-shot to few-shot settings on math tasks (MAWPS, SATMATH) and benefits from self-consistency — capabilities previously associated primarily with large AR LMs.
+- **Release of models and code.** The 127M, 355M, and 7B models are released, along with adaptation and evaluation toolkits, enabling reproducibility and follow-up work.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The central comparison "DiffuGPT outperforms GPT-2" is confounded by additional training data.** DiffuGPT is initialized from GPT-2 weights and then trained on 30B tokens from FineWeb, which the paper describes as "an improved corpus than OpenWebText." The comparison against the original GPT-2 (trained on WebText) conflates the benefit of the diffusion objective with the benefit of additional training on a higher-quality dataset. A controlled baseline — GPT-2 continued on the same 30B tokens with the standard AR objective — is absent. This weakens the paper's headline claim. The GSM8K-symbolic ablation provides some controlled evidence, but only at the fine-tuning scale, not at the pre-training scale where the main results are reported.
-
-- **The shift operation's compatibility with the formal diffusion ELBO is not rigorously justified.** Section 3.3 retains the AR models' next-token prediction shift: the output logit at position $i$ predicts token $i+1$ rather than the clean token at position $i$. The diffusion loss (Eq. 6) is derived assuming the model predicts $\mathbf{x}_0^n$ — the original token at the same position. The paper claims to "align prediction targets" but provides no derivation showing that the shifted loss corresponds to a valid ELBO for the absorbing discrete diffusion process described in Section 2. The sampling procedure (Algorithm 2) compensates with manual shifting and prepending a start token, which is a plausible practical fix but not a formal guarantee. This is not fatal to the paper's contributions (the empirical results stand on their own), but it means the work is better described as an iterative denoising procedure adapted from AR weights rather than a diffusion model in the strict formal sense defined in Section 2.
+- **DiffuGPT vs. GPT2 comparison is confounded by different training data.** The paper claims "DiffuGPT outperforms GPT2 in most tasks" as evidence for the diffusion architecture's competitiveness (Abstract, §4.3). However, DiffuGPT is continually pre-trained on FineWeb (a larger, more curated corpus than the GPT2's WebText), while GPT2 is evaluated *without any continued training on the same data*. The improvement could partly reflect the better pre-training data rather than the diffusion objective. No controlled AR baseline (GPT2 continued on FineWeb with the AR objective) is provided. The paper partially acknowledges this in the DiffuLLaMA vs. LLaMA2 comparison ("DiffuLLaMA's performance still falls short of the LLaMA2 model... attributed to the extensive amount of training tokens"), but the core claim about DiffuGPT's superiority over GPT2 is presented without the caveat that the data is not held constant. This undermines the headline claim about diffusion models matching or exceeding AR counterparts.
 
 ### Minor
 
-- **Loss metric incomparability across model types for multiple-choice tasks.** For commonsense reasoning tasks (HellaSwag, WinoGrande, etc.), the paper uses the diffusion ELBO (Eq. 6) for DLMs and standard cross-entropy for AR models to score answer choices. These are not directly comparable: the diffusion loss is an upper bound on negative log-likelihood and depends on stochastic sampling of timestep $t$, while the AR loss is exact. The paper acknowledges this issue (Section 4.2: "discrepancies between continuous diffusion, discrete diffusion, and autoregressive loss still hinder fair comparisons") but proceeds with cross-type comparisons anyway. For DLM-to-DLM comparisons the metric is consistent and trustworthy; the issue mainly affects DLM vs. AR comparisons.
+- **Shift operation's effect on the diffusion process is not theoretically analyzed.** The shift operation trains the model at position *n* to predict token *n+1* under noise at position *n*. The paper asserts this "perceptually" still recovers original signals (Fig. 1 caption), but provides no analysis of whether the resulting model satisfies the standard forward-backward consistency of discrete diffusion (§5.2 of Austin et al.). Is the model truly denoising, or is it performing AR next-token prediction on a random subset of visible tokens? Some diagnostic evidence (e.g., whether predictions depend on right-side context, whether the model can infill masked tokens in the middle) would strengthen the claim.
 
-- **The 7B model (DiffuLLaMA) is trained on only 65B tokens vs. LLaMA2's ~2T tokens.** The paper honestly acknowledges that "DiffuLLaMA's performance still falls short of the LLaMA2 model" and attributes this to insufficient training. This makes the comparison against LLaMA2 uninformative — the underperformance is expected and doesn't reflect on the diffusion approach. The paper would benefit from training the 7B model to a more comparable compute budget or framing this as a preliminary scaling result rather than a competitive evaluation.
+- **Scaling analysis is not controlled.** The claim that "scaling diffusion language models results in improved performance" (§4.3) is based on comparing DiffuGPT 127M, 355M, and DiffuLLaMA 7B, which differ in base architecture (GPT2 vs. LLaMA2), training data (FineWeb vs. SlimPajama+Starcoder), and token budgets (≈30B vs. 65B). Performance differences could be driven by any of these factors. A proper scaling study would hold data and training budget fixed across model sizes. The paper's claim is observationally true but does not constitute a controlled scaling analysis.
 
-- **Attention mask annealing is omitted for the 7B model** with the justification that a small-model ablation showed "minimal impact." Given the different scale and the fact that the ablation is on a fine-tuning task (GSM8K-symbolic) rather than pre-training, this conclusion may not transfer. The paper acknowledges this but does not verify it.
+- **Ablation limited to a single finetuning task.** The ablation of mask annealing and shift operation (Table 3) is conducted only on GSM8K finetuning. The authors acknowledge this ("Direct ablation on adaptation training is costly"), but without ablations on the core language modeling benchmarks, it is unclear whether both components are essential for general DLM capabilities or only for this specific downstream task.
+
+- **Evaluation detail for multiple-choice tasks is underspecified.** For commonsense reasoning tasks (HellaSwag, etc.), the paper computes the diffusion loss (Eq. L_T) for each answer choice. But the loss involves sampling a noise time *t* and a corruption pattern; it is not specified how many noise samples are used per choice or whether the loss is averaged over multiple samples. This could introduce variance in the reported results.
 
 ### Trivial
-
-- The unconditional generation perplexity uses GPT-2 large as the oracle, which may favor models adapted from the GPT-2 family over models trained independently. A multi-oracle evaluation would be more persuasive.
+None.
 
 ## Nice-to-Haves
 
-- A controlled pre-training experiment: continue GPT-2 on the same 30B FineWeb tokens with the AR objective and compare against DiffuGPT. This would cleanly isolate the benefit of the diffusion objective.
-- Variance reporting for the diffusion-loss-based ranking in multiple-choice tasks, given the stochastic timestep sampling.
-- Comparison against FIM-trained AR models (e.g., CodeLlama) for infilling tasks, to distinguish the benefit of diffusion from the benefit of bidirectional context.
+- A controlled AR baseline (GPT2 continued on FineWeb with the AR objective) would cleanly separate the effect of the data from the effect of the diffusion objective.
+- Qualitative examples of infilling behavior (e.g., showing that the model correctly uses right-side context when filling masked tokens) would help validate that the shift operation preserves bidirectional reasoning.
+- An analysis of position-dependent effects during generation (e.g., whether early tokens are systematically worse since they are never generated in a non-shifted manner during sampling).
 
 ## Removed Points
 
-The following points from the reviewers were removed after verification against the paper:
-
-- **Harsh critic's Point 1 characterization as "fatal/structural":** The claim that the adapted model "may not be a valid diffusion language model" is overstated. The shift operation is a practical reparameterization that the paper explains in Section 3.3 — output at position $n$ is trained to predict token $n+1$, and this mapping is inverted at sampling time by shifting back and prepending a start token. While a formal ELBO derivation would strengthen the paper, the approach is well-specified and the model demonstrably performs the denoising task. This is a minor theoretical gap, not a structural flaw.
-
-- **Strength Finder's generic strengths** (e.g., "the paper identifies a practical bottleneck," "comprehensive evaluation") — These are retained in condensed form since they are backed by specific evidence.
-
-- **The claim that "DiffuGPT outperforms both SEDD and MD4 models"** is retained as a valid strength because these DLMs are compared under consistent evaluation conditions.
+- *Criticism that the unified objectives + adaptation connection is weak*: The paper clearly identifies two discrepancies (reweighting, indicator) between the AR and diffusion losses and maps them to adaptation components. This is logically sound.
+- *Criticism that the paper claims a "scaling law"*: The paper only claims "scaling... results in improved performance," which is an observational claim, not a fitted scaling law. The harsh critic overstates the claim.
+- *Criticism about missing qualitative examples/attention visualizations*: These are not required for a systems/empirical paper at this stage of the field. Moved to nice-to-have.
+- *Criticism about DiffuLLaMA underperforming LLaMA2*: The paper explicitly acknowledges this and offers an explanation. This is not a weakness — it's honest reporting.
+- *Some strength-finder strengths that were generic* ("addresses an important problem") have been dropped; only specific, evidenced strengths are retained.
 
 ## Novel Insights
 
-The most interesting finding synthesized across the reviews is that the paper's adaptation recipe, while lacking formal theoretical grounding as a valid diffusion model, works surprisingly well in practice. This creates an interesting tension: the practical recipe (retain AR shift operation, anneal causal mask) seems to produce models that behave like diffusion models and outperform other DLMs, even though the formal connection to the diffusion ELBO is hand-waved. This suggests that the community may benefit from a deeper theoretical investigation into when and why next-token prediction AR losses can be repurposed as denoising objectives. Additionally, the finding that DLMs can perform in-context learning (Table 2) — a capability previously tied to AR training — suggests that the emergence of ICL may depend more on scale and data diversity than on the specific left-to-right generation order.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Run the controlled experiment that would make the paper's central claim rigorous:** Continue-train GPT-2 small on the same 30B FineWeb tokens with the standard AR objective, and compare it directly against DiffuGPT on all tasks. If DiffuGPT still wins, the diffusion advantage is cleanly demonstrated. If not, adjust the claims accordingly.
-2. **Provide a formal derivation or at minimum a clear argument** for why the shifted loss function (output at position $n$ trained to predict $\mathbf{x}_0^{n+1}$) corresponds to a valid ELBO for the absorbing discrete diffusion process, or explicitly characterize the adapted model as a related but distinct class of iterative denoising models.
-3. **For the multiple-choice evaluations, use a consistent scoring method** across model types — either generation-based accuracy for both, or explicitly note the caveat when comparing ELBO-based scores with exact log-likelihoods.
-4. **Train the 7B model on more tokens** (or include a smaller model trained to convergence on a comparable budget) to make the AR comparison meaningful at the 7B scale.
+- **Add a controlled AR baseline.** Continue pre-training GPT2 (small and medium) on the exact same FineWeb subset using the same training budget and hyperparameters, but keeping the AR objective and causal mask. Report these alongside DiffuGPT. If DiffuGPT still outperforms this controlled baseline, the claim about the diffusion objective providing a real advantage would be substantiated. If not, reframe the contribution as "a recipe for obtaining a capable DLM that preserves most of the AR model's capabilities" rather than claiming superiority.
+- **Run the ablation on at least 1-2 additional tasks** (e.g., HellaSwag zero-shot, LAMBADA) to confirm that mask annealing and the shift operation matter beyond GSM8K finetuning.
+- **Clarify the evaluation protocol for multiple-choice tasks** — how many noise samples are used, and is the loss averaged or single-sample?
+- **Provide a brief analysis** (empirical, even if not theoretical) showing that the model can use bidirectional context: e.g., compare perplexity/loss on sentences with and without right-side context provided.
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration Anchors:**
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| Interpolating AR and Discrete Diffusion (tyEyYT267x) | 8.0 (Accept) | Much stronger theoretical grounding and controlled experiments; our paper is weaker on rigor but has practical scaling to 7B |
-| Scaling up Masked Diffusion Models (WNvvwK0tut) | 6.5 (Accept) | Better scaling law analysis and compute-controlled comparisons; our paper lacks scaling laws but reaches larger model sizes |
-| RADD / Your Absorbing Discrete Diffusion (sMyXP8Tanm) | 6.2 (Accept) | Stronger theoretical contribution (reparameterization, formal unification); our paper has broader empirical scope but weaker theory |
-| SEDD (71mqtQdKB9) | 6.6 (Reject) | Strong theory but incomplete experiments; our paper has more complete evaluations but weaker theoretical foundation |
-| Diffusion LMs with Scaling and Instruction-Finetuning (Qn4HEhezKW) | 5.0 (Reject) | Similar adaptation approach and similar issues with controlled comparisons; our paper trains larger models and evaluates on more tasks |
-| Abstract Rules for Reasoning (DLBlR0rea5) | 4.5 (Reject) | Limited scope; our paper is more practically significant |
+| Anchor Path | Avg Score | Comparison |
+|---|---|---|
+| `/home/.../tyEyYT267x.md` | 8.0 | Stronger theoretical analysis and cleaner experiments, but smaller scale. This paper has more practical impact but weaker controls. |
+| `/home/.../WNvvwK0tut.md` | 6.5 | Cleaner controlled scaling experiments (MDMs trained from scratch, scaling laws fitted), but only up to 1.1B. Our paper scales to 7B but has confounded comparisons. |
+| `/home/.../sL2F9YCMXf.md` | 6.75 | Stronger theoretical contribution (EBM correction to diffusion); our paper has more comprehensive evaluation and larger models. |
+| `/home/.../Qn4HEhezKW.md` | 5.0 | Very similar topic (adapting pre-trained models to diffusion). Our paper has more methodological novelty (mask annealing, shift operation) and clearer experimental presentation. |
+| `/home/.../1pTlvxIfuV.md` | 5.5 | Reparameterized discrete diffusion, rejected on novelty concerns. Our paper has a more practical contribution and broader evaluation. |
+| `/home/.../71mqtQdKB9.md` | 6.6 | SEDD paper — strong theoretical contribution (score entropy). Our paper is more applied/systems-oriented. |
+| `/home/.../kCnLHHtk1y.md` | 3.0 | Not comparable (image generation for Chinese ancient buildings). |
+| `/home/.../u08UxVNdIo.md` | 4.75 | Not comparable (LLM jailbreak). |
 
-The paper has genuine contributions — the adaptation recipe is novel and produces the largest DLM to date with demonstrated practical advantages (speed for long sequences, in-context learning, infilling). However, the strongest claimed result ("DiffuGPT outperforms GPT-2") is compromised by a confounded comparison, and the theoretical foundation for the adaptation is incomplete. Relative to the anchors, the paper is substantially stronger than the 5.0-level work but falls short of the 6.5-level work in terms of experimental rigor and controlled evidence.
+The paper presents a useful practical recipe for building DLMs at scale, with clear methodological contributions (mask annealing, shift operation) and the largest DLM demonstrated at the time (7B). However, the central empirical claim about DiffuGPT outperforming GPT2 is weakened by a data confound that prevents attributing the improvement to the diffusion architecture. This is a real limitation but does not invalidate the core contribution (the adaptation recipe and its ability to produce functioning DLMs at scale). Compared to the calibration anchors, the paper sits between the 5.0-level paper (which had similar goals but less novelty and clarity) and the 6.5-level paper (which had cleaner experiments). The confound in the headline comparison prevents a higher score.
 
-**Score: 5.5**
-
-**Decision: Reject** — The paper's headline claim is not adequately supported due to the confounded comparison. The contributions are real and the direction is promising, but the evidence as presented does not meet the bar for acceptance. A major revision with a controlled pre-training comparison could strengthen the paper significantly.
-
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

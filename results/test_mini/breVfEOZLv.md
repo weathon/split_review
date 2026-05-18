@@ -1,80 +1,79 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me produce the final review.
+Now I have all the information needed to write the final consolidated review.
 
 ## Summary
-The paper proposes AdaptConf, an adaptive confidence distillation loss for weak-to-strong boosting in vision models. The method dynamically weights between a weak teacher's supervision and the strong model's self-supervision using a per-sample confidence weight. Experiments are conducted across image classification (CIFAR-100, ImageNet), few-shot learning, transfer learning, and noisy-label settings.
+
+This paper investigates weak-to-strong boosting for vision models, where a weaker (lower-accuracy) model supervises a stronger (higher-capacity or higher-potential) model. The authors propose AdaptConf, an adaptive confidence distillation loss that dynamically weights between the weak teacher's soft labels and the strong student's self-generated hard labels on a per-sample basis using a confidence signal. Experiments across image classification (CIFAR-100, ImageNet), few-shot learning, transfer learning, and noisy-label learning show consistent improvements over prior KD methods and the AugConf baseline (Burns et al., 2023).
 
 ## Strengths
 
-1. **Addresses a timely question.** Extending the weak-to-strong generalization paradigm (Burns et al., 2023) from LLMs to vision models is a natural and worthwhile direction, and the paper explores this across multiple practical settings (few-shot, transfer learning, noisy labels).
+- **Consistent empirical advantage across diverse settings.** AdaptConf outperforms both traditional KD methods and the AugConf baseline on nearly every evaluated teacher-student pair, including same-architecture (Table 2), different-architecture (Table 4), and ImageNet (Table 3) settings. Improvements of 0.5–2% absolute accuracy are reported, and these hold across 3-trial averages.
 
-2. **Hyperparameter robustness is demonstrated.** The ablation study (Fig. 2) shows that AdaptConf's performance varies less with temperature than AugConf varies with α, suggesting easier tuning — a practically useful property.
+- **Substantial gains when ground-truth labels are absent.** In the "only weak teacher soft labels" scenario (Table 4b), AugConf and AdaptConf achieve much larger improvements than other KD methods. This directly supports the paper's core thesis — that weak supervision alone can effectively boost a stronger model, even without true labels.
 
-3. **Evaluated in a label-scarce scenario.** Table 4b examines the setting where only the weak teacher's soft labels are available (no ground truth), and the method is reported to maintain improvements — this adds practical value for scenarios where labeled data is unavailable.
+- **Robustness to hyperparameter variation.** The ablation study (Figure 2) shows that AdaptConf's accuracy fluctuates less across temperature settings than AugConf's accuracy fluctuates across α values, indicating the adaptive formulation is more stable and easier to use in practice.
+
+- **Strong performance under noisy labels.** On CIFAR-100 with asymmetric label noise (Table 8), AdaptConf improves top-1 accuracy by +0.81% over the scratch baseline, while other KD methods often degrade performance. This demonstrates resilience to imperfect supervision.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-1. **The β(x) weight formulation (Eq. 2) has counterintuitive behavior that the paper does not acknowledge or explain.**  
-   β(x) = exp(CE(f(x), f̂(x))) / (exp(CE(f(x), f̂(x))) + exp(CE(f(x), f̂_w(x)))).
-
-   CE(f(x), f̂(x)) is small when the strong model is confident. This makes β small, shifting weight *toward the weak teacher* and *away from self-supervision*. Conversely, when the strong model is uncertain (CE is large), β is large, pushing the model to rely more on its own (potentially noisy) self-supervision. This is the opposite of what the paper's stated intuition ("dynamically adjust the level of trust") would suggest. A confident model should trust itself more, not less. The paper provides no analysis of this behavior, no comparison against an alternative where a confident model relies on itself (e.g., β ∝ 1/CE), and no theoretical justification. The formulation reads as an unmotivated heuristic whose claimed benefits are not supported by the stated reasoning.
-
-2. **The weak-strong gap is not properly operationalized, especially for same-architecture experiments.**  
-   In Table 2, teachers and students share identical architectures, and the paper does not explain how the teacher is "weaker." The description "limited-capacity teachers guided by larger-capacity students" (line 112) contradicts the fact that same-architecture pairs have equal capacity. No metric quantifies the weakness gap for these settings. While different-architecture pairs (Table 4) do show clear gaps (e.g., MobileNetV2 at 68.60% vs. ResNet50 at 79.34%), the lack of a consistent definition of "weakness" muddles the central premise — are reported improvements due to weak-to-strong transfer specifically, or simply from the strong model benefiting from any auxiliary training signal?
-
-3. **The abstract overclaims relative to what is experimentally tested.**  
-   The abstract states the method "exceeds the performance of fine-tuning strong models on full datasets." However, the main CIFAR-100 and ImageNet experiments compare against a "student trained from scratch" baseline, not against standard fine-tuning of a pretrained strong model with ground truth labels. The "Teacher + GT" comparison that would support this claim appears only in the transfer learning experiments (Table 7). This overclaim is not a minor phrasing issue — it misrepresents what the experiments actually establish.
+None.
 
 ### Minor
 
-4. **The method is a heuristic modification of AugConf (Burns et al., 2023) with limited novelty.**  
-   AdaptConf replaces AugConf's scalar hyperparameter α with a per-sample β(x) that is a softmax over two cross-entropy values. This is an incremental change, not a fundamentally new approach. The paper does not ablate simpler alternatives (e.g., a learned scalar, a fixed α grid, β based on the weak model's own confidence rather than the strong model's), making it hard to assess whether the specific β(x) formulation actually drives the reported gains.
+- **The design of β(x) uses hard labels for confidence estimation while the loss uses soft labels, a choice that is not justified or analyzed.** In Eq. (2), β(x) = exp(CE(f(x), ˆf(x))) / (exp(CE(f(x), ˆf(x))) + exp(CE(f(x), ˆf_w(x)))) uses cross-entropy with *hard* labels from both models, while the first loss term uses the weak model's *soft* labels. The paper states this measures "confidence" but does not explain why hard-label CE is preferred over soft-label divergence for this purpose, nor what the behavioral implications of this choice are. An ablation comparing the current β formulation to one using soft-label KL divergence would clarify the design rationale. This does not invalidate the empirical results but limits the paper's methodological clarity.
 
-5. **No error bars or standard deviations are reported.** The paper states results are "the average over 3 trials" but never reports variance. Given the small improvement margins (0.5%–2% claimed), it is impossible to assess statistical significance.
+- **Some experiments use same-architecture teacher-student pairs, which departs from the paper's framing of leveraging "smaller, weaker models."** Table 2 pairs e.g., ResNet56→ResNet56 and WRN-40-2→WRN-40-2, where the teacher is weaker only in accuracy, not capacity. While this is a valid weak-to-strong setup in the "born-again" sense (Furlanello et al., 2018) and the paper does include genuinely weak-to-strong different-architecture pairs (Table 4), the paper would benefit from explicitly separating these two settings and clarifying which claims apply to each.
 
-6. **The few-shot experiments use only one dataset (miniImageNet) and one student architecture (ResNet36),** limiting the generalizability of these results.
+- **No statistical significance or confidence intervals reported.** The reported gains (e.g., +0.33% on ImageNet with an 83.5% baseline) are modest in absolute terms. While improvements at high accuracy levels are meaningful, the lack of variance estimates makes it difficult to assess whether the improvements are robust across runs beyond the reported 3-trial averages.
+
+- **The comparison in Figure 2 compares α (AugConf) to temperature T (AdaptConf), which are not directly analogous controls.** AugConf's α directly weights the two loss terms, while temperature affects softmax sharpness rather than the weighting per se. While the result still demonstrates that AdaptConf is more robust, a cleaner ablation would vary β's formulation directly.
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
-
-- Comparing β(x) against simpler alternatives (a fixed α sweep, β based on teacher confidence alone) would clarify whether the specific functional form is important.
-- Reporting teacher accuracy for every teacher-student pair (especially same-architecture ones) would help readers assess the weak-strong gap.
-- Adding standard deviations for the 3-trial averages would improve statistical credibility.
+- A controlled ablation comparing AdaptConf to AdaptConf with β fixed to the average learned value (per setting) would more directly isolate the benefit of per-sample adaptivity.
+- A dedicated table of genuinely weak-to-strong pairs (e.g., ResNet-18 → ResNet-101) with a clear accuracy gap is suggested to strengthen the paper's core claim.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-- **"All tables are missing"** — This is a parser artifact (PDF-to-text conversion replaced tables with image placeholders). The original submission contains tables. Removed per Hard Rules.
-- **"The paper does not compare against standard fine-tuning at all"** — This comparison does exist in the transfer learning experiments (Table 7, "Teacher + GT" column). The criticism is partially correct (the comparison is absent in the main CIFAR-100/ImageNet tables), which is already captured in Weakness #3. The absolute claim of complete absence is removed.
-- **Various formatting nitpicks and speculation about missing appendices** — Removed per Hard Rules (parser-stripped sections and formatting artifacts).
+1. *"No ablation isolates the contribution of adaptivity"* — The reviewer claimed no comparison to a fixed-weight version of the same two-term loss exists. However, AugConf IS exactly that: L = (1-α)CE(f, f_w) + αCE(f, ˆf) with a fixed global α. The comparison to AugConf across all tables directly tests the benefit of per-sample adaptivity. The reviewer overlooked this.
+
+2. *"If only soft labels are available, the hard label version is not"* — The reviewer claimed an inconsistency between the "only soft labels" scenario and the method's need for ˆf_w(x). However, hard labels are trivially derived from soft labels via argmax. This is not a real issue.
+
+3. *"On CIFAR-10, AdaptConf does not improve either"* — The paper states "all methods except ours negatively impact the model." Avoiding degradation when all other methods hurt performance IS a positive robustness result, not a failure to improve.
+
+4. *Pure formatting/style nitpicks* about table placeholders, parser artifacts, and similar presentation issues that stem from PDF extraction, not the original submission.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface the fundamental tension between the claimed intuition for the β(x) weight and its actual mathematical behavior, which the paper itself does not address.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Reconsider and re-derive the β(x) formulation.** The current formula appears to downweight self-supervision when the strong model is confident, which is counterintuitive. Either provide a clear theoretical justification for this behavior, or redesign the weight to align with the stated intuition (e.g., β(x) ∝ confidence of the strong model).
-2. **Operationalize "weakness" explicitly.** For each teacher-student pair, report both models' accuracy on the target task. For same-architecture pairs, explain how the teacher is made weaker (e.g., fewer training epochs, smaller dataset, earlier checkpoint).
-3. **Add standard fine-tuning as a baseline** for the CIFAR-100 and ImageNet main tables, or adjust the abstract's claim to match what is actually tested.
-4. **Include error bars or confidence intervals** for all 3-trial averaged results.
+1. Provide a clear justification for the hard-label CE formulation of β(x) in Eq. (2), or ablate against a soft-label version.
+2. Add significance measures (confidence intervals or std deviations across trials) for main results, especially the +0.33% ImageNet gain.
+3. Explicitly delineate same-architecture vs. different-architecture results and discuss how each setting supports or qualifies the weak-to-strong claim.
+4. Include at least one experiment with a clearly weaker teacher (e.g., >10% accuracy gap) to more directly demonstrate the method's value in the strict weak-to-strong regime.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Anchor comparisons (all from calibration corpus):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `FwkYeLovHk.md` (Exploring Weak-to-Strong Generalization for CLIP) | 3.33 | Also a weak-to-strong paper in vision, rejected for similar problems: unclear weak-strong setup, heuristic method, limited validation. This paper has broader experimental scope but shares the core conceptual issues. |
-| `HnVtsfyvap.md` (Label-efficient Training using VFMs) | 5.00 | A knowledge distillation paper with heuristic contributions, rejected for limited novelty. This paper has a more significant conceptual flaw in its core method. |
-| `LC6ZtQV6u2.md` (Compressing Vision Foundation Models) | 6.50 | A clearly motivated distillation paper with strong results across multiple tasks. Significantly more rigorous than the current paper. |
-| `m50eKHCttz.md` (Fantastic Gains and Knowledge Transfer) | 7.25 | A well-executed empirical study with extensive validation. This paper's contribution and execution are substantially weaker. |
-| `9ccZzuix2D.md` (Distilling Knowledge in Data Pruning) | 5.33 | A KD paper with theoretical motivation, a dimension entirely absent here. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| `/home/.../FwkYeLovHk.md` | 3.33 | Weak-to-strong CLIP paper — much weaker; tested only on DomainNet, simpler method. Current paper is significantly stronger. |
+| `/home/.../pHe4P1IVnb.md` | 5.50 | Bayesian WeakS-to-Strong for NLP — similar quality; comparable methodological depth, broader task scope. Current paper has broader vision experiments. |
+| `/home/.../OZitfSXpdT.md` | 6.50 | TGeo-KD for adaptive fusion ratios — stronger theoretical motivation and cleaner ablations. Current paper is less theoretically grounded. |
+| `/home/.../m50eKHCttz.md` | 7.25 | Knowledge transfer across 400+ models — far more comprehensive. Current paper is substantially weaker in scale. |
+| `/home/.../yV6wwEbtkR.md` | 6.67 | Bayes CMI for KD — strong theory-motivated method. Current paper is less rigorous theoretically. |
+| `/home/.../QKqWnNkwPL.md` | 3.00 | Self-distillation for diffusion — weak experimental results. Current paper is stronger. |
+| `/home/.../8TbqoP3Rjg.md` | 2.00 | KD to mitigate model collapse — poor presentation, weak experiments. Current paper is much stronger. |
 
-The paper tackles a timely topic and evaluates across multiple settings, but its core methodological contribution (the β(x) formulation) has a conceptual issue that the paper fails to address, the weak-strong scenario is not properly operationalized, and the abstract overclaims relative to the experiments. Compared to the anchors, this paper is most similar to FwkYeLovHk (3.33) — a weak-to-strong paper with fundamental setup issues — but has broader experiments. However, the conceptual flaw in the loss function is more severe than the issues in that paper. I place this paper below HnVtsfyvap (5.00) due to the core technical issue.
+Relative to these anchors, the paper sits slightly below the 5.50 WeakS-to-Strong paper (which has cleaner ablations and methodological justification) and well below the 6.50+ papers (which have more theoretical depth or experimental scale). It is clearly above the 3.33 and below papers, which have fundamental issues with their core claims or experimental support.
 
-MY FINAL SCORE: <score>3.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

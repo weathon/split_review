@@ -1,86 +1,71 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
-
-This paper studies decentralized safe MARL for homogeneous multi-agent systems. It formally defines homogeneous constrained Markov games, proves that policy sharing preserves optimality and safety (Theorem 1), develops an on-policy decentralized primal-dual actor-critic with asymptotic convergence guarantees (Theorems 3–5), and provides a practical off-policy DRL-based variant (DPDAC-ER). Experiments on three MAPE tasks compare against centralized safe/unsafe and decentralized unsafe baselines, with ablations on communication, constraint thresholds, and local observations.
+This paper studies decentralized safe multi-agent reinforcement learning (MARL) for homogeneous multi-agent systems. It first formalizes a "homogeneous constrained Markov game" extending Chen et al. (2022) to the safe setting, proving that policy sharing preserves both optimality and safety constraints (Theorem 1). An on-policy decentralized primal-dual actor-critic algorithm is proposed with asymptotic convergence guarantees (Theorems 3–5) under linear function approximation, finite spaces, and multi-timescale stochastic approximation. A practical off-policy DRL version with entropy regularization, replay buffers, and neural network function approximation is then developed and evaluated on three continuous multi-robot coordination tasks.
 
 ## Strengths
-
-- **Theorem 1 establishes that policy sharing preserves both optimality and safety in homogeneous constrained Markov games.** This is the first result of its kind for safe MARL and provides a principled justification for using shared observation-based policies in decentralized safe algorithms. The proof leverages permutation-invariant structures in the reward, cost, and transition functions.
-
-- **Asymptotic convergence of the decentralized primal-dual actor-critic is established under standard multi-timescale SA assumptions.** Theorems 3, 4, and 5 respectively prove a.s. convergence of critic parameters to MSPBE minimizers, actor parameters to equilibria of the Lagrangian ODE, and dual variables to constraint-satisfying equilibria. While the analysis applies to the on-policy linear variant, the theoretical framework is carefully constructed and goes beyond what most safe MARL papers provide.
-
-- **The practical off-policy algorithm (DPDAC-ER) is a well-motivated extension that combines consensus-based parameter sharing with entropy-regularized primal-dual optimization.** The design of how each agent locally computes the global policy log-probability using permutation-invariant observations (leveraging Theorem 1) is technically clever and enables fully decentralized training while preserving theoretical grounding.
-
-- **Experiments include three safety-aware continuous multi-robot tasks with meaningful ablations on communication sparsity, cost thresholds, and local observations.** The ablation studies provide useful sanity checks: they demonstrate the necessity of consensus (no-communication fails), the algorithm's ability to trade off reward vs. safety at different threshold levels, and robustness to moving from global-state to local-observation settings.
+- **Theorem 1 (optimality of policy sharing under safety constraints):** The paper rigorously proves that in homogeneous constrained MGs, there exists an optimal joint policy composed of shared observation-based local policies that preserves both the optimal reward and safety constraint satisfaction. This cleanly extends the result of Chen et al. (2022) to the safe MARL setting, providing a formal foundation for the policy-sharing approach used throughout.
+- **Decentralized dual variable update for a centralized constraint:** Equation (8) introduces a novel decentralized procedure for the Lagrange multiplier that combines a local gradient step (using the initial state distribution and current policy) with a consensus update. This is a non-trivial algorithmic innovation for handling a team-average cost constraint without a centralized trainer.
+- **Convergence analysis under multi-timescale SA:** Theorems 3–5 provide a rigorous almost-sure convergence analysis for the on-policy linear-critic variant, covering critic parameters (to MSPBE minimizers), actor parameters (to equilibria of a well-specified ODE), and dual variables. Propositions 1–2 connect the converged dual variable to constraint satisfaction. This level of theoretical analysis is absent from prior decentralized safe MARL works (Lu et al., 2021; Ying et al., 2023b).
+- **Empirical demonstration that entropy regularization is essential:** The ablation comparing DPDAC (without entropy) vs. DPDAC-ER (with entropy) on the Formation task clearly shows that the variant without entropy regularization fails to learn safe policies and exhibits poor stability, while DPDAC-ER succeeds. This provides direct evidence supporting the entropy regularization design choice for continuous spaces.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+- **Missing comparison with existing decentralized safe MARL methods (Lu et al., 2021; Ying et al., 2023b):** The paper identifies these as the only directly related prior works on decentralized safe MARL but does not compare against them experimentally. The paper's central applied claim is that it addresses "the challenge to design efficient decentralized algorithms for continuous safe MARL tasks" — a claim that can only be evaluated by showing the proposed method outperforms or matches existing approaches in its domain. While Lu et al. uses vanilla policy gradient and Ying et al. faces challenges in continuous spaces, the paper could have adapted these methods (e.g., by using Gaussian policies or discretizing actions) to enable comparison, or at minimum explicitly justified why such a comparison is infeasible. Without this, the experimental section only demonstrates that DPDAC-ER is competitive with *centralized* safe MARL (MASAC-Lag) and outperforms *unsafe* decentralized methods — it does not establish superiority over the *decentralized safe* state of the art.
 
-- **No empirical comparison with existing decentralized safe MARL algorithms (Lu et al., 2021; Ying et al., 2023b).** The paper positions itself as a solution for decentralized safe MARL in continuous spaces and explicitly claims an advantage over these methods in the introduction ("Compared with existing works on decentralized safe MARL... a practical off-policy decentralized algorithm... which can effectively deal with continuous spaces"). Yet the experimental section includes zero comparison with either method. The paper offers textual arguments about why these methods may be limited (Lu et al. uses vanilla policy gradient with scalability concerns; Ying et al. faces challenges in continuous spaces), but these are claims, not evidence. Without a head-to-head comparison or at least an explicit statement that these methods target fundamentally different settings (discrete action spaces / different assumptions on communication), the paper's central empirical claim of effectiveness for *decentralized* safe MARL remains only partially supported. The only decentralized safe baseline is the authors' own DPDAC (without entropy), which does not represent the prior art.
-
-- **Experimental evaluation is limited to one environment (MAPE) with only 10 agents and simple 2D dynamics.** The paper claims the algorithm "can effectively deal with continuous spaces" and is suitable for "safety-aware continuous multi-robot coordination tasks," but all three tasks share the same basic physics (point-mass agents in a 2D grid world with discrete second-order dynamics). No experiments demonstrate scalability to larger numbers of agents, higher-dimensional state/action spaces (e.g., robot arms, drones), or more complex dynamics. A 3D Formation task is mentioned in the appendix, but the main paper's experiments are too narrow to robustly support the generalization claims, especially for a method whose selling point is handling continuous spaces where prior decentralized safe methods struggle.
+- **Gap between theory and practice:** The convergence analysis (Theorems 3–5) applies to the on-policy algorithm with linear function approximation, finite state/action spaces, and decreasing stepsizes satisfying Assumption 5. The practical algorithm evaluated in experiments uses neural network critics/actors, off-policy replay buffers, fixed learning rates, target networks, and automatic entropy adjustment — all outside the theoretical framework. The paper acknowledges this gap (Section 5, para 1) but the abstract presents "asymptotic convergence" as a contribution without qualification, and no attempt is made to bridge the gap (e.g., by comparing on-policy and off-policy performance on a common task, or showing that the off-policy algorithm approximately recovers the theoretical behavior). The experimental results therefore cannot be interpreted as supporting the theoretical convergence claims.
 
 ### Minor
-
-- **The convergence analysis (Section 4) applies to the on-policy, linear-function-approximation, finite-state/action variant, while the practical algorithm (Section 5) is off-policy with neural networks, replay buffers, and constant stepsizes.** The paper does acknowledge this gap in Section 5 ("Even though the decentralized algorithm proposed in Section 3 is theoretically convergent, the performance of this algorithm can be severely limited by the standard assumptions"), and it is common in RL to separate theory and practice. However, the abstract presents "Asymptotic convergence is proven" without immediately qualifying which algorithm this applies to, and no bridging analysis or empirical justification is offered for why the theory should inform the practical algorithm's behavior. A clearer front-loaded statement about what does and does not have guarantees would improve presentation.
-
-- **The assumption of global state availability to each agent is strong but somewhat underexplored.** The paper is transparent about this (following Zhang et al., 2018; Chen et al., 2022), and the local-observation ablation in Section 6 is a step in the right direction. However, the main experimental results all use global state, and the local-observation results are described only briefly. Given that decentralized MARL is often motivated by settings where global state is *not* available, this tension deserves more discussion.
-
-- **Learning curves are shown without quantitative summary statistics (final mean/std of reward and cost at convergence).** Figures 1, 3, and 4 show smoothed curves over 5 trials, which is helpful for visualizing learning dynamics, but lacking tabular final-performance numbers makes it harder to assess the significance of observed differences.
+- **Statistical rigor of experiments:** Results are averaged over only five independent trials per task. The learning curves (Figure 1) are shown without confidence intervals, standard deviation bands, or significance tests. With only five seeds, observed differences (e.g., DPDAC-ER outperforming MASAC-Lag in Formation) may not be reliable. While 5 trials are common in MARL system papers, the lack of any statistical quantification weakens the reported claims.
+- **Strong observability assumption via permuted observations:** The algorithmic derivation in Section 3 relies on each agent computing log(π_{[θ_{i,t}]}(a_t|s_t)) using permuted observations (o_i(M s_t) with m_i=j). This requires that the observation function o_i is bijective and that the agent can reorder observations arbitrarily — effectively each agent needs the full global state (in permuted form). The paper acknowledges this through a local-observation ablation (relegated to the appendix), but the main results all use this assumption, which constrains the decentralization claim.
+- **Bias in the off-policy dual variable update:** The practical dual variable loss (Equation 15) samples (s_t, a_t) from the replay buffer rather than from the current policy and initial state distribution ρ as required by the theoretical update (Equation 8). This introduces a distribution mismatch whose effect on constraint satisfaction is not analyzed.
 
 ### Trivial
-
-- None.
+None.
 
 ## Nice-to-Haves
-
-- Adding a comparison with an adapted version of Lu et al. or Ying et al. (e.g., using a Gaussian policy to handle continuous actions) would directly address the most significant gap.
-- A more complex environment (e.g., Safe Multi-Agent MuJoCo or a task with >10 agents) would strengthen the scalability and continuous-space claims.
-- Including a table of final reward/cost means and standard deviations across seeds would complement the learning curves.
+- A direct comparison between the on-policy linear-critic version and the off-policy NN version on a simple continuous task would help bridge the theory-practice gap.
+- A visualization of learned trajectories (e.g., in the Aggregation task) showing qualitative safety constraint satisfaction would improve interpretability.
+- A plot of λ_i over training for each agent would verify whether the consensus update drives dual variables to a common value (as assumed in theory).
 
 ## Removed Points
-
-- **"The paper claims that Lu et al. 'may not be preferred in privacy-sensitive applications...' but these are arguments, not empirical evidence."** — This is kept as it is a substantive criticism about missing baselines. However, I note that the paper does provide *some* justification: it explicitly states Lu et al. uses vanilla policy gradient which is limited in high-dimensional spaces, a recognized limitation. This does not fully excuse the omission but is more than the critic acknowledges.
-
-- **Weakness about "algorithms usually assume the availability of the global state due to the coupled state transition function" being a strong requirement.** — The paper acknowledges this and includes a local-observation ablation. I moved it from a full weakness to a minor point above.
-
-- **Strength Finder's claimed strength about "practical off-policy algorithm derived from theory and tested in continuous spaces"** — Kept, as it is specific and accurate.
-
-- **Strength Finder's claim about "experimental evaluation includes three tasks with ablations"** — Kept as it is factual.
-
-- **Formatting nitpicks, missing appendix references** — Removed per hard rules (parser issues / appendix present in original).
-
-- **Criticism that convergence results are "overclaimed"** — The abstract says "An on-policy decentralized primal-dual actor-critic algorithm is then proposed... Asymptotic convergence is proven" — this correctly attributes convergence to the *on-policy* algorithm. Section 5 explicitly acknowledges the gap. The criticism is weakened to a minor point above.
+These points are flagged to be removed; treat them with caution.
+- **Criticism that conclusion overstates safety claims ("policy sharing provably preserves both optimality and safety"):** The paper's Theorem 1 *does* prove this claim — it shows there exists an optimal joint policy composed of shared observation-based policies that satisfies J^c(π_o^*) = J^c(π^*) ≤ b. The conclusion's statement is accurate; the criticism about Proposition 1 misreads the paper.
+- **Criticism about missing appendix / proofs deferred to appendix:** These are parser artifacts; the original submission contains them.
+- **Criticism about formatting/style nitpicks and typos:** These are parser artifacts, not author errors.
+- **Strength Finder claim about "comprehensive experimental evaluation against strong baselines":** This conflicts with the verified major weakness about missing decentralized safe baselines. The baselines that *are* included are reasonable, but the evaluation is not "comprehensive" given the omission of the most directly relevant methods. This strength is downgraded to reflect the gap.
+- **Strength Finder generic phrasing about "important problem" and generic praise:** Removed as superficial.
 
 ## Novel Insights
-
 None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. Add at least one comparison with a decentralized safe MARL method — even an adapted version of Lu et al. (2021) or Ying et al. (2023b) with a Gaussian policy for continuous actions. If adaptation is infeasible, state this clearly and justify with a simple synthetic baseline (e.g., decentralized IPD without consensus).
-2. Include a table of final reward and cost means/standard deviations across seeds at convergence for all algorithms and ablations.
-3. Add one environment with higher-dimensional dynamics or more agents (20+) to substantiate the continuous-space scalability claim. If space is constrained, move one MAPE task to the appendix and promote the 3D Formation result.
-4. Clarify early in the paper that the convergence guarantees apply to the on-policy linear variant and that the practical neural-based algorithm is a heuristic extension without formal guarantees — this would prevent any perception of overclaiming.
+- **Add experimental comparison with Lu et al. (2021) and/or Ying et al. (2023b):** Even if these methods were designed for discrete action spaces, adapting them to continuous domains (e.g., by using Gaussian policies with a baseline or discretizing actions in a simple task) would substantially strengthen the paper's applied claim. If adaptation is genuinely infeasible, provide a clear experimental justification.
+- **Bridge the theory-practice gap by running the on-policy linear-critic algorithm on a simple continuous control task:** This would validate that the theory translates to practice and provide a comparison point for the NN-based version.
+- **Increase the number of trials (to at least 10) and report confidence intervals or interquartile ranges:** This is a standard expectation for empirical MARL papers.
+- **Quantify the impact of the global-observation assumption** by comparing the full method against a version with truly local observations (each agent only sees its own position and neighbors), with results in the main paper rather than the appendix.
 
 ## Score and Decision
 
 ### Calibration Anchors
+The following anchors were retrieved and compared:
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tmqOhBC4a5.md` | 7.50 | HASAC paper: much stronger empirical evaluation across 6 benchmarks with diverse environments. The current paper has narrower experiments. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/stUKwWBuBm.md` | 8.00 | Strong theory-driven MARL paper with novel equilibrium concept. The current paper is more applied but has a clearer practical algorithm. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/KD5nJUgeW4.md` | 7.00 | Divergence-regularized POSG solver with strong theory. The current paper has less general theory but more practical validation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1X1R7P6yzt.md` | 6.67 | CBF-based safe MARL with distributed guarantees. Similar in applying theory to practice, but evaluated on more diverse environments. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/oQUtBLM8Bo.md` | 4.67 | EFMARL (safe MARL, rejected): similar missing-baseline issue and limited experiments. Current paper has stronger theory and cleaner ablations, justifying a moderately higher score. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/G0uhaIXmFw.md` | 4.75 | Low-switching primal-dual (single-agent, rejected): theory-only with minimal empirical validation. Current paper has experiments and a practical algorithm, making it stronger. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tUiYbVqcuQ.md` | 3.00 | A2FC (rejected): single environment, missing baselines, weak contributions. The current paper is substantially stronger in theory, method, and evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/XWfjugkXzN.md` | 1.67 | Very weak paper with unclear contribution. Far below the current paper. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tUiYbVqcuQ.md` (A2FC) | 3.00 | Much weaker: no theory, one simple environment, no meaningful baselines. The present paper has substantially more rigorous theory and algorithmic design. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Xj6j48QIB3.md` (Mixed Hierarchical Oracle) | 3.67 | Weaker: unclear methodology, no theory. The present paper has clear theoretical contributions and better-structured experiments. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/oQUtBLM8Bo.md` (EFMARL, Distributed Epigraph) | 4.67 | Comparable in structure (safe MARL, some theory, experiments on particle envs), but EFMARL has more serious theoretical errors and less rigorous convergence analysis. The present paper has stronger theory. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/G0uhaIXmFw.md` (Low-Switching Primal-Dual) | 4.75 | Comparable: both have theory with a gap to practice. The present paper adds experiments, which this anchor lacks entirely, but also has the missing-baseline issue this anchor doesn't face. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/sW95puhphh.md` (Anticipation Sharing) | 5.00 | Comparable: both address decentralized MARL with solid but not flawless experiments. The present paper has more substantial theory. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/8eNLKk5by4.md` (Strong Regret CPD-PO) | 6.00 | Stronger in theoretical contribution: achieves optimal bounds and has clean theory-practice alignment. The present paper has broader scope (both theory and practice) but less polished theory. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1X1R7P6yzt.md` (DGPPO) | 6.67 | Stronger in empirical validation: more environments, more baselines, better grounding of theory in practice. The present paper's theory is more traditional (SA-based convergence) but the empirical evaluation is weaker. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/stUKwWBuBm.md` (Tractable MARL) | 8.00 | Substantially stronger: novel conceptual contribution, rigorous theory, clear writing, well-executed validation. Not directly comparable in topic but clearly superior in execution. |
 
-The paper makes a credible theoretical contribution (Theorem 1, convergence analysis) and proposes a well-structured practical algorithm. The experiments are clean but insufficient to fully validate the central claim of *decentralized* safe MARL effectiveness, primarily due to the absence of comparison with existing decentralized safe MARL methods and the limitation to one environment. Relative to the calibration anchors, the paper sits between papers that were rejected for similar empirical gaps (~4.6–4.8) and papers with stronger empirical validation (~6.7+). The theoretical component lifts it above purely empirical weak papers, but the missing baselines hold it back from a higher score.
+The paper makes genuine theoretical contributions (homogeneous constrained MG characterization, convergence analysis for decentralized primal-dual) and the algorithm design is coherent. However, the experimental evaluation has significant gaps — most critically the absence of comparison with existing decentralized safe MARL methods — that prevent the practical contribution from being convincingly demonstrated. Relative to the anchors, this paper sits above papers with no theory or trivial experiments but below papers with tight theory-practice integration and comprehensive evaluation.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

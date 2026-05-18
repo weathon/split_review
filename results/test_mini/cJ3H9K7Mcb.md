@@ -1,87 +1,85 @@
-Now I have all the information needed to synthesize the review. Let me produce the final output.
+Now I'll produce the final consolidated review.
 
 ## Summary
 
-This paper studies how OOD generalization performance changes across different *degrees* of the same type of distribution shift (e.g., varying noise intensity, rotation angle, or resolution). Through extensive experiments on NoisyMNIST, RotatedMNIST, LowLightCIFAR10, NoisyImageNet15, and LR-ImageNet15, with CNNs, ResNets, EfficientNets, ViTs, and over 20 DG algorithms, the authors document three main findings: (1) models that perform best under a moderate shift degree can degrade sharply under a slightly higher degree; (2) training on strongly shifted data guarantees robustness to milder shifts for some tasks (Gaussian noise) but hurts for others (rotation); (3) CLIP models adapted via linear probing can be disproportionately brittle to downstream distribution shifts that are rare in the pretraining data.
+This paper identifies an underexplored dimension in OOD generalization evaluation: the *degree* (severity) of distribution shifts, not just their type. Through controlled experiments on MNIST, CIFAR-10, and ImageNet subsets with synthetic shifts (noise, rotation, brightness+shot noise, resolution reduction), the paper demonstrates three main findings: (1) models that perform best under mild shifts can suffer drastic accuracy drops under slightly stronger shifts of the same type; (2) training on strong shifts does not uniformly guarantee robustness to milder shifts — the pattern is shift-type-dependent; and (3) CLIP models adapted via linear probing can be extremely brittle to downstream distribution shifts rarely seen during pre-training. The paper's core message — that single-severity evaluations can be misleading — is a valid and important caution for the OOD generalization community.
 
 ## Strengths
 
-- **Systematic documentation of a largely overlooked dimension.** The paper correctly identifies that most OOD benchmarks fix the degree of distribution shift, and it provides a thorough empirical mapping of how performance varies across degrees for multiple shift types, architectures, and algorithms. This breadth (5 datasets, 4+ architectures, 20+ DG algorithms) makes the findings unlikely to be artifacts of a single setup.
+1. **Novel and practically important problem framing.** The paper identifies that OOD benchmarks largely ignore the *degree* of distribution shift, evaluating only at fixed severities. Showing that rankings reverse and performance collapses across adjacent shift degrees (e.g., Table 1: VREx drops 73.1% from D₄ to D₆) is a concrete demonstration that this oversight can produce misleading conclusions. This is a genuinely underexplored dimension in the OOD literature.
 
-- **Non-trivial asymmetry between shift types (§4.3).** The finding that training on strong Gaussian noise *does* guarantee robustness to milder noise (NoisyMNIST), while training on strong rotations *harms* performance on mild rotations (RotatedMNIST), is the paper's most genuinely interesting result. This task-dependent asymmetry is not trivial and provides concrete evidence that conclusions about "robustness to degrees" cannot be drawn from a single shift type.
+2. **Clean experimental design that directly probes extrapolation.** Training models on clean + mild shift data (D₀∪D₁) and evaluating across a range of stronger shifts (D₂–D₁₀) is a well-motivated protocol that mirrors realistic deployment scenarios where strong shifts are rare. The pool of 20+ DG algorithms × multiple initializations provides a thorough search over models.
 
-- **Quantification of abrupt performance cliffs.** Table 1 reports specific relative drops (e.g., VREx on CNN: 50.3% from D₄ to D₅, 73.1% from D₄ to D₆) that give concrete, actionable numbers to the claim that "slightly higher degrees can cause severe degradation." This is more informative than a qualitative statement.
+3. **Non-obvious divergent patterns across shift types.** Section 4.3's finding that training on strong shifts helps for noise (NoisyMNIST) but harms for rotation (RotatedMNIST) and has mixed effects for LowLightCIFAR10 is a nuanced and non-trivial result. It concretely demonstrates that the relationship between training-severity and test-severity is task-dependent — a valuable caution for practitioners.
 
-- **GradCAM analysis (Fig. 4) provides mechanistic insight.** Showing that ERM relies on local features (easily corrupted by noise) while CAD relies on global structures gives a clear intuitive explanation for why different models behave differently across degrees. This connects the empirical patterns to a concrete learning phenomenon (spurious correlations breaking at different thresholds).
+4. **GradCAM visualization linking mechanistic explanation to observed brittleness.** The comparison of ERM (local features) vs. CAD (global structures) on NoisyMNIST (Figure 4 in paper) provides interpretable evidence for *why* certain models collapse at specific shift degrees, going beyond pure accuracy reporting.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The "brittleness" claim is over-framed relative to the evidence.** The paper's central rhetorical framing — that robustness is "surprisingly brittle" across degrees — is weakened by the fact that many of the observed drops are actually expected given known properties of deep networks. The GradCAM analysis itself explains why: models rely on different features, and those features break at different noise thresholds. The paper acknowledges this (lines 215-218) but still frames it as a surprising brittleness finding. The key question — *how much of this is just feature-sensitivity rephrased?* — is not addressed. The paper would be stronger if it explicitly scoped its contribution as "quantifying the rate at which feature-based robustness breaks down" rather than claiming brittleness as a novel discovery.
+1. **Pre-trained model experiments are limited to linear probing, which weakens the general claim about CLIP sensitivity.** Section 5 adapts CLIP and ImageNet-pretrained models solely via linear probing. The paper's abstract states that "large-scale pre-trained models, such as CLIP, are sensitive to even minute distribution shifts of novel downstream tasks" without qualifying the adaptation method. Since the paper's own (commented-out) preliminary results indicate that fine-tuning significantly improves robustness on NoisyMNIST, the observed brittleness may be partly an artifact of linear probing rather than a property of the representations themselves. The core Section 4 claims about brittleness do not depend on this — but the CLIP-specific narrative (abstract, Section 5.2, conclusion) overstates what the evidence supports. The authors should either add fine-tuning experiments or explicitly re-scope the CLIP claims to "when adapted via linear probing."
 
-- **The best-at-each-degree analysis (Fig. 2 left) is presented as evidence of a problem with individual models, but it primarily reflects model selection.** The paper selects the top-5 models at each test degree from a pool trained on D₀∪D₁ and shows the selected models perform poorly at other degrees. While this is not "trivially expected" (as the Harsh Critic claimed — see verification above), it is fundamentally an observation about *which models from a diverse pool get selected at each degree*, not about individual model behavior. The paper's stronger evidence — Table 1 and Fig. 2 (right) tracking individual algorithms — is presented alongside this analysis but not sufficiently separated from it. The paper should explicitly distinguish the model-selection finding from the individual-model brittleness finding.
-
-- **The CLIP section (§5) is incomplete and over-interpreted.** The paper shows that CLIP + linear probing on clean data is brittle to Gaussian noise, which the paper itself hypothesizes is because "Gaussian noise is very rare in the training data of CLIP" (line 295). This is a known limitation of linear probing on OOD data, not a specific insight about CLIP. The paper mentions (in a comment block) that fine-tuning significantly outperforms, but these results are not presented. Without fine-tuning comparisons, the section only confirms that linear probing + pretraining distribution mismatch → poor OOD performance, which is well-documented (Kumar et al., 2022). The paper's claim that "pre-trained representations are sensitive to novel downstream distribution shifts" is too broad given CLIP does fine on rotation shifts (Fig. 5, second panel) and ImageNet-pretrained models outperform CLIP on both NoisyImageNet15 and LR-ImageNet15.
+2. **No limitations or caveats section.** The paper draws broad recommendations ("one should be more cautious when drawing conclusions from evaluations under a limited range of degrees") but never discusses the synthetic nature of the shifts tested, the limited number of tasks, or the linear-probing-only limitation for pretrained models. A limitations paragraph is essential for a paper making normative recommendations.
 
 ### Minor
 
-- **No quantitative summary of ranking changes across degrees.** The paper claims that "evaluations under limited degrees can lead to wrong conclusions" about algorithm rankings, but it never quantifies this. Computing rank correlations (e.g., Kendall's τ) between algorithm rankings at D₄ vs. D₅, D₄ vs. D₁₀, etc., would make this claim concrete and actionable. Visual inspection of curves in Fig. 2 (right) is insufficient.
+1. **Experiments use only synthetic shifts, limiting generality of broad conclusions.** The paper tests Gaussian noise, rotation, brightness+shot noise, and resolution reduction — all synthetic. The paper's title ("Robustness May be More Brittle than We Think") and conclusion imply a general phenomenon, but whether the observed brittleness patterns hold for natural distribution shifts (e.g., domain shifts in medical imaging, spurious correlations in the wild, natural adversarial examples) remains untested. This is not a fatal flaw — the paper is a valid proof-of-concept — but the generality of the conclusions is narrower than suggested.
 
-- **The GradCAM analysis covers only two algorithms (ERM, CAD) on one dataset (NoisyMNIST).** This limits how general the mechanistic explanation is. The paper could strengthen this with a similar analysis on RotatedMNIST or LowLightCIFAR10.
+2. **CLIP experiments on MNIST suffer from an extreme domain gap.** CLIP is pre-trained on natural images; evaluating it on grayscale digits with Gaussian noise introduces a double mismatch (domain + corruption). The observed brittleness may partly reflect this mismatch rather than a general property of pre-trained representations. The NoisyImageNet15 experiments partially address this concern but are still synthetic. A clear acknowledgment of this confound would strengthen the paper.
 
-- **The asymmetry finding (§4.3) is under-analyzed.** Why does training on strong noise transfer well to milder noise while training on strong rotation does not? The paper documents the phenomenon but offers no hypothesis beyond showing GradCAM on NoisyMNIST. A simple additional experiment — e.g., measuring feature overlap between models trained on different training sets — could provide valuable insight.
+3. **"Further adapting to the shift improves robustness" rests on limited evidence.** The claim at line 306 that "further adapting the pre-trained models to downstream distribution shifts can sometimes significantly improve their robustness" is supported by one comparison (IN₀ vs. IN₁ on NoisyMNIST). The word "sometimes" appropriately hedges, but the evidence is thin.
 
 ### Trivial
 
-- None of substance that survived filtering.
+1. **Architecture details for the 4-layer CNN are missing** (number of filters, kernel sizes, stride, pooling). The paper reports only "roughly 0.37M parameters." While not critical for the paper's message, this hinders exact reproducibility.
+
+2. **No discussion of how ordinal degrees map to real-world severity.** The paper uses integers to represent shift degrees (e.g., D₀–D₁₀) and reports the mapping (e.g., noise std linearly spaced 0–0.8) but does not discuss how practitioners could calibrate such degrees for real-world tasks. This limits the paper's actionable guidance.
 
 ## Nice-to-Haves
 
-- Including Kendall rank correlation or similar quantitative stability metric for algorithm rankings across degrees would make the ranking-instability claim concrete rather than visual.
-- Full fine-tuning results for CLIP models would complete §5 and allow a proper comparison to the linear probing results.
-- A simple experiment measuring representation similarity (e.g., CKA) between models trained on different training sets for noise vs. rotation could help explain why the asymmetry in §4.3 occurs.
+- **Mechanistic analysis of why different shift types yield different patterns.** Section 4.3 reports the contrasting behavior between noise (training on strong shifts helps) and rotation (training on strong shifts harms) but offers no deeper explanation beyond a single GradCAM example. A systematic analysis (e.g., by perturbing spatial frequencies or measuring feature invariance) would turn an observation into an insight.
+- **Evaluation on a realistic multi-degree benchmark** (e.g., varying degrees of spurious correlation in Waterbirds, or natural severity levels from ImageNet-C broken out by individual severity level) would substantially strengthen claims about generality.
+- **Testing whether training on multiple degrees simultaneously reduces brittleness** would be a natural extension directly aligned with the paper's message.
 
 ## Removed Points
 
-- **"Selection-bias flaw invalidates the central analysis" (Harsh Critic #1):** This criticism claimed the analysis is trivially expected. However, the models were all trained on the *same* data (D₀∪D₁), so the finding that different models from a fixed pool are best at different degrees is not trivially expected. It reveals genuine heterogeneity in how models trained on identical data generalize across degrees. The criticism is factually inaccurate about the setup. (The point about framing being over-claimed is retained in the Major weaknesses above, but the "invalid" label is removed.)
-
-- **"§4.3 conflates distribution shift during training with evaluation brittleness" (Harsh Critic #2):** This reframes the paper's empirical observation as a known phenomenon without identifying a specific error in the paper's claims. The paper is transparent about what it does (train on different domain sets, measure performance curves) and the finding (task-dependent asymmetry) is valid regardless of how one labels it. The paper does not claim this is a "failure of generalization from high to low" in a fundamental theoretical sense — it simply documents the empirical pattern. Removed as a strawman.
-
-- **"CLIP findings are already known" (Harsh Critic #3):** The paper quantifies a specific comparison (rate of degradation of linear-probed CLIP vs. randomly initialized models across degrees) that goes beyond the generic claim that "CLIP fails on noise." The paper also acknowledges the likely explanation (Gaussian noise rarity). The specific measurement is a contribution even if the high-level intuition is familiar. Demoted from fatal to minor/incomplete.
-
-- **Several of the Strength Finder's generic strengths:** "Clear framing of the problem" and "Systematic collection of experiments" are retained but reframed. Generic praise removed.
+- *Criticism that Figure 1's idealized scenario "never tests" the exact pattern shown* — The paper demonstrates ranking reversals (Table 1), which is exactly the concern illustrated by the schematic. The figure is an abstract motivation, not a testable prediction.
+- *Criticism that the paper doesn't quantify how ordinals map to actual severity* — The paper provides the mapping explicitly (e.g., noise std linearly spaced 0–0.8, rotation 0–80 degrees). The ordinal convention is a design choice, not an omission.
+- *Criticism about selecting top-5 models from a pool trained on D₀∪D₁ not being "fully justified"* — This is the deliberate experimental design: training on clean+mild data and testing extrapolation is the paper's central probe. The methodology is sound and clearly motivated.
+- *Several formatting/style nitpicks and missing appendix claims* — These are parser artifacts or out of scope for evaluation.
+- *"CLIP results may be an artifact of domain mismatch" was flagged as a major omission* — The paper explicitly acknowledges this hypothesis (line 295: "Gaussian noise is very rare in the training data of CLIP") and partially addresses it via NoisyImageNet15 experiments. Retained as Minor weakness #2 with softened language.
+- *Strength Finder claimed strengths that are generic or conflict with verified weaknesses* — Some strengths were oversold and have been removed.
 
 ## Novel Insights
 
-The most interesting cross-cutting observation is the task-dependent asymmetry: training on strong Gaussian noise reliably improves robustness to all milder noise levels, but training on strong rotations actively *harms* performance on mild rotations compared to training on clean data alone. This reveals that "degree robustness" is not a single-axis property — it depends on whether the shift preserves or destroys hierarchical feature structure. Noise randomly corrupts pixels and is additive in feature space, so exposure to strong noise teaches robustness at all levels. Rotation, by contrast, preserves pixel-level structure but changes spatial relationships — training on extreme rotations may reallocate representational capacity to rotation-invariant features at the expense of features useful for mild rotations. This insight, while not fully developed in the paper, suggests that the field needs a taxonomy of shift types based not on their source (noise vs. rotation) but on whether increasing degree introduces new features or destroys existing ones.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Remove or substantially reframe the best-at-each-degree analysis (Fig. 2 left), clarifying that it shows *model selection across degrees from a fixed pool* rather than individual-model brittleness. The individual-model evidence (Table 1, Fig. 2 right) is cleaner.
-
-2. Add a quantitative ranking-stability metric (Kendall's τ or rank overlap) across degree pairs to make the "evaluation bias" claim precise.
-
-3. Either present the CLIP fine-tuning results or reframe §5 as "a cautionary case study on linear probing when the pretraining data does not cover the downstream shift" rather than as evidence of brittleness in pre-trained representations.
-
-4. Add a brief analysis of why noise vs. rotation behave differently in §4.3 — even a simple representational similarity (CKA) measurement would substantially strengthen the paper's most interesting finding.
-
-5. Clarify in the abstract and conclusion that the contribution is primarily empirical and cautionary ("evaluate over multiple degrees"), not a claim of surprising brittleness as a new phenomenon.
+1. Add fine-tuning experiments (or at minimum linear-probing + fine-tuning comparison on one dataset) for the pre-trained model section, and re-scope the abstract/conclusion claims to match what is tested.
+2. Add a limitations paragraph explicitly discussing: (a) all shifts tested are synthetic, (b) pre-trained models are evaluated via linear probing only, (c) the small number of tasks, and (d) the ordinal degree convention.
+3. Strengthen the "further adaptation improves robustness" claim by either providing evidence across more shift types or removing the general statement.
+4. Include architecture details for the 4-layer CNN (filter sizes, kernel sizes, stride, pooling).
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration Anchors (all from the human-review corpus):**
 
-| Anchor | Avg Score | Comparison to current paper |
-|--------|-----------|----------------------------|
-| OOD-Chameleon (3.75, Reject) | 3.75 | Weaker contribution — method is poorly motivated and experiments are thin. Current paper is more solid empirically. |
-| Expecting The Unexpected / BROAD (4.25, Reject) | 4.25 | Similar type of contribution (empirical benchmark/evaluation study). BROAD has a new dataset; current paper has more nuanced findings across degrees. Comparable quality. |
-| Early Period of Training (5.00, Reject) | 5.00 | Both empirical studies, comparable in scope. Early Period paper has a proposed method (gradual unfreezing) while current paper is purely descriptive. Current paper has broader experimental coverage. |
-| Feature Accompaniment (5.67, Reject) | 5.67 | Has both theory and experiments, but the theory-experiment gap is a weakness. Current paper lacks theory but has cleaner empirical narrative. |
-| Deep NNs Extrapolate Predictably (7.00, Accept) | 7.00 | Much stronger — novel finding with theory + extensive experiments. Current paper is less novel and lacks theoretical grounding. |
-| ImageNet-OOD (6.50, Accept) | 6.50 | Clear tangible contribution (dataset) with extensive analysis. Current paper lacks a comparable concrete deliverable. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/KbetDM33YG.md` | 8.00 | **(Higher)** A well-executed GNN evaluation paper with a novel problem, thorough experiments across real-world shifts, and clear methodology. This paper is similarly novel in problem formulation but has narrower empirical scope (synthetic shifts only). |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ljwoQ3cvQh.md` | 7.00 | **(Higher)** Broad empirical study (8 datasets, multiple architectures) with theoretical grounding. This paper has a more novel question but less comprehensive evaluation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/w0jk3L3IjV.md` | 5.67 | **(Comparable)** Both identify an underexplored problem in OOD and run clean experiments. This paper has a more novel problem framing but less methodological contribution. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/oKglS1cFdb.md` | 5.67 | **(Comparable)** Both are empirical OOD papers with clear experiments but limited scope. This paper's question (shift degree) is more novel. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/qDFpNXnuYK.md` | 5.00 | **(Comparable)** Empirical OOD study with some overclaiming and limited baselines. This paper is similarly empirically grounded, slightly cleaner in execution. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/8efAVon0eD.md` | 3.75 | **(Lower)** Methodological concerns and limited experiments. This paper's experiments are cleaner and its claims better supported. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/KK29oh8jZs.md` | 3.00 | **(Lower)** Simple synthetic datasets without clear need; this paper has a more important research question and better-designed experiments. |
 
-The paper is a solid empirical study documenting an underexplored dimension of OOD evaluation. Its findings are useful but largely confirmatory of what one would expect given known properties of deep networks (feature fragility, pretraining coverage). The asymmetry finding (noise vs. rotation) is genuinely interesting but under-analyzed. The paper would benefit from sharper framing and a quantitative summary of ranking changes. Relative to the calibration anchors, it sits between the 4-5 range — better executed than OOD-Chameleon but less novel than Feature Accompaniment or Deep NNs Extrapolate Predictably.
+The paper makes a real contribution by identifying an underexplored dimension in OOD evaluation and providing clean empirical demonstrations. Its main limitations are (1) reliance on synthetic shifts, (2) incomplete support for the CLIP-related claims due to linear-probing-only evaluation, and (3) the absence of a limitations discussion. These are addressable weaknesses, not fatal flaws. Relative to the calibration anchors, the paper sits around the upper end of the mid-range — comparable to ~5.5–6.0 papers but held back by overreach in the CLIP narrative.
 
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

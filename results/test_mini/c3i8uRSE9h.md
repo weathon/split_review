@@ -1,16 +1,18 @@
-Now let me write the consolidated final review.
+Now let me write the consolidated review.
 
 ## Summary
 
-This paper proposes a fast constrained-sampling algorithm for pre-trained diffusion models that replaces expensive backpropagation through the denoiser with a numerical finite-difference approximation of a Newton-style update direction. The core idea—computing \(\vh \approx \frac{\epsilon}{\delta}[\hat{\vx}_0(\vx_t+\delta\ve)-\hat{\vx}_0(\vx_t)]\) via two forward passes instead of backprop—is clearly described and practically motivated. On ImageNet free-form inpainting, the method achieves the best PSNR (22.20) and FID (30.45) among zero-shot approaches while reducing inference time to ~2 minutes (4–15× faster than PSLD, LDPS, P2L). The paper also introduces a layer-inference task as a potential application.
+This paper proposes a fast constrained sampling algorithm for pre-trained diffusion models (Stable Diffusion 1.5) that replaces the expensive backpropagation through the denoiser with a numerical finite-difference approximation requiring only two forward passes. The key idea is to compute the update direction \(\vh \approx \frac{1}{\delta}[\hat{\vx}_0(\vx_t+\delta\ve) - \hat{\vx}_0(\vx_t)]\) instead of the backpropagated gradient \(-\mJ^T\ve\). The paper reports 2-minute inference times for ImageNet inpainting and super-resolution (4–15× faster than prior sampling-based approaches) and shows competitive quantitative results on inpainting, along with a novel layer-inference downstream task.
 
 ## Strengths
 
-- **Practical algorithmic innovation with clear speed benefits**: Replacing backprop through the denoiser with a finite-difference approximation (two forward passes) is a concrete, easy-to-implement idea that directly reduces computation and memory. Table 1 shows 4–15× speedup over existing zero-shot methods (2 min vs. 8–30 min) while achieving the best inpainting FID (30.45) and PSNR (22.20) among them. This is a genuine practical contribution that could make diffusion-based constrained sampling more accessible.
+- **Genuinely novel gradient approximation that avoids backpropagation through the denoiser.** Section 3 derives a numerical estimate of the Jacobian-vector product \(\mJ\ve\) using two forward passes. This is a concrete and useful contribution — it demonstrably saves computation (stated as 2×) and memory (2.5×) compared to backpropagation-based solvers like DPS/PSLD, and the improvement applies to any diffusion-based inverse problem solver that uses gradient guidance.
 
-- **Empirical demonstration of Jacobian asymmetry in Stable Diffusion**: Figure 2 systematically plots pairs of Jacobian entries \((\partial\hat{\vx}_0^{k,l}/\partial\vx_t^{i,j}, \partial\hat{\vx}_0^{i,j}/\partial\vx_t^{k,l})\) across different timesteps, showing clear deviation from symmetry. This provides direct empirical evidence motivating why the proposed update \(\vh = -\epsilon \mJ \ve\) (which differs from the gradient \(\vh = -\mJ^T \ve\) when \(\mJ \neq \mJ^T\)) can produce qualitatively different—and for inpainting, better—results.
+- **Significant empirical speedup with competitive inpainting quality.** Table 1 reports 2 min inference time vs. 8–30 min for competing zero-shot methods (P2L, LDPS, PSLD). On inpainting, the method achieves the best PSNR (22.20 vs. 21.99 for P2L) and best FID (30.45 vs. 32.82 for P2L), demonstrating that the speedup does not come at a catastrophic quality cost.
 
-- **Clear and simple algorithm**: Algorithm 1 is straightforward: compute the error \(\ve\), perturb \(\vx_t\) by \(\delta\ve\), run two forward passes, take the difference, and update. The method is easy to implement on top of any pre-trained diffusion model without architectural changes.
+- **Identification of Jacobian asymmetry as a source of different behavior.** Section 3.1 empirically verifies that the denoiser Jacobian is not symmetric (Figure 2), and Section 3.2 shows (Section 3.2, Figure 3) that the proposed update direction \(-\mJ\ve\) propagates textures differently from the standard \(-\mJ^T\ve\). This provides a concrete mechanistic explanation for why the two updates produce visually different results in inpainting.
+
+- **Enables a novel downstream task.** The layer inference application (Section 4.2), which decomposes an image into two layers and a blending mask, would be computationally prohibitive with prior sampling-based methods that take 8–30 minutes per run.
 
 ## Weaknesses
 
@@ -20,71 +22,72 @@ None.
 
 ### Major
 
-- **Central claim about tuned models is unsubstantiated**: The abstract states the method "produces results comparable even to the state-of-the-art *tuned* models." Yet Table 1 compares exclusively to other zero-shot sampling methods (P2L, LDPS, PSLD). The only tuned-model comparison is a single qualitative example (Figure 1, SD 1.5-inpainting fine-tuned, 4 s). There is no quantitative evaluation (PSNR, LPIPS, FID) against any fine-tuned model on the 1000-image test set. This claim is central to the paper's positioning and is not supported by the experimental evidence presented.
+- **Unsupported claim of being "comparable to tuned models."** The abstract states the method "produces results comparable even to the state-of-the-art *tuned* models," yet no quantitative comparison against any tuned model is performed on the ImageNet benchmark. Moreover, the paper's own qualitative example (Figure 1) shows a fine-tuned inpainting model that is both qualitatively better (no visible seams) *and* faster (4s vs. 17s) than the proposed method. This directly undermines the claimed motivation. The paper should either (a) include tuned model baselines in Table 1, or (b) remove this claim.
 
-- **The Gauss-Newton derivation is confusing and unnecessary**: Section 3 introduces an undefined target \(\vx_t'\) and attempts a Gauss-Newton-style motivation that does not resolve into a clear optimization objective. The critical step—setting \(\vg = -\epsilon\ve\)—is asserted as an assumption rather than derived. The resulting update \(\vh = -\epsilon \mJ \ve\) is ultimately a heuristic, which is fine, but the paper's theoretical framing pretends to more rigor than it delivers. The actual contribution (the finite-difference approximation in Eqs. 99–101) is clean and could be motivated more directly as a directional-derivative approximation without the Gauss-Newton apparatus.
+- **The theoretical framing as "Newton steps" is overclaimed and the derivation is heuristic.** Section 3's derivation introduces an undefined target \(\vx_t'\) and arbitrarily sets \(\vg = -\epsilon\ve\) without optimization justification, yielding \(\vh = -\epsilon\mJ\ve\). The connection to Newton's method is not substantiated — a Newton step would involve the Hessian, not the Jacobian. The paper would be better served by presenting the update as a motivated heuristic (which the empirical results can stand on) rather than claiming a principled optimization foundation that the derivation does not provide.
+
+- **Super-resolution results are consistently worse than all baselines.** Table 1 shows the proposed method underperforms P2L, LDPS, and PSLD on all three metrics for ×8 super-resolution (PSNR 22.29 vs. 23.17–23.38; LPIPS 0.428 vs. 0.386–0.475; FID 73.05 vs. 51.81–61.09). The paper acknowledges this briefly ("superresolution struggles to improve significantly") but does not adequately discuss why the method fails on SR, which limits the generality of the contribution.
 
 ### Minor
 
-- **No ablation study of design choices**: The algorithm includes hyperparameters \(\delta, K, \lambda\), plus warm restarts and gradient perturbations for super-resolution. Neither their values nor their sensitivity is reported. Without ablation, it is unclear whether the finite-difference core is responsible for the reported performance, or whether auxiliary components (warm restarts, inner iterations, noise perturbations) dominate. Key hyperparameters such as the number of steps \(s\), inner iterations \(K\), and the finite-difference step \(\delta\) are not specified.
+- **No standard deviations or confidence intervals reported.** Table 1 reports only point estimates for PSNR, LPIPS, and FID over 1000 images. Without measures of variability, it is impossible to assess whether the reported advantages on inpainting (e.g., PSNR 22.20 vs. 21.99, a 0.2 dB gap) are statistically meaningful.
 
-- **Baseline comparisons are not directly controlled**: The paper states it uses "results from [cite] since there is no code available to replicate their method." While this is common practice, it means comparisons are on potentially different hardware, random seeds, image subsets, and hyperparameter settings. The large speed differences (2 min vs. 8–30 min) are unlikely to reverse from these factors, but the quality comparisons (PSNR, LPIPS, FID) could be affected.
+- **Insufficient reproducibility details.** Algorithm 1 lists hyperparameters \(K\) (optimization iterations), \(\lambda\) (learning rate), and \(\delta\) (step size) as inputs, but their actual values for the experiments are not specified. The warm restart description is incomplete ("After running Algorithm~1 from t=1000 to t=0, we reset the inferred \(x_0\) by adding the appropriate noise to"). The number of warm restarts, the noise perturbation strength for super-resolution, and the diffusion schedule parameters \(\zeta_t, \kappa_t, \beta_t\) are not given. These details are needed to reproduce the results.
 
-- **"No backpropagation" claim is qualified but could mislead**: For inpainting, the method genuinely avoids backprop through the denoiser by operating in latent space. For super-resolution, the paper acknowledges backpropagating through the decoder to get \(\ve\). The title/abstract says "no expensive backpropagation operations through the model"—the paper does qualify this (line 167: "only require backpropagation through the decoder model, which is significantly less expensive"), but the unqualified framing in the abstract overstates the generality.
-
-- **Layer inference task lacks validation**: Section 4.2 presents this task as an application enabled by the method's speed, but provides only qualitative results with no metrics, baselines, or user study. The claim that it "would have been computationally infeasible to perform with previous sampling-based approaches" is not demonstrated.
+- **Time comparisons are not controlled.** The paper compares inference times against numbers reported in other papers (P2L, LDPS, PSLD), but the hardware and implementation details for those baselines are unknown and potentially unoptimized. The claimed 15× speedup over P2L (30 min → 2 min) is the most dramatic, but speedups over LDPS (8 min → 2 min = 4×) and PSLD (12 min → 2 min = 6×) are more modest.
 
 ### Trivial
 
-None.
+- In the caption of Figure 3 (line 128), "learning rate \(\lambda = 1\)" is specified for a single experiment but the value used for main experiments is not stated in the main text.
 
 ## Nice-to-Haves
 
-- A simpler, self-contained motivation for the update: "We want to move \(\vx_t\) so that \(\hat{\vx}_0\) moves opposite the error direction. To first order, \(\hat{\vx}_0(\vx_t+\Delta) \approx \hat{\vx}_0(\vx_t) + \mJ\Delta\). Setting \(\mJ\Delta = -\epsilon\ve\) gives \(\Delta = -\epsilon\mJ^{-1}\ve\). Since \(\mJ^{-1}\) is unavailable, we approximate \(\mJ\ve\) via finite differences." This is still heuristic but clearer than the current Gauss-Newton framing.
-- Standard deviations or confidence intervals for Table 1 metrics.
+- Adding standard deviations to the metrics in Table 1 would strengthen the quantitative claims.
+- Comparing against a tuned inpainting model on the ImageNet benchmark (e.g., the SD 1.5 inpainting fine-tuned model shown in Figure 1) would either substantiate or clarify the central claim.
+- Reporting the actual parameter values used (\(K, \lambda, \delta\), number of warm restarts, noise perturbation strength) would improve reproducibility.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-1. **Harsh Critic's Point 1, sub-claim that "the step where \(\vg = -\epsilon\ve\) is asserted rather than derived"** — This is correct as stated, but the paper presents it as an explicit design choice ("If we assume that \(\vg=-\epsilon\ve\)") rather than a derivation. The criticism that the derivation is unsound is valid, but the claim that it "undermines the paper's core theoretical framing" overstates the role of this motivation. The core contribution (the finite-difference approximation) does not depend on this derivation being rigorous; it is a stand-alone heuristic that is clearly described.
+- **Criticism that the derivation "is not a valid foundation" so the method should be rejected.** (From Harsh Critic, Critical Issue 1): The heuristic nature of the derivation is correctly identified, but the paper's contribution is empirical, not theoretical. The method can be presented as a motivated heuristic without claiming formal optimization guarantees, and the empirical results are the real basis for evaluation. This is retained as a Major weakness (the overclaimed "Newton step" framing) but the stronger claim that it invalidates the paper is removed.
 
-2. **Harsh Critic's Point 3, the claim that runtime differences "may reflect these uncontrolled factors"** — While baseline comparisons are not re-implemented, the speed differences (2 min vs. 8–30 min) are far too large to be explained by hardware or implementation differences. The quality comparison concern is reasonable, so this point is partially kept in Minor weaknesses above.
+- **Criticism about the paper not defining whether times "include all overhead" or questioning the 15× speedup as "implausible."** (From Harsh Critic, Critical Issue 2): The paper states "approx." times, specifies the GPU used for their method, and reports times from other papers in standard practice. The speedup claim is plausible given that backprop through a large denoising U-Net is far more expensive than two forward passes. Retained as a minor weakness — time comparisons across papers are inherently uncontrolled.
 
-3. **Strength Finder's strength about layer inference** — The layer inference task is presented as a "new task" but lacks any validation. Keeping it as a strength would be misleading; it's at most a potential application. Moved here.
+- **Criticism that layer inference "has no quantitative metrics, no comparison."** (From Harsh Critic, Critical Issue 2): This is acknowledged but the paper explicitly presents it as a "demo" and a "new inference problem" rather than a rigorous benchmark. Retained as a minor observation but not a core weakness.
+
+- **Strength from Strength Finder about "enabling a new downstream task"** — The layer inference task is presented as qualitative results only, with no quantitative evaluation or baseline comparison. The strength is that the task is novel and would be infeasible with prior methods, which is a reasonable claim.
+
+- **Criticism about missing appendix content and hyperparameters.** The parser strips appendices; the hyperparameter values may be present in the original submission. However, the paper's main text indeed does not specify the values, so this is retained as a minor weakness but the "cannot be reproduced" framing is softened.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do surface one useful observation: the disconnect between the paper's attempted theoretical framing (Gauss-Newton with an undefined target) and its actual contribution (a practical finite-difference approximation). A cleaner presentation would drop the Gauss-Newton pretense and directly motivate the update as a directional-derivative approximation motivated by the asymmetry of the denoiser Jacobian.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Tone down or support the tuned-model claim**: Either remove the claim from the abstract, or add a quantitative comparison to a fine-tuned model (e.g., SD inpainting) on the 1000-image test set with PSNR/LPIPS/FID. The single qualitative example does not support the abstract's central claim.
-
-2. **Clean up the derivation**: Drop the Gauss-Newton framing with the undefined \(\vx_t'\). Replace it with a direct motivation: "We want to move \(\vx_t\) so that \(\hat{\vx}_0\) moves opposite the error. To first order, \(\Delta\hat{\vx}_0 \approx \mJ\Delta\vx_t\). Setting \(\mJ\Delta\vx_t = -\epsilon\ve\) gives \(\Delta\vx_t = -\epsilon\mJ^{-1}\ve\), which is unavailable. Instead we approximate \(\mJ\ve\) via a finite-difference directional derivative." This is cleaner and requires no pretense of optimality.
-
-3. **Report all hyperparameters**: Specify \(\delta, K, \lambda, s\), the number and schedule of warm restarts, and the noise perturbation strength for super-resolution. Without these the results cannot be reproduced.
-
-4. **Add an ablation study**: Show the effect of the finite-difference update vs. the gradient update (\(\mJ^T\ve\) vs. \(\mJ\ve\)), the effect of inner iterations \(K\), and the effect of warm restarts. This would isolate whether the core idea is responsible for the gains.
-
-5. **Clarify the "no backpropagation" claim in the abstract**: Qualify it as "no backpropagation through the denoiser" rather than "through the model."
+- Remove or substantially soften the claim about being "comparable to state-of-the-art tuned models" — the evidence does not support it and the paper's own qualitative example contradicts it.
+- Rename the section "Newton steps based on the inverse function" to something more descriptive and less grandiose, e.g., "A backpropagation-free update direction via finite differences."
+- Report standard deviations or confidence intervals for the ImageNet results.
+- Clearly specify the hyperparameter values used for all experiments (\(K, \lambda, \delta\), warm-restart details, noise perturbation schedule).
+- Provide a controlled runtime comparison on identical hardware with the same implementation framework.
 
 ## Score and Decision
 
-**Calibration anchors** (all from the human-reviewed corpus):
+### Anchor comparison
 
-| Path | Avg Score | How it compares to this paper |
-|------|-----------|-------------------------------|
-| `/home/.../OlzB6LnXcS.md` (Shortcut Models) | 8.0 | Much stronger: polished writing, extensive experiments, open-source code. Paper under review is far less rigorous. |
-| `/home/.../kRBQwlkFSP.md` (DiffStateGrad) | 6.75 | Stronger: well-written, extensive experiments across many inverse problems, clean theoretical framing. Paper has comparable novelty but weaker execution. |
-| `/home/.../vgZDcUetWS.md` (NAMMs) | 6.67 | Stronger: well-motivated, diverse experiments, comprehensive ablations. Paper under review has a simpler/more practical idea but less thorough evaluation. |
-| `/home/.../5xmXUwDxep.md` (Manifold Constraint) | 6.0 | Stronger: clearer motivation, theoretical derivations, extensive experiments. Paper under review has a more novel core algorithm but is less polished. |
-| `/home/.../1YO4EE3SPB.md` (Variational Perspective) | 5.5 | Comparable: similar-level contribution to the field, but the variational paper is more carefully written. This paper has a more novel algorithmic idea. |
-| `/home/.../NSIVHTbZBR.md` (TPM Inpainting) | 5.5 | Comparable: both have interesting hybrid ideas with imperfect execution. This paper's contribution is more broadly useful. |
-| `/home/.../8xStV6KJEr.md` (CDIM) | 5.0 | Similar: both address constrained sampling with efficiency gains. CDIM was rejected for limited novelty; this paper has stronger novelty but similar presentation issues. |
-| `/home/.../dAavOuxZvo.md` (VIPaint) | 3.0 | Much weaker: unclear contribution, poor presentation. Paper under review is significantly better. |
+| Anchor | Avg Score | Comparison to this paper |
+|--------|-----------|-------------------------|
+| InverseBench (U3PBITXNG6) | 7.50 | Far more rigorous: comprehensive benchmarking across 5 scientific inverse problems with 14 methods. This paper is much narrower and less thorough. |
+| Neural Approximate Mirror Maps (vgZDcUetWS) | 6.67 | Better motivated, clearer theoretical framing, broader experiments. This paper has a useful algorithmic trick but weaker validation. |
+| Manifold Constraint (5xmXUwDxep) | 6.00 | Solid empirical contribution with clear theoretical grounding. This paper's theoretical framing is weaker. |
+| Constrained Diffusion Implicit Models (8xStV6KJEr) | 5.00 | Similar domain (fast constrained sampling with pre-trained diffusion), similar quality level. That paper was rejected with avg 5.00; this paper's contribution is more novel (backprop-free gradient) but its evaluation is less complete. |
+| Scaling Diffusion Models (YryL3QIWWc) | 3.50 | Poorly executed with weak evidence. This paper is better: the experiments are cleaner and the contribution is clearer. |
+| DynamicsDiffusion (kKXIYUi8ff) | 3.00 | Significant presentation and novelty issues. This paper is clearly stronger. |
 
-The paper under review has a genuinely novel and practical core idea (finite-difference approximation of \(\mJ\ve\)) and shows strong inpainting results with substantial speedups. However, the unsupported claim about tuned models, the confusing theoretical framing, missing ablations, and unspecified hyperparameters significantly weaken the presentation. The contribution is real but the paper needs substantial revision to match the rigor of accepted papers in this space.
+### Score Rationale
 
-MY FINAL SCORE: <score>4.5</score>
+The paper has a genuinely useful algorithmic idea (approximating \(\mJ\ve\) via two forward passes instead of backprop) that produces a real speedup. However, the evaluation has major gaps: the headline claim of being "comparable to tuned models" is unsupported and contradicted by the paper's own example; super-resolution results are uniformly worse than baselines; and reproducibility details are incomplete. The paper sits between the 4–5 range — above clearly deficient papers but below the rigor expected for acceptance. Relative to the CDIM anchor (avg 5.00, rejected), this paper has a more novel core idea but a less polished presentation and more overclaiming.
+
+MY FINAL SCORE: <score>4.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

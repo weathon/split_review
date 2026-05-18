@@ -1,18 +1,18 @@
-Now I have sufficient calibration data. Let me compile the final review.
+Now I have all the information I need. Let me compile the consolidated review.
 
 ## Summary
 
-PIDO proposes a physics-informed framework that combines auto-decoding of PDE solutions into a latent space with a coefficient-conditioned Neural ODE to achieve generalization across initial conditions, PDE coefficients, and time horizons. The paper diagnoses two latent-space pathologies (overly complex dynamics, latent embedding drift) and introduces simple regularizations to mitigate them, demonstrating strong empirical results on 1D combined equations and 2D Navier-Stokes benchmarks along with downstream transfer tasks.
+This paper introduces PIDO, a physics-informed neural PDE solver that combines auto-decoding, latent Neural ODE dynamics, and physics-informed training to generalize across varying initial conditions, PDE coefficients, and time horizons. The key contributions are: (1) a latent-space framework for physics-informed dynamics learning; (2) diagnosing and mitigating two issues in the latent space — overly complex dynamics (via Latent Dynamics Smoothing) and latent embedding drift (via Latent Dynamics Alignment); (3) strong empirical results on 1D combined equations and 2D Navier-Stokes benchmarks, with demonstrated transfer to downstream tasks.
 
 ## Strengths
 
-- **Consistent and large-margin superiority over physics-informed baselines**: Table 2 shows PIDO outperforms PI-DeepONet, PINODE, and MAD by 63–84% on in-training-horizon error across all benchmarks, and maintains this advantage on out-of-training-horizon extrapolation (e.g., 0.89% vs. 7.93% on CE3 Out-t). These margins are substantial and not observed in competing papers in this area.
+- **Robust generalization across multiple PDE variables**: Table 2 shows PIDO surpasses the second-best baseline by 63–84% on In-t test error (CE1, CE2, NS1) and achieves the lowest Out-t error across all benchmarks, including a 93% improvement on NS2 Out-t. This provides direct evidence that PIDO generalizes across initial conditions, PDE coefficients, and time horizons simultaneously.
 
-- **Effective regularizations grounded in latent-space analysis**: The ablation study (Table 4) cleanly demonstrates that both regularizations are essential: removing \(R_S\) prevents convergence entirely, and removing \(R_A\) degrades long-range error from 0.40% to 5.21%. This provides clear evidence that the proposed regularizations, not just the base architecture, drive the reported performance.
+- **Latent-space regularizations demonstrably fix training instability and extrapolation degradation**: The ablation study (Table 4) shows that removing the smoothing regularization Rₛ prevents convergence (error >100%), and removing the alignment regularization Rₐ causes a severe drop in long-range prediction (error increases from 3.81% to 58.18% in the fourth time interval). This confirms that diagnosing latent behaviors and mitigating them with Rₛ and Rₐ is effective.
 
-- **Demonstrated transferability to downstream tasks**: The long-term integration experiment (77% error reduction via fine-tuning at 10× horizon) and the inverse problem experiment (0.02% error from only 2 snapshots vs. 44.33% from scratch) go beyond standard PDE-solving evaluation and show that PIDO's learned representations carry practical utility.
+- **Transferable representations enable data-efficient downstream tasks**: Table 5 shows that a pretrained PIDO fine-tuned only on the dynamics model reduces long-term integration error by 77% compared to training from scratch. For inverse problems with only two solution snapshots, pretrained PIDO accurately recovers PDE coefficients (8.99% error), whereas PINN from scratch fails. This demonstrates practical value beyond core PDE solving.
 
-- **Grid-independent spatial representation**: The decoder is an INR queried at arbitrary coordinates, enabling automatic differentiation for spatial derivatives without grid-resolution restrictions—a practically important design choice that avoids the fixed-discretization limitations of many neural operators.
+- **Novel latent-space diagnosis of physics-informed optimization difficulties**: Figures 2 and 3 provide visual evidence that (a) overly complex latent dynamics produce jagged time-wise loss distributions leading to training collapse, and (b) latent embeddings drift outside their training range during extrapolation. These diagnostics motivate the regularizations and are presented as testable phenomena.
 
 ## Weaknesses
 
@@ -20,63 +20,69 @@ PIDO proposes a physics-informed framework that combines auto-decoding of PDE so
 None.
 
 ### Major
-None. The core claims (PIDO outperforms existing physics-informed solvers; regularizations are essential) are well-supported by the experimental evidence.
+
+- **Mathematical error in the Latent Dynamics Smoothing regularization (Eq. 13)**: The paper claims  
+  \(\|\nabla\mathcal{F}\|_{F}^{2} = \mathbb{E}_{\epsilon\sim\mathcal{N}(0,1)}\|\epsilon^{T}\nabla\mathcal{F}\epsilon\|_{2}^{2}\).  
+  This is incorrect. The standard Hutchinson-style estimator for the squared Frobenius norm is \(\mathbb{E}[\|\nabla\mathcal{F}\epsilon\|_{2}^{2}] = \mathbb{E}[\epsilon^{T}\nabla\mathcal{F}^{T}\nabla\mathcal{F}\epsilon]\), not the expectation of the squared quadratic form \((\epsilon^{T}J\epsilon)^{2}\). These quantities are different — the quadratic form expectation involves higher-order moments and is not equal to \(\|J\|_{F}^{2}\) in general. If the implementation follows the written formula, the regularization does not penalize what the paper claims. If the correct formula is used in practice, the paper contains a mathematical error that misrepresents the method. Either way, this needs correction and clarification.
 
 ### Minor
 
-- **The diagnosis of latent-space pathologies is supported only by qualitative visualizations, not quantitative metrics.** The paper asserts that "overly complex dynamics" and "latent embedding drift" are root causes of training instability and extrapolation degradation, but the evidence is Figures 2 and 3, which show 3 randomly sampled dimensions of 128-dim embeddings for single examples. No quantitative metric (e.g., temporal variance of \(\partial c_t/\partial t\) to measure dynamic complexity, or MMD/KL divergence between latent distributions at training vs. extrapolation times to measure drift) is provided. The ablations show the regularizations work, but they do not validate the claimed diagnosis—the narrative of "diagnosing and mitigating" overstates what the evidence supports. This is the paper's most significant weakness, though it does not invalidate the method's empirical effectiveness.
+- **DINO comparison needs more analysis**: The gap between PIDO (no solution data) and DINO (trained on 100% solution data) on NS1 is surprisingly large. The paper attributes this to overfitting in data-driven methods vs. regularization from physics-informed training, which is a plausible explanation, but the magnitude of the gap warrants additional analysis — e.g., per-test-case error breakdown, discussion of whether DINO's experimental setup was matched (same train/test splits, hyperparameters tuned per the original paper). Without this, readers cannot fully assess the claim that PIDO "surpasses its data-driven counterpart."
 
-- **The single-step gradient approximation for auto-decoding is unanalyzed.** The encoder uses a single gradient step to approximate the argmin in Equation (6), which is acknowledged in the text, but no analysis is provided on whether this approximation converges to a reasonable latent embedding, how it compares against multi-step optimization, or whether the approximation error affects downstream training stability. Since the encoder is used repeatedly (initial embeddings, pseudo-labels for alignment, throughout training), this is a non-trivial gap.
+- **Latent embedding drift is not quantitatively measured**: The diagnosis of "latent embedding drift" (Figures 3) rests solely on qualitative visualization of three randomly sampled dimensions from the latent space. No quantitative metric (e.g., MMD, Wasserstein distance, variance over time) is provided to measure drift magnitude or to correlate drift with extrapolation error across settings. The claim that alignment regularization reduces drift would be substantially strengthened by quantitative evidence.
 
-- **Table 3's documentation is underspecified.** The caption states "\(L_2\) relative error in NS1 is reported (%)" without clarifying the time horizon. Table 2 separately reports In-t (0.69%) and Out-t (3.48%) for NS1 on the same benchmark, so the reader cannot determine what aggregation or test set Table 3 uses. The comparison with DINO is valuable, but the experimental setup needs to be clearly stated for reproducibility.
+- **Limited baseline set**: The comparison includes PI-DeepONet, PINODE, and MAD but does not include physics-informed FNO or more recent physics-informed neural operators that could also handle varying coefficients and time horizons. While the existing baselines are reasonable, including stronger recent baselines would better contextualize PIDO's advantages.
 
 ### Trivial
-None.
+- The paper does not study sensitivity to the number of auto-decoding gradient steps (stated as "a single gradient descent step") — a minor empirical gap that could affect training stability.
 
 ## Nice-to-Haves
 
-- A hyperparameter sensitivity study for the regularization weights would strengthen practical guidance.
-- Reporting training wall-clock time relative to baselines would help readers assess the practical trade-off.
-- Including a DINO variant trained with physics-informed loss would enable a cleaner like-for-like comparison.
+- An ablation study on latent dimension choice (128 for 1D, 64 for 2D is stated but not varied).
+- Per-time-step error breakdown for In-t and Out-t predictions to show whether PIDO's advantage is uniform or concentrated at later times.
+- A study of how the two regularizations (smoothing and alignment) interact — could they interfere with each other?
+- Scaling discussion for 3D or higher-dimensional PDE systems.
 
 ## Removed Points
 
 These points are flagged to be removed, treat them with caution:
 
-- **Criticism about "Table 3 numbers are inconsistent with Table 2"** (partial): The critic claimed a specific value of 1.62% for PIDO in Table 3 that cannot be confirmed from the parsed paper text (the table is an image). The valid concern about unclear documentation is kept in Minor; the specific inconsistency claim is unverifiable.
-- **Criticism about the paper "cannot be independently verified" / reproducibility concerns rooted in model availability**: Removed per hard rules—all cited models, benchmarks, and datasets are assumed to exist.
-- **Strength Finder's strength about "novel diagnosis"**: Partially retained but qualified. The diagnosis is indeed a novel perspective, but the weakness about it being qualitative-only stands—per the rule that when strength and weakness disagree, the weakness wins.
-- **Generic strengths about "addressing an important problem"**: Removed per filtering rules—these are superficial and not specific to the paper's concrete contributions.
+- **"Missing appendix/pseudo-code"** — The parser strips appendix content; Algorithm 1 and 2 exist in the original submission. REMOVED per hard rule about parser artifacts.
+- **"Reproducibility concern about code not being checked"** — The paper states code is provided in supplementary materials. REMOVED as a pure reproducibility nitpick.
+- **"The paper already claims robust generalization before presenting evidence"** — This is standard for abstracts/introductions and not a substantive weakness. REMOVED.
+- **"The baselines are not the strongest available"** — Weak demand for more baselines is a nice-to-have, not a real weakness. MOVED to Nice-to-Haves.
+- **"The paper does not compare against physics-informed FNO or physics-informed DeepONet with explicit time marching"** — Same as above.
+- **"Without RS row shows error of ∞ — suggesting smoothing is required for any learning, not just improvement"** — The paper openly reports this and the observation is consistent with its claims; not a weakness. REMOVED.
+- **"No comparison against other methods that might benefit from pretraining" in downstream tasks** — Downstream task demonstration is already an additional contribution; demanding exhaustive comparisons is scope creep. REMOVED.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no genuinely novel observation that the paper itself does not already articulate.
+The paper's key insight — that projecting PDE solution trajectories into a low-dimensional latent space enables diagnosing physics-informed optimization issues (overly complex dynamics causing training collapse, embedding drift causing extrapolation failure) — is genuinely novel and well-articulated. While the use of auto-decoding and Neural ODEs individually are existing techniques, the synthesis of diagnosing optimization difficulties in latent space and designing targeted regularizations is a fresh perspective. This latent-centric view of physics-informed learning challenges could inspire future work on other optimization pathologies in scientific machine learning.
 
 ## Suggestions
 
-1. **Quantify the diagnosed pathologies**: Add metrics such as (a) the temporal variance of \(\|\partial c_t/\partial t\|\) across training rollouts to measure dynamic complexity, and (b) MMD or KL divergence between the distribution of latent embeddings at training times vs. extrapolation times. Show that these metrics correlate with performance degradation and are reduced by the respective regularizations. This would turn the diagnosis from suggestive to demonstrative.
+1. **Fix Eq. 13**: Correct the Hutchinson-style estimator to \(\mathbb{E}_{\epsilon\sim\mathcal{N}(0,I)}\|\nabla\mathcal{F}(c_t,\alpha)\epsilon\|_2^2\) (or \(\mathbb{E}\|\epsilon^T\nabla\mathcal{F}\|_2^2\)) and clarify whether the implementation uses the corrected formula. If the implementation actually uses \((\epsilon^T J \epsilon)^2\), explain what regularization this corresponds to.
 
-2. **Validate the auto-decoding approximation**: Compare reconstruction loss after 1 gradient step vs. 10–100 steps for a random subset of initial conditions to show that the single-step approximation lies in a similar region of latent space as the fully optimized embedding. Report whether this gap shrinks over the course of training.
+2. **Provide more analysis of the DINO comparison**: Report DINO's performance with identical train/test splits and tuned hyperparameters. Include an error breakdown to explain why the gap is so large.
 
-3. **Clarify Table 3**: Add a footnote specifying which time horizon (full interval, In-t, Out-t, or a specific test split) is reported, and ensure the PIDO entry is cross-referenced with Table 2 so the reader can reconcile the numbers.
+3. **Quantify latent embedding drift**: Report a distributional distance metric (e.g., MMD, Wasserstein distance) between \(c_t\) at different times, comparing regularized vs. unregularized models. Show that drift correlates with extrapolation error.
 
-4. **Add a runtime comparison**: Report training time per epoch and total training time for PIDO vs. the strongest baseline (e.g., PI-DeepONet) to quantify the computational cost of Neural ODE integration during training.
+4. **Add sensitivity analysis for auto-decoding steps**: Study how the number of gradient descent steps per initial condition affects training stability and final accuracy.
 
 ## Score and Decision
 
-**Anchor comparisons:**
+### Calibration Anchors
 
-| Path | Avg Score | Comparison to PIDO |
-|------|-----------|-------------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LwAG269lIq.md` (Data-Driven Discovery of PDEs via the Adjoint Method) | 3.00 | Much weaker: limited to simple 1D PDEs, sparse experiments, poor writing. PIDO is substantially stronger in methodology, experiments, and presentation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/GkJCgUmIqA.md` (PINNs with Trust-Region SQP) | 3.00 | Much weaker: unconventional problem formulation, insufficient baselines, limited to 1D. PIDO has far more comprehensive evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/EP09OGPRzk.md` (L-PINN: Langevin Dynamics PINN) | 6.00 | Comparable avg score but rejected. PIDO has a stronger methodological contribution (novel architecture + regularizations vs. sampling strategy). PIDO's experiments are more comprehensive. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vQqJJzL2Jf.md` (Understanding and Mitigating Extrapolation Failures in PINNs) | 6.00 | Similar pattern of qualitative diagnosis + mitigation, but PIDO's mitigation (novel regularizations) is stronger than transfer learning, and PIDO's experiments across parametric settings are more thorough. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/jqVj8vCQsT.md` (Learning a Neural Solver for Parametric PDE) | 5.60 | Weaker experiments (limited to 1D/linear PDEs, fewer baselines). PIDO's evaluation on 2D Navier-Stokes with varying Reynolds numbers is significantly more challenging. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/hj9ZuNimRl.md` (Better Neural PDE Solvers Through Data-Free Mesh Movers) | 6.00 | Comparable quality. Both have clear contributions and solid experiments. PIDO addresses a different problem (parametric generalization) with a different approach. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vAuodZOQEZ.md` (Physics-Informed Neural Predictor) | 6.50 | Slightly stronger presentation and more real-world data, but PIDO's contribution is more general (parametric PDEs vs. fluid prediction specifically) and the diagnostic perspective is more novel. |
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tnSj6FdN8w.md` | 3.50 | Neural integrator paper with incremental contribution; PIDO is clearly stronger in novelty and empirical validation |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/NvDRvtrGLo.md` | 5.00 | TRENDy paper (equation-free NODE approach, accepted); PIDO has comparable novelty with stronger experiments |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/f3xXPDCh8Q.md` | 5.50 | Unisolver (Transformer PDE solver, rejected); PIDO has clearer problem framing and more convincing experiments but both share presentation issues |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vQqJJzL2Jf.md` | 6.00 | PINN extrapolation analysis (rejected); PIDO has stronger empirical contributions but less rigorous analysis |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/hj9ZuNimRl.md` | 6.00 | Mesh mover PDE solver (accepted); PIDO is more novel but has a mathematical error the mesh paper doesn't have |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fU8H4lzkIm.md` | 8.00 | PhyMPGN (accepted, very strong); PIDO has comparable empirical breadth but less methodological polish and the math error prevents reaching this level |
 
-PIDO makes a clear empirical contribution with a well-motivated architecture and effective regularizations. The diagnostic claims are only qualitatively supported, and some experimental documentation needs clarification, but these are addressable issues that do not undermine the paper's core findings. The method is convincingly shown to outperform prior physics-informed solvers across multiple benchmarks and transfer tasks.
+The paper makes a genuine contribution with a novel latent-space diagnosis of physics-informed optimization challenges and strong empirical results. However, the mathematical error in Eq. 13 is a real issue that requires correction. The DINO comparison would benefit from additional analysis. These issues are fixable but present in the current submission.
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

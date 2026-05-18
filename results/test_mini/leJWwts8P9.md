@@ -1,26 +1,26 @@
-Here is the final consolidated review:
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This submission consists of only a title and an abstract. The entire paper body — including all methodological descriptions, experimental setup, results, tables, figures, and analysis — is absent. The abstract describes an interesting problem (determining whether two language models were trained independently from their weights) and claims promising results, but none of these claims can be evaluated because no supporting content is present.
+The paper proposes a family of statistical tests to determine whether two language models were trained with independent randomness (i.e., model provenance via weight-based analysis). The abstract describes exact p-values under the independence null hypothesis, evaluations on 21 open-weight models (210 pairs), perfect detection of 69 fine-tuned pairs, robustness to massive fine-tuning, and an evasion-attack-aware variant using hidden-activation matching.
 
 ## Strengths
 
-None. The abstract raises an interesting question and mentions promising-sounding results, but with no paper body to substantiate them, no genuine strengths can be identified or verified.
+The abstract suggests a well-motivated problem (model provenance verification) and a technically interesting approach (exact p-values via simulated independent copies, robustness to evasion attacks). The empirical claims — perfect detection of all 69 fine-tuned pairs among 210 model pairs, and detection of dependence between Llama 2 and Llemma after 750B additional tokens of fine-tuning — are striking if substantiated.
 
 ## Weaknesses
 
 ### Fatal
 
-- **The paper body is entirely absent.** The submitted file contains only the title and abstract. There is no methodology section, no experimental setup, no results, no tables or figures, and no analysis. Every substantive claim in the abstract — exact p-values under the null, tests on 21 open-weight models, identification of 69 fine-tuned pairs, robustness to 750B-token fine-tuning, the activation-matching mechanism — is unsupported by any describable evidence. This is not a paper that can be reviewed or accepted in any form. The submission as presented is structurally incomplete.
+- **The paper body is entirely absent from the provided text.** The extracted file contains only the title, the abstract, and the stub `\section{1}` with no content following it. There is no method description, no experimental setup, no results, no tables, no figures, no analysis — nothing beyond the abstract. Without the full paper body, it is impossible to assess the soundness of the proposed tests, the validity of the experimental design, the correctness of the claimed results, or even the coherence between motivation and evidence. This is not a missing appendix or reference (which the parser strips from all papers); it is the entire main text. The abstract alone does not constitute a reviewable manuscript. This overrides any positive signals from the abstract.
 
 ### Major
 
-None. The fatal issue subsumes all potential major weaknesses.
+None — the fatal issue subsumes all other potential concerns.
 
 ### Minor
 
-None.
+None — the fatal issue subsumes all other potential concerns.
 
 ### Trivial
 
@@ -28,41 +28,35 @@ None.
 
 ## Nice-to-Haves
 
-- If a complete version of this work exists, it would need to include full descriptions of the test statistics, the simulation procedure for independent copies, experimental details (model pairs, training budgets, fine-tuning configurations), complete results tables, and details of the evasion attacks and robust matching mechanism.
+None applicable — the paper cannot be substantively reviewed.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Strength Finder's claimed strengths (all four):** These are drawn entirely from unverifiable claims in the abstract (e.g., "exact p-values," "empirical power on 21 models reliably identifying 69 pairs," "robustness to massive fine-tuning," "robust activation-matching mechanism"). Because the paper body is missing, none of these can be confirmed as strengths of the actual submission. A claim in an abstract is not the same as a substantiated result in a paper. Moved because they conflict with the verified fatal weakness (paper absent).
-
-- **Harsh Critic's strengths paragraph ("Based solely on the abstract…"):** Correctly notes that no strength can be verified. This is essentially saying "no strengths" in a roundabout way.
-
-- **Harsh Critic's "Strengthening the Paper on Its Own Terms" and "Missing Parts" sections:** These contain reasonable suggestions for what a complete paper would need, but are moot since the paper has no body. They are restatements of the fatal flaw rather than additional independent weaknesses.
+The Harsh Critic's remaining points (e.g., about missing experiments, deeper analysis, visualizations, case studies) and the Strength Finder's strengths are all based on abstract claims that cannot be verified and would be rendered moot if the full paper were available. All are removed because the fatal missing-body issue supersedes them. The paper simply cannot be evaluated.
 
 ## Novel Insights
 
-None beyond the paper's own claims. The abstract proposes an intriguing possibility — using statistical independence tests on model weights to determine if two models share training provenance — but without any methodological or empirical content, there is nothing to synthesize.
+None beyond the paper's own claims in the abstract, which cannot be verified.
 
 ## Suggestions
 
-- The submission must include the full paper content: method descriptions, experimental setup, results, and analysis. In its current form, it cannot be meaningfully reviewed or accepted.
-- If this is a submission error (e.g., wrong file uploaded), the authors should resubmit the complete manuscript.
+The authors should resubmit with the full paper intact. The extracted text appears to have been truncated by the PDF parser far beyond the typical appendix/reference stripping, and the missing content must be present in the original submission for any meaningful review.
 
 ## Score and Decision
 
-**Calibration Anchors (all from the review corpus):**
+To calibrate my score, I compare the paper under review to the following anchor papers retrieved from the calibration corpus:
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `5lUdTogEL3.md` | 1.00 | Identical situation — incomplete submission with only abstract. Human reviewers gave unanimous scores of 1, citing "incomplete version." This paper is in the same state. |
-| `nSDOkm0SKo.md` | 1.00 | Another low-scoring paper with insufficient content for evaluation. Similar severity. |
-| `bowetgeOMw.md` | 4.25 | A complete paper on a closely related topic (fine-tuning origin detection) with actual methods and experiments. Far more substantive than this submission. |
-| `h0jdAboh0o.md` | 5.50 | A complete paper on behavioral shift auditing with full methodology and empirical evaluation. Not comparable to an abstract-only submission. |
-| `jv2zHOalpL.md` | 6.00 | A complete paper on neural phylogeny (fine-tuning relationship detection) with extensive experiments. This submission contains none of that content. |
-| `KS8mIvetg2.md` | 7.50 | A topically similar paper (proving test set contamination) with rigorous statistical tests, thorough experiments, and clear writing. Incomparable to an abstract-only submission. |
+| Anchor Path | Avg Human Score | Comparison |
+|---|---|---|
+| `KS8mIvetg2.md` — Proving Test Set Contamination in Black-Box LMs | 7.50 | A complete, well-executed paper on a related topic (statistical testing for model training data). Our paper shares the topic area but is missing its entire body, making it incomparable. |
+| `QVj3kUvdvl.md` — Unsupervised Model Tree Heritage Recovery | 6.60 | A complete paper on model relationship detection that includes full methods, experiments, and analysis. Our paper is not reviewable by contrast. |
+| `QCDdI7X3f9.md` — Model Equality Testing | 6.50 | Complete paper on model testing via black-box access. Our paper lacks any such supporting content. |
+| `bowetgeOMw.md` — Toward Trustworthy: Detecting Fine-Tuning Origins | 4.25 | A mixed-quality but complete paper on fine-tuning detection. Our paper has a far more fundamental problem (no body). |
+| `izDiFGXn9B.md` — Benchmarking weight similarity | 3.50 | A weak but complete paper on weight similarity. Still reviewable; ours is not. |
+| `5lUdTogEL3.md` — Incomplete paper (only abstract + partial intro) | 1.00 | **Directly comparable.** Both papers are incomplete submissions with only an abstract and minimal/no body. Scored 1 by all human reviewers. |
+| `gpKEDj9Dgg.md` — Low-quality paper on LLM+ASR | 2.00 | An extremely weak paper, but it at least contains methods and results. Ours contains neither. |
 
-Relative to the 1.0-score anchors (identical situation of incomplete submission), this paper is an exact match. Relative to any paper scoring above 4, this submission is not a reviewable paper and does not belong on the same scale. The appropriate score is 1.0.
+The closest anchor is `5lUdTogEL3.md` (avg score 1.00), which was unanimously scored 1 by all human reviewers for being an incomplete submission with only an abstract. The present paper is in the same situation — the body is entirely absent. Unlike papers where only appendix/references are missing (a known parser artifact), the entire main text is gone, making substantive evaluation impossible.
 
-**MY FINAL SCORE:** <score>1.0</score>
-**MY FINAL DECISION:** <decision>Reject</decision>
+**MY FINAL SCORE: <score>1.0</score>**
+**MY FINAL DECISION: <decision>Reject</decision>**

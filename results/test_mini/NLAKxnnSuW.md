@@ -1,73 +1,96 @@
+Now I have all the information I need. Let me write the final consolidated review.
+
 ## Summary
 
-This paper introduces MEGA, a memory-efficient framework for 4D Gaussian Splatting that comprises two core ideas: (1) replacing the expensive spherical harmonics color representation (144 parameters per Gaussian) with a compact DC-AC color decomposition (3 per-Gaussian parameters + a lightweight shared MLP), and (2) an entropy-constrained Gaussian deformation field that, when combined with an opacity-based entropy loss, drastically reduces the number of Gaussians needed to represent dynamic scenes. The method achieves ~190× storage reduction on Technicolor (6.1GB → 32MB) and ~125× on Neural 3D Video (3.1GB → 25MB) while maintaining competitive rendering quality and real-time FPS.
+MEGA addresses the critical storage problem in 4D Gaussian Splatting (4DGS) by (1) replacing the 144-parameter spherical harmonics coefficients with a compact 3-parameter per-Gaussian DC color plus a lightweight shared MLP for view-time-dependent color (AC predictor), and (2) introducing an entropy-constrained deformation field that expands each Gaussian's effective range while using an opacity-based entropy loss to drastically reduce the number of Gaussians needed. The method achieves ~125-190× storage reduction while maintaining competitive quality and rendering speed.
 
 ## Strengths
 
-- **DC-AC color representation is simple, effective, and clearly validated.** Replacing 144 SH coefficients with 3 parameters + a lightweight 3-layer MLP achieves an ~8× per-Gaussian parameter reduction while maintaining or improving PSNR (Table 2: e.g., *Fabien* 34.21 vs. 33.57 for 4DGS). The ablation shows DAC significantly outperforms an alternative grid-based approach (Lee et al., 2024), which drops PSNR by 2+ dB on *Flame Steak*.
+- **First dedicated 4DGS compression framework tackling a real bottleneck**: 4DGS scenes require gigabytes of storage (e.g., ~7.79 GB for the Birthday scene). MEGA is among the first works to directly address this for 4DGS, and the problem is practically significant for deployment on resource-constrained devices.
 
-- **Entropy-constrained deformation + opacity loss synergistically reduce Gaussian count by >10×.** The combination (w/ DAC+Deformation+ℒ_opa) cuts Gaussians from 13.00M to 0.91M on *Birthday* while improving PSNR by 1 dB. Even on *Flame Steak* where PSNR drops slightly (33.19→32.27), Gaussian count drops from 5.17M to 0.87M. The synergy is clear: deformation alone increases count, ℒ_opa alone reduces it modestly, but the combination yields far greater reduction than either component alone.
+- **Clever DC-AC color decomposition that eliminates 144 SH parameters without quality loss**: The ablation (Table 3) shows that replacing spherical harmonics with a 3-parameter DC color + shared MLP predictor not only cuts per-Gaussian parameters from 161 to ~20 but actually improves PSNR on multiple scenes relative to 4DGS (e.g., Birthday: 31.60 vs 31.00). The grid-based alternative (Lee et al.) drops to 30.49, confirming the advantage of this design.
 
-- **Comprehensive evaluation on two standard multi-view dynamic datasets** with comparison against 10+ baselines including NeRF-based and Gaussian-based methods, plus a thorough ablation study across four scenes that isolates each component's contribution.
+- **Entropy-constrained deformation field synergistically reduces Gaussian count**: The ablation (Table 3, last row) shows that deformation alone increases Gaussian count, the entropy loss alone reduces it modestly, but together they cut Gaussians from 13.00M to 0.91M (Birthday) and from 5.17M to 0.87M (Flame Steak) while maintaining or improving PSNR. Figure 2(a) further provides evidence that the deformation field increases the Gaussian participation ratio from below 50% to about 75%.
 
-- **Practical compression pipeline** that combines the algorithmic contributions with standard FP16 and zip delta compression (cleanly described as post-processing steps, not conflated with algorithmic novelty).
+- **Rendering speed is maintained or improved despite compression**: On Technicolor, MEGA runs at 83 FPS vs 4DGS at 55 FPS, and on Neu3DV at 77 FPS vs 97 FPS — competitive real-time performance even with fewer Gaussians and per-Gaussian MLP inference.
+
+- **Systematic ablation isolating each component**: The ablation table progressively adds DAC, deformation, and entropy loss, showing that each component is necessary and that the combination is synergistic (deformation alone increases count, entropy loss alone is insufficient, together they achieve the best trade-off).
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **View-dependent geometry deformation lacks physical justification and could limit generalization.** The deformation predictor (Eq. 4) takes view direction **d**ₓ as input and outputs position, scale, and rotation deformations. This makes the *geometry* of each Gaussian view-dependent at a given time step — in a physically consistent scene model, geometry should be view-independent and only color (radiance) should vary with viewpoint. While the method evaluates on held-out cameras from the 4×4 grid on Technicolor, these share similar viewing directions with the training cameras, making this a weak stress test. The paper neither discusses nor justifies why view-dependent geometry is acceptable. This does not undermine the compression results on the evaluated datasets, but it raises a legitimate concern about the representation's physical consistency and its reliability for truly novel camera trajectories.
+- **Unfair storage comparison inflates headline compression ratios**: The paper reports 190× and 125× storage reductions by applying FP16 + zip delta compression to MEGA, while the 4DGS baseline is stored in uncompressed FP32 (Table 1: 6107.07 MB ≈ 13M Gaussians × 161 params × 4 bytes). The paper discloses the post-processing in Section 3 (line 164), but the headline 190× and 125× ratios conflate the algorithmic contribution with a post-processing trick that could be equally applied to the baseline. Applying the same FP16+zip pipeline to 4DGS would roughly halve its size, reducing the claimed ratio to ~80-100× — still impressive, but significantly less dramatic. The central empirical claim is misleading as presented.
+
+- **Deformation equations (Eq. 5) use `×` without defining the operation**: The paper defines deformation via `μ_{4D}^{t,v} = μ_{4D} × m_{μ_{4D}}^{t,v}` (and analogously for scale and both quaternions) without specifying what `×` means. For position, element-wise multiplication would move points along rays from the origin rather than translating them arbitrarily — an unusual choice for a "deformation" that is never justified. For quaternions, element-wise multiplication has no geometric meaning; quaternion composition is the correct operation. The same symbol is used for all four quantities without disambiguation. This makes the method not fully reproducible from the paper as written. (Note: this is fixable in revision by clarifying that `×` denotes addition for position, element-wise multiplication for scale, and quaternion multiplication for rotations — but in its current form, the specification is incomplete.)
 
 ### Minor
 
-- **Compression ablation reports parameter counts, not final storage sizes.** The main compression claims (~190×, ~125×) combine the core algorithmic contribution (DAC + deformation + ℒ_opa) with FP16 (2×) and zip (~1.1×). While the paper is transparent about including these post-processing steps, the ablation table reports only "Params" (parameter count × bytes), not final storage after FP16+zip. Reporting final storage for each ablation variant would cleanly disentangle which compression factor comes from the algorithmic core versus standard post-processing. This is a presentation issue rather than a substantive flaw — the algorithmic contribution is still substantial (~86×).
+- **The opacity "entropy loss" (Eq. 6) is not the standard binary entropy**: The paper defines `𝒪_{opa} = -o_j log(o_j)`, which is only the first term of the full Bernoulli entropy `-o log o - (1-o) log(1-o)`. This formulation asymmetrically penalizes high opacity less than low opacity (since `-o log o` decreases as o→1 and asymptotically approaches 0 as o→0), biasing toward keeping Gaussians alive. The paper should discuss this choice or use a symmetric regularizer.
 
-- **The deformation predictor alone (without ℒ_opa) increases Gaussian count in all four ablation scenes**, sometimes dramatically (Fabien: 4.57M → 11.56M). The paper acknowledges this observation but offers no analysis of why this happens (e.g., does the deformation cause additional densification? Is the deformation magnitude too large?). This does not invalidate the method — the combined deformation+ℒ_opa clearly works synergistically — but the unexplained behavior leaves a gap in understanding the deformation component's role.
+- **Ablation lacks a "deformation + entropy loss without DAC" variant**: Running deformation + entropy loss on the original 4DGS (with full SH) would isolate whether the deformation+entropy mechanism generalizes beyond the DAC representation. This would strengthen the claim that the deformation-entropy combination is broadly useful.
+
+- **MLP architecture details are missing**: The paper never reports the number of layers, hidden dimensions, or total parameter counts for the AC color predictor or the deformation predictor MLPs. These are essential for reproducibility and understanding the overhead.
+
+- **Pruning interval K is not specified**: The paper states that Gaussians with near-zero opacity are pruned "at every K iterations" without giving K.
+
+- **No training time or peak training memory reported**: Compression methods often trade training cost for storage. Reporting these would contextualize the practical trade-off.
 
 ### Trivial
-
-- None worth listing.
+- The `sg()` application in Eq. (3) applies to μ₃D and d_v but not to t or c_dc — the rationale is intuitive but could be briefly explained.
 
 ## Nice-to-Haves
 
-- Reporting training GPU memory footprint would improve practical applicability assessment, since training 4DGS with millions of Gaussians plus MLPs is memory-intensive.
-- Per-scene storage breakdowns on the full datasets (beyond the four ablation scenes) would help assess scene-level variability.
-- A baseline showing 4DGS at FP16+zip would enable an apples-to-apples comparison of the algorithmic compression factor.
+- Compare against 4DGS with FP16+zip applied, to report honest compression ratios.
+- Test on other 4DGS variants (Duan et al., 2024) to demonstrate generality.
+- Show per-attribute storage breakdown (DC color, MLP weights, geometric attributes, post-processing overhead) to clarify where savings come from.
+- Visualize the deformation field's effect on a single Gaussian's trajectory over time.
 
 ## Removed Points
-
-- **Criticism about "inconsistent and uninterpretable behavior of the deformation component" as presented in the Harsh Critic's Critical Issue 3** — The critic claims "the paper's narrative that deformation + entropy loss 'expands the action range and forces fewer Gaussians' is not supported by the ablation data." This is factually incorrect. The data clearly shows that deformation+ℒ_opa reduces Gaussians far more than ℒ_opa alone (e.g., Birthday: 9.15M → 0.91M; Fabien: 2.32M → 0.31M), demonstrating synergy. The critic also claims "the opacity loss alone would be sufficient to reduce count" — this technically true statement ignores that the *combination* reduces count 3-10× further than ℒ_opa alone. The anomalous deformation-alone increase is kept as a minor weakness since the paper doesn't explain it, but the criticism about the combination not working is inaccurate.
-
-- **Strength Finder's generic strengths ("important problem", "interesting question")** — Removed as superficial and not specific to the paper's concrete contributions.
-
-- **Strength Finder's overlap with DAC color representation strength** — The strength was already captured.
-
-- **The critic's claim about FP16+zip being ~2.2× contribution and "inflating" the compression numbers** — softened to a minor weakness since the paper explicitly mentions including these steps and does not hide them. The critic's framing of "conflating" is too harsh given the paper's transparency.
+These points are flagged for removal; treat them with caution:
+- **"The PSNR improvement on Technicolor is suspiciously large"** — This is speculation. The paper does not claim unrealistic gains; the improvement is consistent with the method's design (better color modeling + fewer redundant Gaussians).
+- **"Fig. 3(a) comparison does not isolate deformation effect"** — Incorrect. The blue line is "MEGA model without per-Gaussian transformation," i.e., DAC + entropy loss (no deformation), while orange is full MEGA. This does isolate deformation with entropy loss held constant.
+- **"sg() on view direction is unclear"** — Positional encoding of view direction, though not standard, is a common design choice and does not affect the paper's validity.
+- **"Stop-gradient on view direction not explained"** — A hyper-specific implementation detail; the paper need not justify every design decision at this level.
+- **Various requests for additional baselines beyond stated scope** — The paper's primary comparison is against 4DGS, and it already compares against a wide range of baselines.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The review surfaces a genuine structural concern (view-dependent geometry) that the paper itself does not discuss, but this is a limitation for the authors to address rather than a novel observation from the review process.
+None beyond the paper's own contributions. The DC-AC decomposition and the synergistic pairing of deformation with opacity entropy loss are the paper's novel ideas, and they are adequately described (modulo the clarity issue with Eq. 5).
 
 ## Suggestions
 
-1. **Address the view-dependent geometry issue directly** — either remove view direction from the deformation predictor input (using only time and position), or provide evidence that the learned deformation is approximately view-independent in practice, or present a theoretical justification for why view-conditioned geometry is acceptable.
+1. **Fix the storage comparison**: Report 4DGS storage after applying the exact same FP16 + zip delta pipeline. Place this as a separate row in Tables 1 and 2, and update the claimed compression ratios in the abstract and contributions accordingly. The paper will still report very strong results (~80-100× reduction) without inviting skepticism.
 
-2. **Add a storage column to the ablation table** reporting final FP16+zip storage for each variant, alongside the parameter counts.
+2. **Clarify Eq. (5)**: Define `×` separately for each attribute — use additive deformation for position (`μ + Δμ`), element-wise multiplication for scale, and quaternion composition for rotations. Alternatively, if the multiplicative formulation for position is intentional, justify it.
 
-3. **Analyze why deformation alone increases Gaussian count** — even a brief discussion (e.g., the deformation field enables more complex motion, which triggers additional splitting during densification before the entropy loss prunes) would clarify the mechanism.
+3. **Add an ablation row**: Include "w/ 4DGS baseline + Deformation + 𝒪_{opa}" (without DAC) to test whether the deformation-entropy mechanism generalizes beyond the compact color representation.
+
+4. **Report MLP architectures**: Provide layer counts, hidden dimensions, and total parameter counts for both the AC color predictor and deformation predictor.
+
+5. **Discuss the asymmetric entropy loss**: Either switch to the full binary entropy `-[o log o + (1-o) log(1-o)]` or justify why the asymmetric form is beneficial.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration anchors used:**
 
 | Anchor | Avg Score | Comparison |
-|--------|-----------|-----------|
-| Lightweight Predictive 3D Gaussian Splats (`PbheqxnO1e.md`) | 7.00 | Stronger paper with more novel hierarchical representation and better SOTA comparison. MEGA addresses the harder 4D dynamic setting but has less novel methodology. |
-| SplineGS (`tMG6btjBfd.md`) | 6.00 | Closest topic. Comparable methodological novelty and experimental rigor. SplineGS has cleaner deformation modeling (no view-dependence issue) but MEGA's compression contribution is more practically significant. |
-| Fast Feedforward 3DGS Compression (`DCandSZ2F1.md`) | 6.50 | Stronger in terms of novelty (optimization-free feedforward pipeline) and breadth. MEGA has comparable experimental quality. |
-| Swift4D (`c1RhJVTPwT.md`) | 6.50 | Both address dynamic scene Gaussian splatting. Swift4D's static/dynamic decomposition is cleaner conceptually. MEGA's compression ratios are more impressive. |
-| CoINR (`ZWi6RpT4mJ.md`) | 3.50 | Fundamentally flawed paper with incorrect mathematical claims. MEGA is substantially stronger — no such errors, solid experiments. |
-| Multi-view Consistent Image Gen. (`Ns84n4NWh6.md`) | 3.50 | Different topic but similar score floor. Weak presentation and insufficient experiments. MEGA is far more thorough. |
+|--------|-----------|------------|
+| Lightweight Predictive 3DGS (PbheqxnO1e) | 7.00 | Similar GS compression paper with a similar post-processing fairness concern; was accepted. MEGA has a more novel color representation but a more significant comparison issue. Slightly weaker on balance. |
+| Swift4D (c1RhJVTPwT) | 6.50 | Dynamic GS with compression via static/dynamic decomposition. Accepted. MEGA's DC-AC decomposition is comparably novel, but MEGA has a more serious unfair comparison issue. |
+| FCGS (DCandSZ2F1) | 6.50 | Feed-forward GS compression, accepted. MEGA tackles a different setting (4D dynamic vs static) with more per-scene optimization. Comparable quality of contribution. |
+| LocoGS (dHYwfV2KeP) | 5.75 | Locality-aware GS compression, accepted despite some novelty concerns. MEGA has a clearer novelty angle but also clearer methodological issues. Comparable overall. |
+| SCISplat (nkeF3iRJRo) | 5.00 | GS from compressive images, rejected due to limited novelty. MEGA has stronger novelty but shares some methodology clarity issues. |
+| IF-MoDGS (ylgg2RE7ub) | 4.00 | Dynamic GS without pose initialization, rejected. MEGA has substantially stronger novelty and clearer empirical contribution. |
+| Scaled Inverse Graphics (GSckuQMzBG) | 3.00 | Neural scene compression, rejected with fundamental limitations. MEGA is far stronger on novelty and empirical validation. |
+
+The paper addresses a timely and important problem with a genuine technical contribution (DC-AC decomposition and entropy-constrained deformation). The experimental results, even when conservatively estimated, demonstrate substantial storage reduction. However, two issues prevent a strong accept: (1) the headline compression ratios are inflated by an asymmetric comparison (FP16+zip vs uncompressed FP32), and (2) the deformation field equations are underspecified, affecting reproducibility. Both are fixable in revision. The core ideas are sound, the problem is important, and the empirical gains are real — the paper just needs to present them honestly.
+
+**Score: 5.5** — Borderline accept. A strong revision addressing the unfair comparison and clarifying Eq. (5) could move this to a clear 6-7 range.
+
+**Decision: Accept** — The contribution (first 4DGS compression, effective DC-AC decomposition, entropy-constrained deformation) outweighs the presentational issues, which are fixable in a revision.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

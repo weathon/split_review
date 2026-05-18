@@ -1,20 +1,18 @@
-Now I have sufficient context. Let me write the final consolidated review.
+Now I have all the information I need. Let me compose my final consolidated review.
 
 ## Summary
 
-This paper proposes GeONet, a neural operator (based on coupled DeepONets) that learns the Wasserstein geodesic mapping from an input pair of probability distributions to the entire geodesic path connecting them. The key idea is to train using only boundary distributions and the physics-informed PDE residuals of the coupled primal-dual system (continuity equation + Hamilton-Jacobi equation), without requiring ground-truth geodesic data. Experiments on Gaussian mixtures (1D/2D) show GeONet achieves comparable accuracy to the POT solver with orders-of-magnitude faster inference, and supports zero-shot super-resolution.
+GeONet proposes a mesh-invariant neural operator (DeepONet-based) that learns the Wasserstein geodesic between probability distributions from only boundary pairs (initial and terminal distributions), without ever observing true geodesics during training. The method uses a physics-informed loss that enforces the KKT optimality conditions of the Benamou-Brenier dynamic OT formulation — the continuity equation (primal) and Hamilton-Jacobi equation (dual) — jointly satisfied via six coupled networks. After training, inference is near-instantaneous and supports output at arbitrary spatiotemporal points, enabling orders-of-magnitude speedup over traditional OT solvers.
 
 ## Strengths
 
-1. **Physics-informed training without ground-truth geodesic data**: GeONet requires only boundary pairs of distributions at training time, not precomputed geodesics. This is a genuine advantage over supervised learning approaches that need expensive reference solutions (Section 1, paragraph 4; Section 3, loss formulation).
+- **Training without geodesic data is a genuine innovation.** GeONet learns the entire geodesic from only boundary pairs via PDE-informed losses, avoiding the need for expensive reference geodesic computations during training. This is clearly stated and is a meaningful advance over standard neural operators that require full solution data.
 
-2. **Mesh-invariant output enabling zero-shot super-resolution**: GeONet can predict geodesics at higher spatial resolution than training data without fine-tuning. Table 1 shows that high-resolution test errors (e.g., 1D high-res. at t=0.5: 6.01 ± 3.53) are comparable to the random test errors (5.76 ± 3.56), demonstrating resolution invariance. Traditional OT solvers are confined to the original mesh.
+- **Orders-of-magnitude inference speedup is convincingly demonstrated.** The runtime comparison (Section 4.4) shows GeONet outperforming POT on fine grids by orders of magnitude on a log-log scale, with the gap widening as resolution increases. This amortized inference advantage is a strong practical selling point.
 
-3. **Orders-of-magnitude faster inference than traditional OT solvers**: Section 4.4 and Figure 6 present runtime comparisons showing GeONet outperforms POT by orders of magnitude for fine grids — a direct practical benefit of the amortized operator learning approach.
+- **Joint primal-dual KKT formulation is principled and well-grounded.** The method simultaneously enforces the continuity equation and Hamilton-Jacobi equation, leveraging the known KKT conditions of the Benamou-Brenier problem. The architecture with separate branch networks for μ₀ and μ₁ plus a shared trunk is a sensible design for this coupled PDE system.
 
-4. **Principled coupled PDE architecture**: The joint training of primal (continuity equation) and dual (Hamilton-Jacobi equation) DeepONets through the KKT optimality conditions of the Benamou-Brenier formulation (Eqs. 4–5, loss Eqs. 7–9) is a clean and well-motivated architectural choice that respects the underlying mathematical structure of dynamic OT.
-
-5. **Stronger geodesic prediction than CFM and RF on discrete point clouds**: Table 2 shows GeONet achieves L¹ error of 30.0 ± 1.10 at t=0.5 on 2D Gaussian mixture point clouds, versus 98.9 ± 2.41 for CFM and 112 ± 3.61 for RF — demonstrating substantially better geodesic prediction than these neural flow methods.
+- **Zero-shot super-resolution is demonstrated quantitatively.** The paper includes high-resolution test rows in Table 1 (e.g., 1D high-res errors within ~0.3 of 1D random errors at each time slice), showing that training on low-resolution inputs yields accurate geodesics on finer output grids — a practical benefit over mesh-bound traditional solvers.
 
 ## Weaknesses
 
@@ -23,55 +21,72 @@ None.
 
 ### Major
 
-1. **The MNIST experiment does not validate the core claim and is potentially misleading**: The paper compresses MNIST images to a 32D latent space via an autoencoder, learns geodesics in that latent space, then decodes. The paper itself acknowledges that "the ambient-space error is much larger than the encoded-space error, meaning that the geodesics in the encoded space and ambient image space do not coincide." Since the decoder is not an isometry w.r.t. the 2-Wasserstein metric, the latent-space geodesic does not correspond to the true Wasserstein geodesic in pixel space. Despite this, the abstract claims GeONet achieves "comparable testing accuracy to the standard OT solvers on... the MNIST dataset." This experiment does not demonstrate GeONet's ability to learn Wasserstein geodesics on real image data; at best, it shows geodesic learning in a compressed latent space that does not preserve the OT geometry. This undermines the paper's claim of a successful real-data application.
+- **L¹ error metric is ambiguously scaled, undermining trust in absolute error numbers.** The paper reports L¹ errors exceeding 2 (e.g., 2.67 for 1D identity, 4.92 for 1D random in Table 1), but for probability densities integrating to 1, the maximum possible L¹ distance between two densities is 2. The error metric definition is deferred to the appendix (stripped by the parser). The stated claim that these "correspond to percentage errors" (in a draft comment block) is inconsistent with values > 2 if interpreted as a true integral. The reported values are likely either sums without mesh-spacing scaling or scaled by 100, but the main text does not clarify. This makes it impossible to interpret the absolute accuracy of GeONet from the tables alone. The paper must specify whether these are Σ|diff| (unnormalized), Σ|diff|·dx (true L¹), or 100× the L¹ (percentage), and ensure the tables are labeled accordingly. The relative comparisons between rows remain informative, but absolute error claims are opaque.
 
-2. **Missing comparison to existing amortized learning-based OT methods**: The paper cites amortized methods (Lacombe et al. 2023, Amos 2023) for static OT maps in the introduction, but provides no comparison to any learning-based OT or geodesic solver beyond CFM and RF (which are generative flow models, not geodesic solvers). Against POT (a classical solver), GeONet achieves moderate accuracy with fast inference, but this does not establish superiority over *learning-based* approaches. Without comparison to other amortized methods that also learn OT maps or geodesics, it is difficult to assess whether GeONet's contribution is an architectural improvement or a genuinely novel capability.
+- **No comparison against amortized OT methods that are cited in the paper.** The paper cites Lacombe et al. (2023) and Amos et al. (2023) as amortized methods for static OT maps but never compares against them. These are the most relevant baselines for GeONet (both do amortized OT prediction). The comparison against CFM and RF is informative but weakens the paper's positioning: CFM and RF are generative flow models, not OT geodesic predictors, so the comparison conflates different tasks. Adding a comparison to at least one prior amortized OT method would substantially strengthen the experimental section.
 
-3. **Absence of training cost analysis**: The paper emphasizes GeONet's fast inference but does not report training time, training sample size, number of epochs, or break-even analysis (how many test-time queries are needed to amortize the upfront training cost). For practitioners evaluating amortized inference, training cost is a critical consideration.
+- **Core claim of "mesh-invariance" conflates output-side and input-side invariance.** The paper calls GeONet "mesh-invariant" but acknowledges in the Limitations (Section 5) that the branch inputs require fixed predetermined evaluation points. The mesh-invariance applies only to the output (trunk network can evaluate at arbitrary x,t), which is a standard DeepONet property. The zero-shot super-resolution claim is valid — training on coarse inputs and evaluating on fine outputs works — and is what the experiments actually test. The "mesh-invariant" language should be qualified to avoid overclaiming.
 
 ### Minor
 
-1. **Theoretical gap in boundary conditions for the Hamilton-Jacobi network**: The loss function (Eq. 11) enforces boundary conditions only on the primal variable μ (via ℒ_BC), but not on the dual variable u. The Hamilton-Jacobi equation is a final-value problem where u(·,1) is determined by the Kantorovich potential (line 110), yet this is not enforced in the loss. While the coupled PDE system may empirically constrain u through the continuity equation coupling, the paper provides no theoretical argument for uniqueness. Without this, residual minimization could in principle converge to spurious (μ, u) pairs that lower the physics-informed loss but do not correspond to the true geodesic.
+- **The CFM/RF comparison, while not the right primary baseline, is still informative** as it shows that off-the-shelf flow-matching methods do not capture OT geodesics well. However, the paper should temper its claim that "GeONet is the only framework among the comparison which encapsulates the geodesic behavior" — this is true only of the limited set of comparisons made and does not establish superiority over methods designed for the same task. The 0.0 error at t=0 for CFM/RF (Table 2) confirms these methods condition on initial data directly, making the t=0 comparison meaningless.
 
-2. **No hyperparameter sensitivity study for loss weights**: The loss function includes four weighting parameters (α₁, α₂, β₀, β₁) with no ablation or sensitivity analysis. Multi-objective PDE-constrained optimization is known to be sensitive to such weights, and the paper does not address how these were chosen or how robust the results are to their variation.
+- **Experimental scope is limited to 1D/2D mixtures and MNIST in a 32D latent space.** Higher-dimensional tests (e.g., 5D-10D distributions) where traditional solvers truly fail would better demonstrate the method's practical value. The limitations section acknowledges the scaling issue with branch input dimension. The MNIST experiment's decoded geodesics have large ambient-space error (acknowledged by the authors), weakening the claim that GeONet "works" on images.
 
-3. **Error of the POT reference itself is not characterized**: The paper uses POT-computed geodesics as reference to compute L¹ errors, but does not report how close the POT solution is to the true geodesic. Without a convergence study of the discrete solver, the reported errors are hard to interpret in absolute terms.
+- **High variance in 1D results (e.g., 5.76 ± 3.56 at t=0.5 for random pairs)** suggests performance varies considerably across test pairs. The paper does not analyze which pairs produce large errors or discuss failure cases.
+
+- **Loss weights α₁, α₂, β₀, β₁ are mentioned but not specified or ablated** in the main text (presumably in the stripped appendix). An ablation showing sensitivity to these weights would strengthen confidence in optimization stability.
 
 ### Trivial
-None.
+- The text in the comment block (lines 379-381) about the L¹ error containing the problematic "corresponds to percentage error" phrasing is draft text that should either be removed or corrected before publication.
+
+- The paper references Table 3 and CIFAR-10 experiments that are not present in the main text (likely in stripped appendix).
 
 ## Nice-to-Haves
-- Comparison to Lacombe et al. (2023) or Amos (2023) would strengthen the claim of being the first amortized geodesic operator learning method.
-- Replacing the MNIST experiment with controlled image data where the geodesic can be validated in the original space (e.g., subsampled MNIST where POT can compute a reference, or synthetic 2D bump images with known geodesics).
+- Comparison with prior amortized OT methods (Lacombe et al., Amos et al.) as discussed above.
+- Error decomposition showing what proportion comes from CE violation vs. HJ violation.
+- Ablation on sharing trunk parameters between primal and dual networks vs. keeping them separate.
+- Visualization of a failure case (highest-error test pair) to reveal systematic biases.
 
 ## Removed Points
-- Criticism that CFM/RF comparisons are "meaningless" — these are reasonable baselines for comparing learned transport between distributions. GeONet outperforms them meaningfully. However, the caveat that they are not geodesic-specific solvers is noted.
-- The suggestion that the paper's contribution "collapses to an architectural variation" without comparison to Lacombe et al. — this overstates the issue, as Lacombe et al. solve static OT maps, not geodesics.
-- Any formatting/style nitpicks or reproducibility nitpicks about undisclosed hyperparameters (training details are referenced to appendices that were stripped by the parser).
+The following points from the harsh critic were evaluated against the paper and found to be overstated or based on removed/draft text:
+
+1. **"Error metric is uninterpretable, invalidating experimental claims"** — The error metric ambiguity is a real concern (retained as a Major weakness above). However, the harsh critic's claim that this "invalidates every experimental claim" is too strong. The relative comparisons between methods and settings remain interpretable even if the absolute scale is unclear. **Retained as Major (not Fatal).**
+
+2. **"Baseline comparisons with CFM and RF are methodologically unsound"** — The comparison is imperfect but not unsound. It shows that flow-matching methods don't capture OT geodesics, which is a valid observation. The lack of amortized OT baselines is the real gap. **Retained as a Minor weakness (conflated tasks) and partly absorbed into the Major weakness about missing amortized OT baselines.**
+
+3. **"Mesh-invariance and zero-shot super-resolution claims are overstated"** — The paper acknowledges the branch input limitation in Section 5. The super-resolution is demonstrated experimentally. The claim is slightly overstated but not invalid. **Retained as a qualified Major weakness.**
+
+4. **"Limited experimental validation"** — Valid concern but somewhat inevitable given the method's scaling properties. **Retained as Minor weakness.**
+
+5. **"The paper does not report the number of training pairs"** — This is likely in the stripped appendix. **Removed** per the rule about missing appendix content.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The key insight — that the KKT conditions of the Benamou-Brenier problem can be converted into a physics-informed operator learning loss, enabling amortized geodesic prediction without geodesic training data — is the paper's own contribution and is already well articulated.
 
 ## Suggestions
-1. **Redesign the real-data experiment**: Either validate GeONet directly in pixel space on low-resolution images where POT can compute reference geodesics (e.g., 8×8 blurred MNIST), or on synthetic image data with analytically known geodesics. The current latent-space experiment does not support the paper's central claims and should either be substantially strengthened or removed.
-2. **Add at least one amortized learning baseline**: Re-implement a simple version of Lacombe et al. (2023) or a per-pair PINN approach and compare accuracy and speed. This would isolate the amortization benefit from the architecture choice.
-3. **Add boundary conditions or uniqueness discussion for the HJ network**: Either add loss terms enforcing u boundary values (e.g., using POT-computed Kantorovich potentials on a subset of training pairs) or provide a theoretical argument that the coupled PDE system + μ boundaries uniquely determine u.
-4. **Report training time and convergence**: Include training time, number of training pairs, epochs, and a break-even analysis showing how many test-time predictions are needed to amortize training.
+1. **Clarify the L¹ error metric immediately.** State explicitly: (a) the formula used (is it Σ|C-μ|·dx, Σ|C-μ|, or 100× the true L¹?), (b) the mesh spacing and grid size, and (c) ensure values are bounded appropriately for probability densities. Label tables clearly (e.g., "L¹ error (%)" if scaled by 100).
+2. **Add at least one comparison with an amortized OT method** (Lacombe et al., Amos et al.) on the Gaussian mixture task.
+3. **Qualify "mesh-invariant" in the abstract/introduction** to specify "output mesh-invariant" or "trunk-side mesh-invariant," and acknowledge input-side mesh dependence there rather than deferring entirely to the Limitations section.
+4. **Include a small ablation study** of the PDE loss weights and/or the effect of the HJ network vs. using only the CE loss with a simpler regularizer.
+5. **Add a brief analysis of failure cases** — which test pairs produce the largest errors and why?
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison to GeONet |
-|------|-----------|---------------------|
-| `Bh4BW69ILq` (UOT transform coefficients) | 2.60 | Much weaker — unclear contribution, poor theoretical rigor, tiny experiments. GeONet is clearly stronger. |
-| `i7P2mK3x3o` (Flow neural network OT) | 4.20 | Similar quality — both have unclear OT guarantees and missing comparisons, but GeONet has cleaner theory and better synthetic validation. GeONet is marginally stronger. |
-| `CrmUKllBKs` (Pseudo physics-informed NO) | 4.33 | Comparable — novel idea but shaky theoretical foundation and marginal improvements. GeONet is slightly stronger. |
-| `CfZPzH7ftt` (DIOTM for neural OT) | 6.50 | Stronger — better real-data validation (I2I translation), clearer theoretical contribution, more comprehensive experiments. GeONet's MNIST experiment is weaker than DIOTM's I2I. |
-| `WzCEiBILHu` (Topological Schrödinger Bridge) | 7.50 | Much stronger — rigorous theory, clear contribution, well-executed experiments across domains. |
-| `0h6v4SpLCY` (Wasserstein DRO guarantees) | 7.33 | Much stronger — rigorous theory, clear contribution, well-validated results. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/CfZPzH7ftt.md` | 6.50 | DIOTM: Neural OT via displacement interpolation, accepted. Stronger experiments (I2I translation), similar theoretical depth. GeONet has more novelty in problem formulation but weaker validation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/J9FgrqOOni.md` | 6.50 | Discretization-invariance in neural operators, accepted. Stronger theoretical contribution. GeONet is less theoretically rigorous. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/gIiz7tBtYZ.md` | 6.00 | Neural OT with General Cost, accepted. Similar experimental scope (toy data + MNIST), comparable presentation. GeONet's problem is more novel. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0FxnSZJPmh.md` | 5.67 | PI-DIONs: Physics-informed inverse operator networks, accepted. Similar quality — both have interesting physics-informed operator learning but limited experiments. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/60FseFP084.md` | 4.25 | SPONs: Structure-preserving operator learning, rejected. Weaker contribution, limited experiments. GeONet is clearly better. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ueQ6T58ZAK.md` | 4.00 | Dynamic OT via Ensemble Systems, rejected. Unclear contribution, impractical algorithm. GeONet is substantially better. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/q6hEuC48Dk.md` | 3.80 | RBON: Radial Basis Operator Networks, rejected. Poorly written, minimal experiments. GeONet is much better. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Bh4BW69ILq.md` | 2.60 | Unbalanced OT solver, rejected. Very weak paper. GeONet is incomparably better. |
 
-The paper sits between the 4.2–4.33 range (comparable to average rejected papers) and the 6.5 range (accepted papers). It is better motivated and architected than the typical 4-range reject, but the MNIST experiment is genuinely misleading and the missing baselines prevent proper evaluation of the contribution. These weaknesses prevent it from reaching the threshold for acceptance despite the originality of the core idea.
+GeONet sits above papers scoring 4.25 and below, and is comparable to papers scoring 5.67–6.00. Its core idea and problem formulation are more novel than several accepted papers in this range, but the experimental validation is hampered by the ambiguous error metric, missing amortized OT baselines, and limited scope. With revisions addressing these issues, the paper would be a solid accept.
 
-MY FINAL SCORE: <score>4.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

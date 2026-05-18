@@ -1,81 +1,83 @@
-Here is my final consolidated review.
-
----
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes the StoNet (stochastic neural network) as a bridge between linear models and deep neural networks (DNNs). The StoNet is formulated by adding noise to the pre-activation values at each hidden layer of a DNN, turning the network into a composition of simple linear/logistic regressions. The paper claims: (1) the StoNet is asymptotically equivalent to the DNN in terms of log-likelihood (Lemma 1, cited from prior work); (2) sparse learning theory with the Lasso penalty can be adapted from linear models to the StoNet, yielding consistent structure selection (Theorem 1); (3) by asymptotic equivalence, this consistency extends to Lasso-penalized DNNs (Corollary 1); and (4) a post-StoNet procedure can quantify prediction uncertainty for DNNs. Empirical results on variable selection, calibration (CIFAR10), and UCI regression are provided.
+This paper introduces the stochastic neural network (StoNet) as a bridge between linear models and deep learning, showing how sparse learning theory (Lasso) can be adapted from linear models to DNNs. The authors prove consistency of the penalized StoNet estimator (Theorem 1), extend this claim to DNNs via asymptotic equivalence (Corollary 1), and propose a post-StoNet procedure for uncertainty quantification. The core idea—decomposing a DNN into a factorized likelihood by adding noise at each layer—is clever and opens an avenue for transferring classical statistical theory to deep learning.
 
 ## Strengths
 
-- **Theorem 1 provides explicit convergence rates for sparse StoNet learning.** The rate expression (e.g., \(r_n = c_1 \frac{\sigma_{1,n}^2}{\kappa_{\min}^2} d_{1,n} p_n^s \frac{\log p_n}{n} + \dots\)) decomposes dependence on network widths, noise variances, and sparsity, making the connection to linear-model theory concrete. This is a genuine theoretical contribution for the StoNet model itself.
+- **Theorem 1 provides explicit, non-trivial convergence rates for the Lasso-penalized StoNet estimator** that depend on the network depth, layer widths, and sample size (eq. 4a/4b). The rates are derived separately for linear and logistic output layers, showing careful handling of different settings. This is a genuine theoretical contribution that goes beyond simply claiming consistency.
 
-- **Closed-form recursive uncertainty quantification via Eve's law.** Section 4 derives a tractable recursive formula for prediction intervals of the StoNet, avoiding expensive MCMC or resampling. Table 1 shows that with appropriately small noise variances (the half-\(\sigma^2\) setting), the StoNet's coverage rates approach the nominal 95% on synthetic data generated from true DNNs.
+- **Lemma 1 (cited from Liang et al., 2022) establishes asymptotic equivalence between the StoNet and DNN likelihood surfaces** under bounded activation assumptions, which provides the theoretical foundation for transferring results between the two models. The paper correctly identifies that this equivalence enables adaptation of linear-model theory to deep learning.
 
-- **Improved calibration on CIFAR10.** Table 2 shows that post-StoNet consistently reduces ECE compared to temperature scaling and matrix scaling across three architectures (DenseNet40, ResNet110, WideResNet-28-10). For DenseNet40, ECE drops from 0.119 (uncalibrated) to 0.008 (post-StoNet), versus 0.013 for temperature scaling.
-
-- **Variable selection experiments confirm that the StoNet can recover relevant features.** The regularization-path plots (Figure 2) demonstrate that both the StoNet and a Lasso-penalized DNN can identify the five true variables among 20 correlated inputs, validating the practical behavior suggested by Theorem 1.
+- **The post-StoNet procedure (Section 6.2) demonstrates promising empirical results** on CIFAR-10 (improved ECE over temperature/matrix scaling) and 4 UCI regression datasets (shorter intervals than split conformal). While heuristic, the idea of using the DNN's last hidden layer as a sufficient dimension reduction and then fitting a simple model for UQ is intuitive and practically motivated.
 
 ## Weaknesses
 
 ### Major
 
-- **Corollary 1 (consistency of Lasso-penalized DNNs) lacks rigorous justification.** The paper asserts: "it follows from Lemma 1 that a consistent estimator of \(\theta\) can also be obtained by directly maximizing the penalized log-likelihood function of the DNN model." Lemma 1 establishes asymptotic equivalence of the *unpenalized* log-likelihoods of the StoNet (joint) and DNN (marginal). Extending this to the *penalized* setting requires additional reasoning — one needs to show that the penalty term does not break the equivalence, or provide a separate argument. The paper offers none. Since the claim that "consistent sparse deep learning can be obtained by training a DNN with an appropriate Lasso penalty" is stated as a headline contribution (abstract, introduction), and the paper explicitly notes that this theory "has not been previously established," this gap is serious. Theorem 1 properly establishes consistency for the sparse *StoNet*, but the jump to the *DNN* (Corollary 1) is asserted without proof.
+- **Experimental validation of the core sparsity claim is far too limited.** Corollary 1 claims that training a DNN with Lasso yields consistent structure selection—claimed as "the first theoretical justification" of this common practice. Yet the only experimental support is a single synthetic dataset (p=20, n=500) with tanh activation, showing variable selection paths for two model variants. The paper does not report selection accuracy (F1, TPR, FPR), does not compare against any sparse DNN baselines (e.g., Scardapane et al. 2017, Lemhadri et al. 2019), and crucially does **not** test the high-dimensional regime (p_n ≫ n) that Theorem 1 explicitly allows. For a paper whose headline claim is "consistent sparse deep learning," the absence of adequate empirical backing is a significant gap.
 
-- **The UCI regression comparison (Table 3) comparing interval lengths at different coverage levels is invalid.** Split conformal prediction achieves exact 0.95 coverage by construction. The post-StoNet intervals, according to the information available, show coverage rates well below 0.95 on multiple datasets (e.g., ~0.82 for Protein, ~0.88 for Physicochemical). Comparing interval lengths at different coverage levels is meaningless — shorter intervals with worse calibration are not superior. The paper claims "significant improvement in terms of the lengths of the prediction confidence intervals" without acknowledging that the coverage differs. This undermines the primary experimental evidence for the post-StoNet procedure's practical value. A fair comparison would require both methods to operate at the same coverage level (e.g., by calibrating the post-StoNet intervals on a hold-out set or embedding them inside a conformal procedure).
+- **The post-StoNet UQ evaluation lacks standard baselines.** For regression (Table 3), the only comparison is split conformal prediction; for classification (Table 2), only temperature scaling and matrix scaling. There is no comparison to MC Dropout, Deep Ensembles, or Bayesian neural networks—the most commonly used UQ methods for DNNs. The claim of "superiority" is therefore not supported against the relevant state of the art.
+
+- **The paper does not discuss its key limitations.** The theory requires bounded activation functions (Assumption A2, cited from Liang et al. 2022), which excludes ReLU—the most widely used activation in modern DNNs. The paper uses tanh throughout, but never acknowledges this restriction. The convergence rates involve σ_{l-1,n}^{-4} terms that blow up as σ²→0, creating a tension between DNN approximation quality and convergence rate that is not addressed. These are not minor oversights; they are material to interpreting the scope of the results.
 
 ### Minor
 
-- **The post-StoNet uncertainty quantification procedure lacks theoretical guarantees for DNN predictions.** Section 6.2 provides only an "intuitive justification" based on sufficient dimension reduction. No proof is given that the resulting intervals achieve nominal coverage for the DNN's predictions or for the true response. While the CIFAR10 calibration results are encouraging, the paper does not establish when or why the procedure should produce calibrated intervals for a general DNN. This limits the contribution to a heuristic rather than a principled method.
+- **The logical step from Lemma 1 to Corollary 1 is presented too tersely.** The paper states that consistency of the penalized DNN estimator "follows from Lemma 1" without spelling out the argmax theorem argument (van der Vaart 1998, Thm 5.7). While this is a standard step and the gap is not as severe as the reviewer claims (since the penalty is additive and identical, it cancels in the difference), a rigorous paper should either provide the argument or cite the theorem explicitly.
 
-- **Lemma 1 compares a joint likelihood (StoNet, with latent variables) to a marginal likelihood (DNN), which is mathematically subtle and not explained in the main text.** The paper states: \(\sup_{\theta} |\frac{1}{n}\sum \log \pi(Y, Y_{\text{mis}}|X,\theta) - \frac{1}{n}\sum \log \pi_{\text{DNN}}(Y|X,\theta)| \xrightarrow{p} 0\). One likelihood includes the latent variables, the other marginalizes over them. The paper provides no intuition for why these should converge, and the assumptions (A1–A2) are deferred to the (stripped) appendix. Since Lemma 1 is cited from Liang et al. (2022), this does not invalidate the paper, but the lack of explanation makes the foundational bridging claim harder to evaluate.
+- **The post-StoNet procedure is presented as a practical heuristic without theoretical guarantees.** The paper provides an "intuitive justification" (SDR property + asymptotic equivalence) but no coverage guarantees or calibration analysis. The procedure may work well empirically, but the paper should be clearer about what is theoretically justified versus heuristic.
 
-- **Table 3 coverage details are not discussed in the main text.** The paper reports coverage rates and interval lengths but does not comment on whether the post-StoNet intervals achieve the nominal 95% coverage. This omission is important because if coverage is systematically below nominal, the claimed superiority in interval length is misleading.
+- **No ablation study comparing IRO vs. ASGMCMC training algorithms.** The paper describes both algorithms but never compares their performance. It is unclear whether the reported results depend on the specific training procedure.
+
+- **The effect of σ² on the convergence rates is not reconciled with its role in DNN approximation.** Remark 1 states σ² is set to "very small values" in experiments, but the rates in Theorem 1 depend inversely on σ⁴ terms. The paper does not discuss how to choose σ² in practice or how this tension is resolved.
 
 ### Trivial
 
-- None beyond the standard formatting artifacts typical of parsed PDFs.
+- The paper states results are for fully connected networks but claims they "can be extended to convolutional neural networks" without any supporting argument or reference.
+
+- Some notational inconsistencies (e.g., notation Σ^{(t)}_{h+1} in Section 4 is introduced but the recursive formula is deferred to an appendix).
 
 ## Nice-to-Haves
 
-- **Provide a proof sketch or formal argument for Corollary 1** showing how the unpenalized asymptotic equivalence extends to the penalized setting (e.g., by showing the penalty term is asymptotically negligible or by a direct argument on the penalized objective).
-- **In the UCI experiments, calibrate the post-StoNet intervals** (e.g., using a hold-out set to adjust the variance estimate) so that both methods achieve the same empirical coverage before comparing lengths.
-- **State the key assumptions A1–A2 in the main text** so that the reader can assess Lemma 1 without consulting the appendix.
+- Comparing post-StoNet to MC Dropout and Deep Ensembles would significantly strengthen the UQ evaluation.
+- A high-dimensional simulation (p=500, n=100, few relevant features) testing structure selection would validate the claimed regime of Theorem 1.
+- A sensitivity analysis of σ² would help practitioners understand its role.
 
 ## Removed Points
 
-- *"First consistency theory for Lasso-penalized DNNs"* (from Strength Finder) — This claimed strength conflicts with the verified weakness that Corollary 1 is not properly justified. The strength overstates what is actually established.
-- *"Post-StoNet UQ outperforms conformal inference on interval length"* (from Strength Finder) — This conflicts with the verified weakness that the comparison is invalid (different coverage levels). The weakness wins per the meta-review guidelines.
-- *Lemma 1 is "not credible"* (from Harsh Critic, treated as fatal) — The lemma is cited from prior published work (Liang et al., 2022), not a new claim by this paper. The concern about its form is reasonable but does not rise to a fatal structural issue for the paper under review; it is retained as a minor weakness about clarity.
-- *Missing appendix/proofs in appendix* (from Harsh Critic / implicit) — The parser strips these sections; they exist in the original submission.
+- **Point about Algorithm 1 not being in main text**: Algorithms are conventionally placed in appendices; the parser strips those sections. Not a valid criticism.
+- **Point about missing appendix content / proofs**: The parser strips appendices; these exist in the original submission. Not valid.
+- **Point about algorithmic detail for reproducibility**: ASGMCMC is cited to Liang et al. (2022) with the note that it is "a slight modification"; this is standard practice for referencing previously published methods.
+- **Point about Corollary 1 being a "fatal flaw" or "logical gap"**: The reviewer claimed the penalty prevents uniform convergence transfer, but since the penalty is additive and identical across both objective functions, it cancels in the difference. The step from Lemma 1 to Corollary 1 follows from the standard argmax theorem—the paper is terse but not incorrect. This is a minor presentation issue, not a fatal flaw.
+- **Strength Finder's generic strengths about "important problem"**: Removed as superficial or not specific to this paper.
+- **Strength Finder's claim about "Corollary 1 showing first theoretical justification"**: This claim is the paper's own, and the limited experiments weaken it. Kept as a note but softened.
+- **The human-finder comparisons to other papers**: Not directly relevant to this paper's evaluation.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective about the paper that meaningfully transcends what the authors themselves articulate.
+None beyond the paper's own contributions. The reviews do not surface any observation about the paper's approach that the authors themselves do not already articulate.
 
 ## Suggestions
 
-1. **Provide a rigorous justification for Corollary 1.** Either prove that the penalized DNN objective inherits consistency from the penalized StoNet objective (e.g., via uniform convergence of the penalized objective functions) or weaken the claim to what is actually proven (consistency of the sparse StoNet only).
-2. **Fix the UCI regression comparison.** Recalibrate the post-StoNet intervals (e.g., by adjusting the variance on a hold-out set) to match the coverage of split conformal prediction, and then compare lengths at the same empirical coverage.
-3. **Add theoretical guarantees or caveats for the post-StoNet UQ procedure.** Either prove asymptotic nominal coverage under stated conditions, or clearly frame the procedure as a heuristic and remove claims of superiority over conformal inference.
-4. **Discuss Lemma 1 more clearly in the main text.** Explain why the joint likelihood of the StoNet converges to the marginal likelihood of the DNN, even briefly and informally, so readers can assess the bridging claim.
-5. **Report calibrated Expected Calibration Error (ECE) or coverage curves** for the UCI experiments, not just average coverage and length.
+1. Add a high-dimensional simulation (p > n) with sparsity metrics (F1, TPR, FPR) and compare against L1-regularized DNN baselines (Scardapane et al., Lemhadri et al.).
+2. Add MC Dropout and Deep Ensembles to the UQ comparison tables.
+3. Discuss the bounded-activation limitation (excludes ReLU) explicitly in the main text.
+4. Provide a brief argument (or citation) for how Lemma 1 + the argmax theorem yields Corollary 1, and mention the well-separated maximum condition.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration anchors (all from the calibration corpus):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4xWQS2z77v.md` | 8.0 | Rigorous theory with clean proofs; far stronger than the current paper. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2U8owdruSQ.md` | 6.8 | Well-received paper with clear contributions and valid evaluation; stronger overall. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/NHhjczmJjo.md` | 7.0 | Strong theory+empirics with proper justification; current paper has weaker theoretical support. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/8wAL9ywQNB.md` | 6.0 | Mixed reviews but accepted; core claims are properly supported, unlike here. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vcX0k4rGTt.md` | 5.75 | Accepted with some weaknesses but valid central claims. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vpo2K9Xivv.md` | 3.8 | Rejected; narrow scope and limited applicability. Current paper has more ambition and some valid components. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/lLhEQWQYtb.md` | 3.5 | Rejected; low novelty, weak experiments. Current paper is more creative. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `4xWQS2z77v.md` — Exploring Loss Landscape Of Regularized Neural Networks Via Convex Duality | 8.00 | Much tighter theory, cleaner narrative, well-scoped claims. Our paper is significantly less rigorous. |
+| `usFdPd4Ghs.md` — Deep Kernel Posterior Learning under Infinite Variance Prior Weights | 6.80 | Solid theory with adequate experiments. Our paper has comparable theory but weaker experiments. |
+| `vcX0k4rGTt.md` — Approximating Full Conformal Prediction for Neural Network Regression | 5.75 | Focused contribution, thorough evaluation. Our paper is more ambitious but less thorough. |
+| `V6JRkfj9dU.md` — How many samples are needed to train a deep-ReLU neural network? | 4.67 | Overclaimed scope, limited experiments. Similar issues to our paper. |
+| `7HdtLgsvys.md` — Tube Loss for Prediction Interval Estimation | 2.50 | Very weak experiments and writing. Our paper is clearly better. |
 
-The paper has a creative and ambitious framework, and Theorem 1 (sparse StoNet consistency) is a genuine contribution with explicit rates. However, the headline claims — that consistency extends to Lasso-penalized DNNs (Corollary 1) and that the post-StoNet procedure demonstrably outperforms conformal prediction — are not properly supported. The gap in Corollary 1's justification and the invalid experimental comparison for UCI regression are serious enough that the central advertised contributions are not established. The paper is stronger than the rejected 3.5–3.8 anchors (which lack comparable theoretical ambition) but significantly weaker than the accepted 5.75–6.0+ anchors, whose core claims are properly justified and whose experiments support their conclusions.
+**Score rationale**: The paper has genuine theoretical novelty (Theorem 1's convergence rates) and an interesting bridging framework, but the experiments fall well short of supporting the paper's strong claims about "consistent sparse deep learning" and "superior" UQ. Missing baselines, no high-dimensional tests, and unacknowledged limitations (bounded activations, σ² tension) further weaken the submission. Compared to accepted papers in the 5.75–6.80 range, this paper is less thoroughly evaluated. It is above clearly weak papers (2.50) but below well-executed work. A major revision with expanded experiments and honest limitation discussion could raise it significantly.
 
-MY FINAL SCORE: <score>4.0</score>
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

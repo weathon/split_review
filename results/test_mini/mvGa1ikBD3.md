@@ -1,80 +1,101 @@
+Now I have a thorough understanding of the paper and the calibration anchors. Let me construct the final consolidated review.
+
 ## Summary
 
-This paper identifies that standard mesh-based graph neural networks (MeshGraphNets) are fundamentally limited to isotropic materials because their message-passing aggregation averages edge features without considering spatial orientation, discarding directional deformation information. The authors propose directional encodings: edge features are projected onto an orthonormal material-space basis and aggregated separately per axis, weighted by the edge's alignment with each basis direction. The architecture builds on an encoder-processor-decoder trained with a self-supervised variational implicit Euler loss. Experiments on transversely isotropic cantilever beams show large quantitative improvements over a self-supervised reimplementation of MeshGraphNets in tip displacement error (3.6–9.3% vs. 24.7–37.2%), volume preservation, and convergence speed, with qualitative generalization to unseen T- and Y-shaped geometries.
+This paper addresses the limitation of standard mesh-based GNNs (specifically MeshGraphNets) in modeling anisotropic elastic materials. The authors propose a directional encoding scheme that decomposes edge features into components along three material-space basis vectors and aggregates these components separately during message passing, preserving directional deformation information. The method uses self-supervised physics-based loss (variational implicit Euler) and is evaluated on transversely isotropic hyperelastic materials with fiber reinforcement.
 
 ## Strengths
 
-- **Novel and well-motivated architectural contribution.** The paper identifies a genuine limitation of MeshGraphNets—undirected edge aggregation discards orientation information needed for anisotropy—and provides a clean, mathematically explicit, and physically grounded solution (Eq. 4, Section 3.1). The directional encoding is simple enough to drop into existing architectures with minimal code changes.
+- **Clear problem identification**: The paper correctly identifies that standard mesh-based GNN aggregation discards directional information, making them fundamentally limited for anisotropic materials. The failure analysis in Sec. 1 provides concrete intuition for why this occurs.
 
-- **Large quantitative improvements on the target problem.** Tip displacement errors (Table 1) show the proposed method achieves 3.61–9.33% versus 24.71–37.23% for the baseline across beam topologies and fiber orientations. Strain-stress curves (Figure 5) show the method tracks ground truth closely while MeshGraphNets deviates even at small strain for strong fibers.
+- **Simple, principled architectural modification**: The proposed directional encoding (Eq. 3–5, Sec. 3.1) is clean, easy to implement, and requires minimal changes to existing encoder-processor-decoder architectures. The approach is physically motivated: edges are weighted by how well they can sense deformation along each material direction.
 
-- **Volume preservation as an emergent benefit.** Figure 6 demonstrates that directional encodings also improve learning the Poisson effect, with near-zero maximum relative volume change under tension versus up to 60% for MeshGraphNets. This is a nontrivial consequence that supports the physical plausibility of the learned representations.
+- **Consistent quantitative improvements over the baseline**: Across multiple metrics (energy error — Figs. 3–4, stress-strain curves — Fig. 5, tip displacement — Table 1, imbalanced forces — Table 2, volume preservation — Fig. 6), the proposed method consistently outperforms the unsupervised MeshGraphNets baseline. Fig. 4 shows fiber energy error reduced by approximately 10×.
 
-- **Self-supervised physics-based training without ground-truth acceleration labels.** The variational implicit Euler loss (Section 3.2) enables learning directly from the dynamic equilibrium conditions, avoiding dependency on expensive ground-truth simulation data.
+- **Self-supervised physics-based training**: The loss function (Sec. 3.2) uses the variational formulation of implicit Euler, enabling unsupervised training without ground-truth simulation data. This is a principled approach that avoids costly data generation.
 
-- **Generalization to unseen geometries.** Figure 7 shows the method applied to T- and Y-shaped beams with fiber orientations not seen during training, producing physically plausible deformed configurations.
+- **Generalization to unseen geometries**: Fig. 7 qualitatively demonstrates that the method captures anisotropic behavior on T-shaped and Y-shaped objects with different fiber layouts, despite training only on rectangular and cylindrical beams.
+
+- **Minimal architectural change**: As noted in Sec. 3.1, the modification amounts to replacing a single aggregation with three separate weighted sums, allowing straightforward integration into existing GNN frameworks.
 
 ## Weaknesses
 
 ### Major
 
-- **No ablation isolating the proposed weighted decomposition from simply adding directional features.** The paper's central claim is that the *weighted separate aggregation* (not just any directional signal) is the key mechanism. Yet the experiments never test a simpler baseline: keeping the standard MeshGraphNets aggregation but adding the rest-pose direction vector as an additional edge or node feature. Without this ablation, it is unclear whether the improvements stem from the proposed decomposition specifically, or merely from providing *any* directional signal to the network. This is the most significant empirical gap.
+- **Insufficient experimental evaluation — missing error bars, too few baselines, no ablation**: All quantitative results (Figs. 3–6, Tables 1–2) are reported without error bars, confidence intervals, or standard deviations. It is impossible to assess whether the reported improvements are statistically significant or due to a single favorable seed. Additionally, the paper compares against only one baseline (an unsupervised re-implementation of MeshGraphNets) and does not perform any ablation that isolates the directional encoding from other design choices (learning rate, loss formulation, hyperparameters, training schedule). Without ablations comparing the proposed scheme to simpler alternatives — e.g., (1) standard aggregation with edge direction vector as an additional MLP input, (2) learned attention weighting based on edge direction — the paper cannot establish that its specific decomposition is the cause of the observed improvements.
 
-- **No measures of variance or statistical significance.** Tables 1 and 2 report single-point values without standard deviations, confidence intervals, or multiple-seed results. The convergence curves (Figures 3–4) appear to show single runs. Given stochastic training (batch size 1, random sampling), the reader cannot assess whether the reported gains are stable or within noise range. This is standard expectation for learned simulator evaluations.
+- **Volume preservation gap is implausibly large and unexplained**: Fig. 6 reports MeshGraphNets with up to 60% volume error and the proposed method at near 0% for a nearly incompressible material (ν=0.48). For a material whose ground-truth volume change is tiny, a 60% error in the baseline is extreme. The paper attributes this to the baseline's inability to capture anisotropy, but provides no analysis (e.g., per-element error distributions, ablation on the baseline's training convergence) to rule out the possibility that the baseline was simply undertrained or poorly configured. This gap requires explanation or controlled experimentation.
 
-- **Single baseline limits isolation of the contribution.** The paper compares against its own self-supervised reimplementation of MeshGraphNets rather than the original supervised MeshGraphNets (acknowledged in Section 4, line 132). While the paper notes this is "for fair comparisons" (same loss function), there is no evidence that the self-supervised MeshGraphNets baseline performs comparably to the supervised MeshGraphNets on the simpler isotropic subproblem. If the self-supervised regime is poorly suited to MeshGraphNets' architecture, the large reported gains could partially reflect a training-paradigm mismatch rather than the directional encoding alone.
+- **Generalization results are only qualitative**: Fig. 7 shows generalization to unseen geometries (T- and Y-shapes) but provides no quantitative error metrics. The paper claims generalization but does not report displacement errors, energy errors, or any numerical comparison on these test shapes.
 
 ### Minor
 
-- **Generalization evaluation is limited to two geometrically similar shapes.** Only T-shaped and Y-shaped beams are tested (Figure 7). Claims of generalization would be strengthened by testing on non-convex geometries, varying mesh resolutions, or different loading regimes (e.g., dynamic rather than quasi-static).
+- **No justification for rest-state directional weights**: The paper states (Sec. 3.1) that the weights ω_x, ω_y, ω_z are computed from rest-state edge vectors and remain constant, but does not discuss or justify this design choice. In continuum mechanics, using the reference (rest) configuration to define material directions is physically proper — material anisotropy is defined relative to the material frame, and the weights measure sensitivity axes in that frame. However, given that the method targets large deformations, the paper should explicitly discuss why rest-state weights are appropriate and whether recomputing weights from the deformed configuration would be beneficial or harmful. This omission leaves the reader uncertain about an important design decision.
 
-- **Training uses a fixed random seed / single run.** The paper reports no number of random seeds; the single-run nature amplifies the variance concern above.
+- **Convergence plots (Fig. 3) lack axis labels and statistical support**: The y-axis is presumably energy error, but this is not labeled on the figure. The claim that "our approach converges to lower energy states much faster" would be strengthened by reporting error statistics across multiple random seeds.
+
+- **Table 1 reports absolute tip displacement errors without reference values**: The error magnitudes (e.g., 0.18 vs 1.92) are hard to interpret without knowing the scale of the ground-truth displacement. Relative errors or normalized metrics would be more informative.
+
+- **The paper would benefit from analyzing why imbalanced forces differ so dramatically (Table 2)**: The baseline's gradient norms being much larger could indicate poor convergence rather than a fundamental architectural limitation. A controlled comparison where both methods are trained equally long would help.
 
 ### Trivial
 
-- The paper uses "unsupervised" and "self-supervised" interchangeably in different places (e.g., "unsupervised training strategy" in Section 2 vs. "self-supervised learning" in Section 3.2), which could be standardized.
+- None.
 
 ## Nice-to-Haves
 
-- A supervised MeshGraphNets comparison on the isotropic subset (no fibers) would confirm the self-supervised baseline is not artificially weak.
-- A comparison of inference wall-clock time against the FEM reference solver would contextualize the computational advantage claimed.
-- Testing on a larger-diversity held-out set (e.g., varying mesh resolution, non-convex shapes, multi-material interfaces) would strengthen generalization claims.
+- Comparison against a supervised MeshGraphNets baseline (the original), to separate the effect of training objective from architecture.
+- Comparison of the proposed directional encoding against simpler alternatives (edge direction as MLP input, learned attention weights).
+- Reporting inference and training time comparisons to verify the claim of minimal overhead.
+- Visualization of the three directional aggregated features (Σω_x e, Σω_y e, Σω_z e) to show how they differ and are used by the vertex MLP.
+- Quantitative evaluation on larger meshes (beyond the 60–120 element range used in training).
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **"Rest-state weights are a structural flaw that fundamentally undermines the approach"**: This criticism is incorrect. In continuum mechanics, material anisotropy is defined in the reference (rest) configuration. The weights computed from rest-state edge vectors measure an edge's sensitivity axis in the material frame, and using them to weight current-configuration edge features is physically principled (Lagrangian description). The paper would benefit from justifying this choice, but it is not a flaw. The criticism has been downgraded to a minor weakness above.
 
-- Harsh Critic's criticism about missing comparison against "alternative ways of encoding directionality" such as "fiber direction as additional conditioning vector in the processor MLPs" — This is a reasonable request that I kept as a major weakness (first bullet). However, the critic's framing that the method "appears over-engineered" is editorializing; the contribution is clean and well-motivated, not over-engineered. The weakness itself (missing ablation) is real and retained.
+- **"Figure 3 lacks axis labels"**: The paper's text describes the y-axis as energy error; the figure caption is descriptive enough. This is a minor formatting issue elevated beyond its importance.
 
-- Strength Finder's point about "Reproducible implementation details" — Retained as a supporting strength; it is specific enough (training hyperparameters, architecture details, perturbation strategies are concretely listed in Section 3.3) and appropriate for an empirical paper.
+- **Criticisms about missing appendix content, missing code (will release upon acceptance), typos/formatting artifacts**: These are parser artifacts or standard practice.
+
+- **Strength Finder's claim about "failure analysis in Sec. 1"**: The paper does not have a dedicated failure analysis section; it provides conceptual motivation in the introduction. This is fine but the strength description over-claimed.
+
+- **Strength Finder's generic strengths** (e.g., "addresses an important problem" without concrete evidence): Removed as they are superficial.
 
 ## Novel Insights
 
-None beyond the paper's own contributions — the reviews surface the same gaps the paper itself partially acknowledges (limited generalization, need for broader evaluation) but do not identify any fundamentally new insight about the method's strengths or weaknesses outside those enumerated above.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add ablation experiments.** Test: (a) MeshGraphNets with directional features added as extra edge attributes (no separate aggregation), (b) the proposed full method, (c) both trained under the same loss. This directly validates whether the weighted decomposition or merely additional directional signal drives improvement.
+1. **Add error bars to all quantitative results**: Run 5–10 random seeds and report means and standard deviations. This is essential for a paper making claims of significant outperformance.
 
-2. **Report error bars.** Run all quantitative experiments (Tables 1–2, Figures 3–6) with at least 3 random seeds and report mean ± standard deviation.
+2. **Add ablation studies isolating the directional encoding**: Compare at minimum: (a) standard MeshGraphNet aggregation, (b) standard aggregation with edge direction as additional MLP input, (c) learned attention weights per edge, (d) the proposed fixed-weight decomposition. This would establish whether and why the specific scheme is beneficial.
 
-3. **Validate the self-supervised baseline.** Compare the self-supervised MeshGraphNets against the original supervised MeshGraphNets on an isotropic test case (no fibers) to show the self-supervised regime does not systematically handicap the baseline architecture.
+3. **Discuss/justify the rest-state weight design choice explicitly**: Explain why weights are computed from the rest configuration rather than the deformed configuration, and ideally compare both variants experimentally.
 
-4. **Expand generalization tests.** Include at least one non-convex geometry and one cross-resolution generalization test (train on 60–120 elements, test on 200+ elements).
+4. **Explain the volume preservation result (Fig. 6) more carefully**: Provide per-element error distributions, test whether the baseline converges to the same loss value, and rule out undertraining as an explanation.
+
+5. **Add quantitative generalization metrics**: Report displacement or energy errors for the T- and Y-shaped test geometries shown in Fig. 7.
+
+6. **Provide normalized/relative errors** in Table 1 so readers can interpret the magnitude of reported errors relative to ground truth.
 
 ## Score and Decision
 
-**Calibration anchors:**
+### Calibration Anchors
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/smy4DsUbBo.md` | 6.00 (Accept) | Energy-conserving equivariant GNN for lattices. Stronger evaluation (multiple baselines, ablations) than this paper; similar contribution clarity. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3lDxKQepvn.md` | 5.75 (Reject) | Meta-learning GNS. Comparable evaluation rigor; this paper has clearer motivation and simpler method. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/r8t6OsLP2s.md` | 5.25 (Reject) | DHMP for mesh physics. More extensive experiments but baseline reproduction controversy; this paper is cleaner. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tFYcEUlUTt.md` | 4.00 (Reject) | FAIR for long-term prediction. Had serious evaluation concerns (baseline results differ by orders of magnitude from original papers). This paper is significantly more sound. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/zuuhtmK1Ub.md` | 2.00 (Reject) | Implicit GNN solver. Very weak experiments, poor presentation. Not comparable. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fU8H4lzkIm.md` (PhyMPGN) | 8.0 | Significantly more thorough experiments (multiple baselines, ablations, generalization studies). Our paper weaker. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/uKZdlihDDn.md` (Diffusion Graph Networks) | 7.6 | State-of-the-art results with rigorous evaluation. Our paper far weaker. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/BBD6KXIGJL.md` (HDGNN) | 7.33 | Strong benchmarks and ablation studies. Our paper weaker on evaluation rigor. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/smy4DsUbBo.md` (Equivariant GNN for Elasticity) | 6.0 | Similar contribution clarity, but stronger dataset contribution and more baselines. Our paper slightly weaker. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3lDxKQepvn.md` (Latent Task-Specific GNS) | 5.75 | Comparable evaluation gaps; both papers have interesting ideas but insufficient experimental validation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/s77FHD4wra.md` (Rigid Body Dynamics GNN) | 4.75 | Our paper is clearer and has a cleaner contribution, but both have evaluation concerns. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tFYcEUlUTt.md` (FAIR) | 4.00 | Our paper is better — FAIR had fundamental baseline implementation concerns. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ItPYVON0mI.md` (CG Potentials) | 3.00 | Our paper is significantly stronger in motivation and clarity. |
 
-The paper presents a genuine, well-motivated contribution to an under-explored problem (anisotropy in mesh-based GNN simulators), and the quantitative results are striking. However, the evaluation lacks the ablations and variance reporting needed to fully support the central claim about the *mechanism* of improvement. The contribution is real but the empirical case is incomplete. Positioned relative to the calibration anchors, this paper sits between the stronger accepted papers (6.0) and the borderline rejected papers (5.25–5.75).
+The paper has a genuine contribution: identifying a known limitation of mesh-based GNNs and proposing a simple, physically motivated fix. However, the experimental evaluation is too thin to fully support the claimed outperformance — only one baseline, no error bars, no ablation isolating the key contribution, and a suspiciously large volume-preservation gap that is not adequately explained. The paper is placed between the medium and low anchor bands.
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

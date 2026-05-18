@@ -1,92 +1,84 @@
+Now I have all the information I need. Let me synthesize the final review.
+
 ## Summary
 
-This paper proposes a framework for learning language-informed visual concept embeddings along specified axes (e.g., *category*, *color*, *style*) by distilling pre-trained vision-language models. The method trains amortized concept encoders using a T2I reconstruction objective (inverting DeepFloyd generation) combined with a soft VQA-based anchoring loss from BLIP-2 to encourage axis disentanglement. At inference, the extracted embeddings can be remixed across images for compositional generation, and a lightweight test-time finetuning procedure extends the encoders to novel unseen concepts. Qualitative results show visually compelling remixing and extrapolation; quantitative comparisons against Null-text Inversion + Prompt-to-Prompt and InstructPix2Pix on a concept editing task show advantages in category preservation during color swaps, supported by a human evaluation.
-
----
+This paper proposes a framework for learning disentangled visual concept representations along language-specified axes (e.g., color, category, style). The method trains per-axis concept encoders using a reconstruction objective from a frozen T2I model (DeepFloyd), plus a soft anchoring loss that pulls concept embeddings toward text embeddings from a VQA model (BLIP-2). At inference, concept embeddings from different images can be remixed, and a test-time finetuning procedure adapts to unseen concepts. Training is done entirely on synthetic images.
 
 ## Strengths
 
-- **Amortized concept encoders instead of per-instance optimization.** Training shared encoders across images (Section 3.1) is a clear structural improvement over standard Textual Inversion's per-instance token optimization. It creates a shared embedding space across instances, enables feed-forward inference, and the encoders are shown to adapt to novel concepts via ~600 test-time finetuning iterations (Section 3.3). This is a well-motivated design choice.
+- **Novel framework for multi-axis concept extraction via T2I inversion + VQA anchoring**: The core idea of training separate encoders for each language-specified concept axis and using VQA answers as soft anchors is well-motivated and technically clean. The method goes beyond single-concept personalization methods by explicitly targeting disentangled, composable representations across multiple axes.
 
-- **VQA-based soft anchoring for disentanglement.** Using BLIP-2 answers as text anchors with a small loss weight (λ=0.0001–0.001, Eq. 2) is a pragmatic mechanism for improving axis disentanglement without expensive human annotation. The ablation (Section 4.4) confirms that removing the anchor degrades remixing quality, providing evidence that the anchor serves its intended purpose. The design choice to "*anchor* rather than *constrain*" (line 190–191) correctly acknowledges the trade-off between disentanglement and preserving fine-grained visual nuance.
+- **Qualitative results demonstrate compelling remixing and extrapolation**: The paper shows successful recomposition of concept embeddings across images (e.g., combining the category from one image with the color from another) and extrapolation along concept axes using GPT-4 to suggest alternatives. These results suggest the method genuinely captures axis-specific visual information.
 
-- **Evaluation across multiple domains and axes.** The framework is demonstrated on 5 domains (fruits, figurines, furniture, art, clothing) with 2–3 concept axes each (category, color, material, style, season), using the same training procedure throughout. Qualitative results (Figures 4–6) show successful remixing and extrapolation, supporting the claim of generality.
+- **Test-time finetuning enables generalization beyond the limited synthetic training set**: The 600-iteration finetuning procedure allows the encoders to adapt to novel concepts unseen during training (e.g., a specific painting style, nuanced colors like "yellow-ish-orange") while reportedly maintaining disentanglement — a practically useful capability given the small training set.
 
-- **Quantitative + human evaluation on the concept editing task.** Table 1 reports per-axis CLIP alignment scores and a human preference study (20 participants). While the evaluation has limitations (discussed below), the presence of both automated and human evaluation is a strength that many contemporaneous concept inversion papers lack.
-
----
+- **Quantitative outperformance on the category editing axis**: On the visual concept editing task, the method achieves higher CLIP alignment scores than Null-text Inversion and InstructPix2Pix for changing category and for preserving category while changing color, supported by a human evaluation (20 participants).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The quantitative evaluation is conducted only on synthetic data from the training distribution.** Training images are generated by DeepFloyd (average 669 per domain, Section 4.1), and the quantitative evaluation (Table 1) uses the same synthetic distribution where ground-truth prompts are available. The paper claims the method can "extract concept embeddings from real images at test time" (line 69) but provides *no quantitative measurement* of real-image concept extraction fidelity — only a handful of qualitative examples. This gap is significant because synthetic data lacks the noise, clutter, and distributional shift of real images, and the paper's core claim of generality hinges on this transfer. A simple quantitative metric on real images (e.g., CLIP alignment of extracted embeddings to ground-truth attribute labels on a small curated set) would substantially strengthen the claims.
-
-- **The evaluation of disentanglement relies entirely on a single generation-based proxy task.** The paper's core claim — that the concept embeddings are *disentangled* — is evaluated only through the downstream task of generating remixed images and measuring CLIP alignment against expected prompts. While this is a reasonable proxy, there is no direct analysis of the learned embedding space itself: no measurements of nearest-neighbor consistency along each axis, no probing whether interpolations are semantically smooth, no clustering analysis to verify axis-specific organization. Because the generation pipeline involves a stochastic T2I model, generation quality confounds representation quality — poor generation could mask good embeddings or vice versa. Adding a direct embedding-space analysis (e.g., linear probing, retrieval) would close this gap.
+- **Baseline comparisons do not include concept learning methods**: The paper compares only to image editing methods (Null-text Inversion + Prompt-to-Prompt, InstructPix2Pix), which are not designed for concept extraction and disentanglement. The closest prior work — Domain Tuning (Gal et al. 2023), which the paper's encoder architecture builds on — is cited in Related Work but not compared quantitatively. Comparing against a single-encoder baseline (without axis disentanglement) or an adaptation of DreamBooth/Custom Diffusion would directly test whether the multi-encoder + anchor loss design adds value. The claim of "better disentanglement and compositionality" is weakened without such comparisons, since superior CLIP scores against editing methods do not establish progress on concept learning per se.
 
 ### Minor
 
-- **The comparison to baselines is asymmetric but intentionally favors the baselines.** The paper compares against Null-text Inversion + Prompt-to-Prompt and InstructPix2Pix, which are image *editing* methods, not concept *extraction* methods. The paper acknowledges this ("this task is new… we identified prior work capable of text-based image editing"), and this asymmetry actually works against the author's method (the baselines have stronger pixel-level priors). However, the absence of a comparison to a more directly relevant baseline — e.g., training per-instance Textual Inversion tokens separately for each axis and then composing them — limits the ability to isolate the benefit of the amortized encoder design. A simpler baseline like "finetune a BLIP text encoder directly to produce axis-specific embeddings without the T2I inversion objective" would help isolate the value of the reconstruction objective.
+- **No direct quantitative disentanglement metric**: The primary metric (CLIP alignment of generated images to edited text prompts) measures image-text alignment, not whether the concept axes are truly disentangled. A model could score well while still having entangled representations. Direct disentanglement measures — e.g., verifying that changing one axis leaves others unchanged (via classifiers or perceptual similarity), or computing conditional independence of axis embeddings — are absent. The human evaluation partially addresses this but is limited to 20 participants.
 
-- **The BLIP anchoring mechanism's sensitivity to anchor quality is unexamined.** The reviewer correctly notes that if BLIP-2 produces noisy or biased answers (especially for subjective axes like "style" or "material"), the anchor loss could encode those biases. The paper partially mitigates this via a small λ and the explicit statement that anchors are used "only as anchors" (line 190). However, no analysis is provided on what fraction of BLIP-2 predictions are correct/incorrect per axis, or whether incorrect anchors systematically distort the learned embeddings. A small-scale annotation study or even qualitative statistics would address this.
+- **Ablation study is thin**: The ablation section (Section 4.4) states that removing the anchor loss and the encoder "deteriorates disentanglement" but provides minimal text analysis. While quantitative results are referenced in figures/tables (fig:exp_ablation, tab:exp_baselines) that were stripped by the parser, the textual discussion is too brief to assess relative contributions of components (anchor loss weight, architectural choices, per-encoder vs. joint encoder).
+
+- **Limited real-image validation**: The encoders are trained exclusively on synthetic data (669 images per domain, 64×64 resolution). Qualitative results on real images are shown only anecdotally. The test-time finetuning helps bridge the domain gap but requires per-test optimization, and the paper does not evaluate how this scales or whether finetuning degrades disentanglement on other axes (since the anchor loss is omitted during finetuning).
+
+- **Small training set and resolution**: Only 5 domains with ~669 images each, at 64×64 base resolution. While the paper acknowledges this, the limited scale raises questions about how well the method would generalize across more domains, axes, and higher resolutions without synthetic data scaling.
 
 ### Trivial
-None.
 
----
+- None.
 
 ## Nice-to-Haves
 
-- A direct embedding-space analysis: e.g., linear probing of each concept axis from the corresponding encoder's output, or retrieval experiments ("find images with similar style embedding").
-- Quantitative evaluation on a small set of real images with human-annotated ground-truth attributes.
-- A comparison to a per-instance Textual Inversion baseline where separate tokens are learned for each axis independently.
-- Statistics on BLIP-2 answer accuracy per concept axis on the training data.
-
----
+- Analysis of failure cases where BLIP-2 gives incorrect VQA answers and how the small anchor loss weight protects against or propagates these errors.
+- Controlled experiment measuring whether test-time finetuning (which omits the anchor loss) degrades disentanglement on unchanged axes.
+- Scaling to more concept axes (the paper shows only 4-5) to demonstrate the approach's capacity.
+- Comparison with per-instance textual inversion baselines on the same evaluation task.
 
 ## Removed Points
 
-- *"The baselines (Null-text Inversion + Prompt-to-Prompt, InstructPix2Pix) are general-purpose image editing methods, not concept extraction methods, making the comparison fundamentally asymmetric."* — This is acknowledged by the paper itself ("While this task… is new, we identified prior work that is capable of text-based image editing and generation"), and the asymmetry favors the baselines (they have stronger editing priors), not the authors. Kept in a weakened form as a Minor weakness above.
+These points are flagged to be removed, treat them with caution:
 
-- *"Synthetic-only training transfers to real images"* (Strength Finder #5) — This strength conflicts with the verified weakness about the lack of rigorous real-image evaluation. The evidence is only qualitative, so this strength is dropped.
-
-- *"BLIP-2 itself may rely on similar vision-language alignments as the T2I model being distilled"* as a circular dependency — The paper already addresses this via the small anchor weight and the explicit design choice to use anchors loosely. The dependency concern is valid but the paper's mitigation (λ=0.0001–0.001) is reasonable, making this more of a minor robustness question than a structural flaw.
-
----
+- "Human evaluation results not presented in the text" — They are reported in tab:exp_baselines, which was stripped by the parser.
+- "Paper overstates simplicity of the method" — Generic style opinion, not a substantive weakness.
+- "Does not explain why personalization methods could not be extended" — The paper explicitly states in §2 that existing personalization methods do not adhere to language-specified concept axes.
+- "Ablation lacks any numbers" — The ablation references fig:exp_ablation and tab:exp_baselines containing quantitative results (stripped by parser), though the text discussion is still minimal.
+- "The method is essentially Domain Tuning with per-axis encoders" — The paper acknowledges the architectural debt and clearly states architectural differences (distinct linear layers per CLIP layer vs. single shared layer).
+- "600 iterations is not lightweight" — Subjective; 600 iterations of encoder updates at 64×64 is reasonable.
+- Missing formatting/style nitpicks — These are parser artifacts.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The interaction between the VQA anchor design and the amortized encoder architecture is well-motivated but the individual components (Textual Inversion, BLIP-2 probing, amortized encoders) are all established techniques. The paper's novelty lies in their combination, which is a legitimate contribution.
-
----
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a quantitative evaluation on real-world images — even a small set (e.g., 50–100 real photos) with human-annotated attribute labels, measuring CLIP alignment or classification accuracy of the extracted embeddings.
-2. Include a direct embedding-space analysis: train linear probes on the concept encoder outputs to verify axis-specific information, or run a retrieval experiment showing that embeddings from the same axis cluster together.
-3. Compare against a per-instance Textual Inversion baseline where separate tokens are learned for each axis, to isolate the benefit of the amortized encoder design.
-4. Report BLIP-2 answer accuracy per axis on the training data, even qualitatively with a few representative correct/incorrect examples.
-
----
+1. Add a quantitative comparison with a single-encoder baseline (e.g., Domain Tuning) trained without axis disentanglement to directly measure the value of the multi-encoder + anchor loss design.
+2. Introduce a direct disentanglement metric: for a test set with known ground-truth axis values (synthetic data enables this), verify that changing one axis embedding leaves other axes unchanged using perceptual similarity or axis-specific classifiers.
+3. Expand the ablation to include: (a) removing the anchor loss, (b) varying the anchor loss weight, (c) a single encoder predicting all concepts jointly, (d) different encoder architectures — all with quantitative results and error bars.
+4. Show systematic evaluation on real images with ground-truth concept annotations to validate the synthetic-to-real transfer claim beyond anecdotes.
 
 ## Score and Decision
 
-**Calibration Anchors:**
+### Calibration Anchors
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `eHEYwrN4lw` (DISCOD, concept inversion) | 5.00 | Similar topic and evaluation strategy (CLIPScore-based); this paper has stronger framing and ablation but narrower evaluation. Comparable. |
-| `aNuQyV30Yw` (MCPL, multi-concept prompts) | 5.75 | Has t-SNE visualizations and embedding similarity analysis that this paper lacks; otherwise similar topic. Our paper has cleaner framing but weaker embedding-space evaluation. |
-| `awWpHnEJDw` (Conceptor, diffusion interpretability) | 6.00 | More comprehensive evaluation and broader experiments; our paper is weaker in evaluation depth. |
-| `C6a0Obrp3o` (SingleInsert, single-image inversion) | 4.33 | Similar limitations in evaluation scope; our paper has a stronger conceptual contribution. |
-| `ag3o2T51Ht` (Concept erasure analysis) | 6.60 | Strong, well-executed paper with thorough experiments; our paper is significantly weaker in evaluation rigor. |
-| `0BBzwpLVpm` (Identifiable concepts, compositional generation) | 4.25 | GAN-based, simpler datasets; our paper tackles a harder problem (uncurated concepts, free text) but with less rigorous evaluation. |
-| `ky2JYPKkml` (Domain-agnostic concept space) | 3.00 | Weak execution and unclear framing; our paper is substantially stronger in clarity and contribution. |
+| Anchor Path | Avg Score | Comparison to Paper Under Review |
+|---|---|---|
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/0BBzwpLVpm.md (Learning Identifiable Concepts) | 4.25 | Weaker: no human eval, weaker qualitative results, but similar missing-baseline issues. The current paper is stronger overall. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/eHEYwrN4lw.md (Distinct and Shared Concept Discovery) | 5.00 | Comparable: similar scope (concept inversion + CLIP scores + human eval), similar limitations (synthetic datasets, thin ablation). Roughly equal quality. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/UVSKuh9eK5.md (CLIP Compositional Generalization) | 5.67 | Stronger in experimental design, but is an analysis paper rather than a methods paper. Hard to compare directly. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/gKui6QvvfK.md (Compositional VQ Sampling) | 5.25 | Comparable: novel method with clear experiments and some limitations (dataset complexity). The current paper has more conceptual novelty but weaker baselines. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/HYyRwm367m.md (Neural Language of Thought) | 6.50 | Stronger: more thorough experiments, better theoretical framing, accepted paper. Current paper is less ambitious in scope. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/HnhNRrLPwm.md (MMIE Benchmark) | 8.00 | Much stronger: large-scale, rigorous benchmark. Current paper is not at this level. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/vb3O9jxTLc.md (Conceptual Blind Spots) | 4.00 | Weaker: limited method contribution, mostly analysis. Current paper has a clear method contribution. |
 
-**Relative judgment:** This paper proposes a conceptually appealing framework with clear writing and compelling qualitative results. However, the evaluation leaves significant gaps relative to the claims: quantitative results are on synthetic data only, disentanglement is measured only indirectly through a generation proxy, and real-image generalization is supported only qualitatively. These gaps are addressable but are real limitations of the current submission. Relative to the anchors, the paper sits between the DISCOD-level (5.0) and MCPL-level (5.75) papers — it has a stronger core idea but similar evaluative shortcomings.
+**Score**: 5.0 — The paper has a genuinely novel and well-motivated framework, with compelling qualitative results demonstrating remixing and extrapolation. Its main contributions (multi-axis concept encoders, text anchoring via VQA) are clear and useful. However, the evaluation is weakened by: (1) comparing only to image editing methods rather than concept learning or personalization baselines, which undermines the claim of "better disentanglement"; (2) the absence of direct disentanglement metrics; and (3) a thin ablation section. These are fixable evidential gaps, but they prevent the paper from making a fully convincing case for its central claims in its current form.
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

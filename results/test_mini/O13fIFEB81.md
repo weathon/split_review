@@ -1,67 +1,90 @@
-Now I have all the information I need. Let me compose the final consolidated review.
+Now I have all the information I need. Let me compose the final review.
 
 ## Summary
-This paper proposes a unified three-dimensional framework (Σ, φ, ⊗) that organizes existing watermarking methods for diffusion models by their element distribution, region specification, and channel choice. Under this framework, the authors instantiate a training-free watermarking method that adapts the red/green-list concept from LLM watermarking to continuous Gaussian latents, and combines "Random Gaussian" (dispersed block-based) and "Gaussian Ring" watermarks via gradient-based channel assignment. The method is evaluated on Stable Diffusion text-to-image generation (against Tree-Ring and Gaussian-Shading baselines) and shown visually on InstructPix2Pix image-to-image editing.
+
+This paper proposes a unified framework for watermarking diffusion models structured along three design dimensions (element distribution Σ, region specification φ, and channel selection ⊗). The authors instantiate this framework with a training-free watermarking method that adapts the LLM green/red list scheme to the continuous Gaussian domain in latent space, and introduce two region specification strategies — Random Gaussian (patch-based with random permutation) and Gaussian Ring (concentric annular patterns) — with a hybrid multi-channel approach. The method is evaluated on text-to-image generation (Stable Diffusion) and, preliminarily, on image-to-image editing (instruct-pix2pix).
 
 ## Strengths
-- **Unified three-dimension framework that organizes a fragmented literature:** Section 4.1 systematically decomposes existing methods (Tree-Ring, Ring-ID, DwtDctSVD, Gaussian-Shading, learning-based methods) along the Σ (element distribution), φ (region specification), and ⊗ (channel choice) dimensions. This provides conceptual clarity that prior work lacks, and is a genuine intellectual contribution independent of the method's empirical performance.
-- **Training-free instantiation with marginal distribution preservation:** Adapting the LLM red/green-list to continuous Gaussian latents (Lemma 4.1) is a creative transfer. The claim is correctly stated as marginal preservation (averaging over watermark keys), matching the standard in the LLM watermarking literature. Working directly in the spatial domain avoids frequency-domain error propagation and computational overhead.
-- **Theoretical correlation bound for dispersed watermark regions:** Proposition 4.2 derives Corr(X,Y) = (2/π)·(p−1)/(np−1), which quantifies how randomly permuted patches reduce inter-element correlation — a principled guide for patch-size selection that earlier ad-hoc region designs lack.
-- **Strong empirical robustness on text-to-image, especially under geometric attacks:** Table 2 shows TPR@1%FPR of 0.852 under rotation (vs. Tree-Ring 0.477 and Gaussian-Shading 0.007), and the highest average TPR across six diverse attacks. These results are honestly reported and represent a practical improvement on a challenging attack dimension.
+
+1. **Unified three-dimensional framework for organizing watermarking designs.** The decomposition into distribution (Σ), region (φ), and channel (⊗) provides a clear conceptual lens for comparing existing methods and designing new ones. This taxonomic contribution has genuine value for researchers navigating the growing literature on diffusion watermarking.
+
+2. **Training-free, distribution-preserving watermark with theoretical grounding.** The adaptation of the LLM green/red list to the Gaussian domain (Lemma 4.1, proving marginal distribution preservation) is clean and principled. Unlike fixed-value methods (Tree-Ring) that introduce artifacts, the proposed scheme maintains the marginal 𝒩(0,1) distribution of each latent element while embedding a detectable signal.
+
+3. **Competitive empirical performance on text-to-image.** The results in the (parsed) tables indicate strong robustness on text-to-image generation, with the hybrid method achieving TPR@1%FPR of 0.852 (rotation), 0.996 (Gaussian noise), and strong performance across other attacks — outperforming Tree-Ring and Gaussian Shading on several metrics. The ablation studies on patch size and ring radius provide useful design guidance.
+
+4. **Theoretical analysis of element correlation.** Proposition 4.2 gives a closed-form expression for element correlation under the random permutation scheme, formally linking patch size to distributional naturalness — though this analysis is not tightly connected to the experiments.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **Missing component-level ablation for the hybrid design:** The paper proposes a hybrid of "Random Gaussian" and "Gaussian Ring" with gradient-based channel assignment, but provides no ablation comparing: (a) Random Gaussian alone, (b) Gaussian Ring alone, (c) equal-channel hybrid without gradient guidance, or (d) gradient-based vs. random channel assignment. Without these, it is impossible to determine which component drives performance, whether the hybrid is necessary, or whether the gradient strategy contributes anything beyond random assignment. The existing ablations (patch size in Table 4, ring radius in Table 5) only vary parameters within components, not the components themselves.
 
-- **No quantitative results for image-to-image diffusion (InstructPix2Pix):** The paper prominently claims "the first systematic attempt on watermarking image-to-image diffusion models" (abstract, contributions, Section 5.1), yet provides zero quantitative detection or robustness results for this setting — only a visual example (Figure 4). No TPR, FPR, or AUC numbers are reported. This is a central claimed contribution that is entirely unsupported by evidence.
+1. **Image-to-image watermarking claim is unsubstantiated.** The paper claims "the first systematic approach to watermarking image-to-image diffusion models" (listed as a core contribution), yet provides **no quantitative detection results** for this scenario — only a single visualization in Figure 4. Moreover, the experimental setup for instruct-pix2pix uses "an empty prompt and an empty original image," which does not correspond to standard image-editing usage and essentially sidesteps the actual challenge of watermarking during editing. Without detection TPR@1%FPR, FID, or robustness numbers for the image-to-image case, this claimed contribution is not supported. The paper would be stronger if this claim were dropped or deferred to future work.
+
+2. **Gradient-based channel selection method is described but unvalidated.** Section 4.4 proposes computing $g_c = \|\partial \mathcal{L}_{\text{geo}} / \partial z_T^c\|_2$ by backpropagating through the full ODE solver and decoder to score channel sensitivity. This is a complex, computationally intensive procedure (separate from the watermarking itself), yet the paper provides **no ablation study, no experiment, and no implementation detail** showing it was actually used or that it improves results over a simpler baseline (e.g., uniform assignment). As presented, this component is speculative and does not contribute to the claimed watermarking recipe.
+
+3. **The detection statistic uses max over channels without proper justification.** The overall detection accuracy is computed as $\max_c \text{Acc}(\hat{z}_T^{(c)}, m^c)$ across channels. Taking the maximum across channels inflates the detection statistic and would require careful calibration of the 1% FPR threshold on the *max* distribution (not the per-channel distribution). The paper does not clarify whether the FPR calibration accounts for this multiple-testing effect, making the reported TPR@1%FPR numbers potentially unreliable. This is a methodological concern that could affect the validity of all robustness results.
 
 ### Minor
-- **Unclear FPR calibration under the max-over-channels detection rule:** The detection accuracy is defined as Acc(ˆm) = max_{c∈C_m} Acc(ˆz_T^{(c)}, m^c), using the channel with the highest accuracy. The max operation fundamentally changes the null distribution, but the paper does not describe how the 1% FPR threshold is recalibrated under this rule. Simply generating 1,000 unwatermarked images (as stated in Section 5.1) and applying the same max-aggregation procedure could be used to set the threshold empirically, but this is not explained. The reported TPR@1%FPR numbers may therefore be unreliable without clarification.
 
-- **Limited baseline comparisons for the SOTA claim:** Only Tree-Ring and Gaussian-Shading are quantitatively compared. Several methods discussed in the taxonomy (Ring-ID, Stable Signature, DwtDctSVD, AquaLoRA) are never evaluated under the same protocol, making the broad assertion of "outperforming existing methods" incompletely substantiated. While comparing against the two most relevant latent-space methods is standard practice, the paper's language overclaims the breadth of its comparison.
+4. **Rotation robustness claim for spatial-domain Gaussian Ring is insufficiently justified.** The paper states Gaussian Rings provide "rotational invariance" because they operate in the spatial domain and are ring-shaped. While concentric annular regions are indeed rotationally symmetric (distance-from-center is preserved under rotation), the *detection* after a pixel-space rotation followed by DDIM inversion is non-trivial — the inverted latent $\hat{z}_T$ from a rotated image will not have elements aligned with the original spatial coordinates. The paper provides no description of any rotation-alignment step during detection or analysis of how the spatial ring structure survives DDIM inversion of rotated images. The reported 0.852 TPR is impressive but the mechanism is not adequately explained.
+
+5. **Proposition 4.2 is not connected to any experimental design choice.** The correlation formula is presented as theoretically justifying the random permutation scheme, but it is never referenced in the ablation discussion or used to guide hyperparameter selection. This creates a disconnect between the theory and experiments.
+
+6. **FID computation details are ambiguous.** The paper states FID is "calculated on the COCO2017 validation set" without clarifying whether this means (a) generating images conditioned on COCO captions and comparing to COCO validation images, or (b) some other procedure. The reference distribution (COCO natural images) and the generated distribution (SD outputs) are inherently different, making the FID numbers difficult to interpret as quality metrics for the watermarking method.
+
+7. **The overall method is a bricolage of independently-motivated components** (green/red list, random patches, permutation, Gaussian Rings, gradient-based channel selection, max-over-channels detection) without a clean unified design. While each component has a rationale, the lack of a single detection test statistic that accounts for all design choices reduces the methodological coherence.
 
 ### Trivial
-None.
+
+None (formatting issues are parser artifacts).
 
 ## Nice-to-Haves
-- Adding an ablation that compares the gradient-based channel assignment against a simple random-split baseline would strengthen the case for the channel-sensitivity mechanism.
-- Reporting image-to-image quantitative results (even on a subset of attacks) would substantiate the claimed contribution.
+
+- Provide quantitative results (TPR@1%FPR, FID, robustness under attack) for the image-to-image setting, using standard instruct-pix2pix evaluation with real input images and editing prompts.
+- Validate the gradient-based channel selection with an ablation comparing it to uniform assignment, random assignment, or other simple baselines.
+- Clarify how the 1% FPR threshold is calibrated when using max-over-channels detection.
+- Add an analysis or experiment showing how the spatial Gaussian Ring survives pixel-space rotation + DDIM inversion.
 
 ## Removed Points
-- *"Misleading distribution-preservation claim (Structural)"* — **Removed (factually wrong).** The critic claims Lemma 4.1 is false because "for a fixed binary watermark, each element is forced into a half-interval." However, the paper explicitly states "marginally follows the standard normal distribution" and clarifies: "when averaged over all possible watermark values, the marginal distribution... remains the same." This is the standard definition of marginal preservation and is correct. The conditional distribution given a fixed watermark is truncated, which is exactly what the paper describes. The paper is precise on this point.
-- *"No quantitative evaluation on image-to-image diffusion"* — **Kept (verified as valid).** The paper indeed lacks quantitative results for I2I. However, the severe version of this criticism is already captured in the Major weaknesses above.
-- *"Strength: First systematic evaluation on image-to-image diffusion models"* — **Removed (conflicts with verified weakness).** Since the quantitative evaluation for I2I is absent, this claimed strength is unsupported and contradicts the verified weakness.
+
+- **"Rotation robustness evaluation is incompatible with method's design — suggests experimental protocol is wrong":** Removed because concentric annular rings *are* rotationally symmetric about their center (distance from center is preserved). The harsh critic's claim that spatial rings cannot be rotationally invariant is factually incorrect for the specific design described. However, the *detection* mechanism under pixel rotation + DDIM inversion remains insufficiently explained, which is addressed in Weakness #4 (minor).
+- **"Missing related works (e.g., Stable Signature)":** The paper does cite Stable Signature (Fernandez et al., 2023) in Section 2. Removed.
+- **"Table content not visible" and garbled text like "√[6]{-5}°":** Parser artifacts; removed.
+- **"Value so low suggests incorrect implementation" (Tree-Ring at 0.477):** This is speculative without access to the exact attack parameters. Removed as unsupported.
+- **Formatting and style nitpicks:** Removed per instructions.
+- **"Proposition 4.2 derivation is unclear":** The formula is clearly stated; the criticism is too vague. Removed but the lack of experimental connection is kept as weakness #5.
+- **"The paper cannot be accepted without resolving these fundamental problems":** This is a judgment, not a weakness. Replaced with the actual verified weaknesses.
+- **Various "Section-by-section notes" that are minor or speculative:** Removed.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviewer inputs do not converge on a new observation that the paper itself does not already articulate.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Add component ablations:** Compare (i) Random Gaussian alone, (ii) Gaussian Ring alone, (iii) equal-channel hybrid, (iv) gradient-based hybrid, and (v) random-channel hybrid. This will validate whether the hybrid design and gradient assignment are actually beneficial.
-2. **Report quantitative results for InstructPix2Pix:** Apply the same attack suite used for text-to-image and report TPR@1%FPR. Without this, the image-to-image contribution is aspirational rather than demonstrated.
-3. **Clarify FPR calibration:** Describe how the 1% FPR threshold is set under the max-over-channels detection rule — specifically, whether the same max operation is applied to unwatermarked images to establish the null distribution empirically. Provide a null-distribution analysis or calibration experiment.
-4. **Add at least one more baseline** (e.g., Ring-ID or Stable Signature) to strengthen the comparative evaluation. The current two-baseline comparison is thin for a paper claiming state-of-the-art performance.
+
+1. **Drop or properly substantiate the image-to-image claim.** If you claim a "first systematic approach," you need detection rates, FID, and robustness numbers for actual image editing pipelines (real input images + editing prompts). Otherwise, remove this contribution claim and present the instruct-pix2pix experiments as preliminary exploration.
+
+2. **Validate or remove the gradient-based channel selection.** Either provide an ablation study demonstrating its benefit over a simple baseline (e.g., random assignment, fixed assignment), or remove this component from the method description entirely — the hybrid Random Gaussian + Gaussian Ring scheme can be motivated more simply.
+
+3. **Fix the detection statistic.** Either justify the max-over-channels approach with proper FPR calibration, or use a principled global test statistic (e.g., average across channels, or a likelihood-ratio test that accounts for all channels jointly).
+
+4. **Explain the rotation robustness mechanism.** Provide a clear description of how Gaussian Ring detection works under rotation attacks — specifically, how the alignment between the ring template and $\hat{z}_T$ is maintained after pixel-space rotation + DDIM inversion.
 
 ## Score and Decision
 
-**Calibration anchors (from retrieval):**
+### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|------|-----------|-----------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/jlhBFm7T2J.md` (Undetectable Watermark) | 6.50 | Stronger theoretical guarantees (provable undetectability); weaker practical robustness. Current paper has weaker theory but better empirical robustness on tested metrics. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/1IwoEFyErz.md` (Shallow Diffuse) | 6.00 | Similar topic; better theoretical backing and more rigorous evaluation. Current paper offers a more structured taxonomic framework but less thorough experiments. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/ll2nz6qwRG.md` (Hidden in the Noise) | 5.83 | Comparable scope. Current paper has a more creative framework contribution but weaker evaluation completeness. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/HexshmBu0P.md` (Recipe for Watermarking) | 5.33 | Similar "recipe/framework" approach. Current paper's framework is more structured and principled, but both share evaluation gaps. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/T0ebbDO60R.md` (SuperMark) | 3.75 | Limited novelty; mostly an ensemble of existing techniques. Current paper has a stronger conceptual contribution. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/jbfDg4DgAk.md` (Sparse Watermarking LLMs) | 3.00 | Unrelated domain (LLMs), weak evaluation. Not directly comparable. |
+| Path | Avg Score | Comparison to This Paper |
+|------|-----------|------------------------|
+| `TabWak` (tabular watermarking) | 7.20 | Significantly stronger: clean first-of-its-kind contribution, extensive experiments, theoretical guarantees |
+| `Shallow Diffuse` | 6.00 | Stronger: cleaner method, better execution, though similar domain |
+| `Hidden in the Noise` (WIND) | 5.83 | Moderately stronger: well-executed with clear contribution and better evaluation |
+| `A Recipe for Watermarking DMs` | 5.33 | Comparable: similar evaluation depth but lower novelty |
+| `SAT-LDM` | 5.50 | Comparable: similar quality but different angle (training-based) |
+| `Stable Signature is Unstable` | 4.50 | Comparable: clear but narrow contribution |
+| `SuperMark` | 3.75 | Weaker: more significant methodology issues |
 
-The paper's unified framework is a meaningful conceptual contribution, and the instantiated method shows promising robustness on text-to-image. However, the two major evidential gaps (missing component ablations and absent quantitative results for image-to-image) prevent the paper from substantiating its full claimed scope. The paper sits below the Accept-range anchors (6.0+), comparable to low-5.x anchors where reviewers cited similar evaluation incompleteness as grounds for rejection.
+This paper has a genuinely interesting conceptual framework and solid text-to-image empirical results. However, the core contribution is weakened by (a) the unsubstantiated image-to-image claim listed as a headline contribution, (b) an unvalidated gradient-based channel selection method presented as part of the method, and (c) a poorly-justified max-over-channels detection statistic. These issues are addressable but non-trivial. The paper's quality sits between the mid-range anchors (4.5–5.5), weighted toward the lower end due to the gap between claimed and actual contributions.
 
-**Score: 5.0**  
-**Decision: Reject**
-
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**MY FINAL SCORE: <score>4.5</score>**
+**MY FINAL DECISION: <decision>Reject</decision>**

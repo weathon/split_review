@@ -1,81 +1,91 @@
-Now I have all the information needed. Let me produce the consolidated final review.
+Now I have sufficient calibration. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes FTA, a generator-assisted backdoor attack for federated learning that produces sample-specific, imperceptible triggers. The key idea is to train a trigger generator whose outputs make poisoned samples' hidden features overlap with benign target-label features, thereby avoiding the feature extraction and backdoor routing abnormalities (P1–P2) that plague prior universal-trigger attacks. The generator is continuously adapted across FL rounds. Experiments on four datasets with three architectures show high backdoor accuracy (often >98%) across eight defenses, and t-SNE visualization supports the claimed feature-space stealthiness.
+This paper proposes FTA, a generator-assisted backdoor attack against federated learning that produces imperceptible, sample-specific triggers. The key idea is to train a generative trigger function that makes poisoned samples share similar hidden features with benign samples of the target label, thereby reducing the parameter-level anomalies (P1–P2) that prior universal-trigger attacks exhibit. The generator is continuously trained across FL rounds to adapt to the changing global model. Experiments on four datasets compare FTA against DBA, Neurotoxin, Edge-case, and a baseline attack under multiple FL defenses.
 
 ## Strengths
 
-- **Well-motivated problem and clear framing of limitations in prior attacks.** The paper systematically identifies three problems (P1: feature extraction abnormality, P2: backdoor routing abnormality, P3: perceptible triggers) that arise from universal, fixed triggers. This provides a principled rationale for why generator-based sample-specific triggers are needed in FL. The intuition (Section 3.2) is clearly articulated.
+- **Well-motivated problem decomposition (P1–P3).** The paper identifies three concrete failure modes of prior FL backdoor triggers — abnormal feature extraction, abnormal backdoor routing, and perceptible triggers — and uses these to motivate the generator-based approach. This problem analysis is clear and provides a principled framework for understanding why prior attacks fail against defenses.
 
-- **t-SNE visualization directly validates P1.** Figure 5(a)–(b) shows that with FTA, poisoned samples' hidden features overlap with benign target-label samples, while baseline attacks produce a separate cluster. This provides direct evidence that FTA addresses the feature-extraction abnormality (P1) that the paper identifies.
+- **t-SNE visualization provides direct evidence for the claimed mechanism.** Figure 5(a)–(b) shows that under FTA the hidden features of poisoned samples overlap with benign target-label samples, whereas under the baseline attack they form a separate cluster. This directly supports the argument that FTA addresses the abnormality of feature extraction (P1) and enables reuse of benign routing (P2).
 
-- **Comprehensive empirical evaluation.** Experiments span four datasets (Fashion-MNIST, FEMNIST, CIFAR-10, Tiny-ImageNet), three architectures (Classic CNN, VGG11, ResNet18), two attack modes (fixed-frequency and few-shot), and eight FL defenses. FTA consistently achieves high backdoor accuracy (often >98% on most tasks) where prior attacks degrade significantly, particularly under norm clipping and FLAME (Figure 3).
+- **Empirical resistance to FLAME and norm clipping is demonstrated across multiple datasets.** Figure 4 shows FTA achieving high backdoor accuracy on CIFAR-10 and Tiny-ImageNet under both norm clipping and FLAME, where baseline attacks (DBA, Neurotoxin, Edge-case) remain near zero. These results are the strongest concrete evidence that FTA's parameter similarity to benign updates provides a practical advantage.
 
-- **Imperceptible, sample-specific, and adaptive triggers.** The generator produces triggers with a controlled l₂-norm bound (ablated in Figure 4), providing visual stealthiness during inference (P3). The two-phase training procedure (Algorithm 1) and the bi-level optimization formulation (Equation 1) are clearly presented and technically sound.
-
-- **Principled ablation on trigger size.** The paper systematically varies the l₂-norm bound (Figure 4) and documents the trade-off between visual stealthiness and attack success, providing practical guidance for attack configuration.
+- **Imperceptibility of triggers is qualitatively demonstrated.** Figure 2 (trigger visualization) and the residual maps show that FTA's triggers are visually imperceptible compared to the patch-based triggers of baselines, addressing P3.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The central claim that FTA solves P2 (backdoor routing abnormality) is supported only indirectly.** The paper argues that overlapping hidden features (P1) *implies* reuse of benign routing and reduced parameter-level abnormality (P2). However, the evidence for P2 is limited to cosine-similarity of full model updates (Figure 5(c)–(d)), which conflates many factors. The paper does not:
-  - Directly analyze FC-layer weight distributions (e.g., comparing weight magnitude histograms, L₂ distance from benign weights, or neuron-level attribution).
-  - Measure how much the backdoor task relies on benign vs. newly created pathways.
-  
-  Since P2 is presented as a core part of the paper's mechanistic explanation for why FTA evades defenses (alongside P1), the lack of direct parameter-level validation weakens the paper's foundational narrative. The empirical results still demonstrate that FTA *works*, but the *explanation for why* it works remains partially speculative.
+- **All performance and defense results are presented as coarse figures with no numerical tables.** The abstract claims "above 98% attack success rate" and Section 4.2 claims "above 97% accuracy on average," but the figures show substantial variability (e.g., CIFAR-10 fixed-frequency at ~83% BA after 50 rounds). There are no reported means, standard deviations, or confidence intervals over multiple runs. The defense curves (FLAME on Fashion-MNIST in Figure 4(e)) appear to plateau well below what the text's "<20% degradation" claim implies. The CIFAR-10 claim of "nearly 83% BA after 50 rounds which is 60% higher than other attacks on average" cannot be verified from the figure alone because the y-axis range and precise values are not given. Without numerical precision, the stated effect sizes are unverifiable. This is the single most consequential weakness — it prevents the paper from substantiating its headline quantitative claims.
+
+- **No evaluation against the trigger-inversion defense (FLIP) that the paper centrally claims to evade.** The introduction and Section 2 (v.s. Trigger generators → Defenses) explicitly state that "FLIP is effective in removing prior backdoors with patch-based triggers whereas our attack can naturally evade this SOTA defense." Yet the empirical section never tests FTA against FLIP. The paper evaluates 8 defenses (norm clipping, FLAME, Multi-Krum, Trimmed-mean, RFA, SignSGD, Foolsgold, SparseFed) but FLIP is not among them. Since evasion of FLIP is explicitly invoked as a key advantage, its absence from the experiments leaves a central claim untested.
+
+- **No ablation of the adaptive generator-across-rounds mechanism.** A core design element is that the trigger generator is continuously trained across FL rounds to adapt to the changing global model (Section 4.3). Yet no experiment compares: (a) training a fresh generator each round, (b) using a fixed pre-trained generator across all rounds, and (c) the proposed adaptive re-training. Without this ablation, it is unclear whether the adaptivity contributes to performance or whether a simpler one-time generator training would suffice.
+
+- **No adapted imperceptible-trigger baseline from centralized work.** The paper explicitly contrasts its approach with centralized generator-based backdoor attacks (LIRA, IBA) in Section 2, arguing they cannot ensure absence of backdoor routing and do not adapt to the changing global model. However, it never implements or evaluates any adapted version of these methods as a FL baseline. This makes the "state-of-the-art stealthiness" claim unsubstantiated against the most competitive comparator class — generator-based invisible triggers adapted to the FL setting.
+
+- **Results for six of the eight defenses are referenced only to the missing appendix.** The main paper shows only norm clipping and FLAME curves. Multi-Krum, Trimmed-mean, RFA, SignSGD, Foolsgold, and SparseFed are mentioned but their results are all in the appendix (which is not present in the submission). Similarly, few-shot durability experiments, SSIM/LPIPS stealthiness results, and key details about tasks, models, and hyperparameters are appendix-only. A paper should present sufficient evidence in the main text to support its core claims.
 
 ### Minor
 
-- **Missing empirical comparison against an adapted centralized generator attack.** Section 3.2 discusses why centralized generative attacks (e.g., IBA, LIRA) are insufficient for FL (they don't constrain to target-label features, don't adapt to changing models, don't consider parameter stealthiness). This argument is entirely theoretical — no adapted centralized-generator baseline is evaluated. While the paper's existing baselines (DBA, Neurotoxin, Edge-case, baseline) are the standard SOTA for FL backdoor attacks, an ablation isolating the benefit of FTA's specific design choices (target-label feature matching, adaptive retraining) over a naively ported centralized generator would strengthen the contribution and clarify novelty.
+- **t-SNE caption/text inconsistency.** The caption of Figure 5 says "Fashion-MNIST" but the text in Section 4.4 says "We use t-SNE visualization result on CIFAR-10." This minor inconsistency suggests careless editing and makes it unclear which dataset was actually used.
 
-- **Results for six of the eight defenses are deferred to the appendix.** The main paper shows detailed results only for norm clipping and FLAME. While the appendix (stripped by the parser) presumably contains the full results, the main paper's claim of "breaking eight SOTA defenses" would be better supported by a summary table in the main text showing backdoor accuracy for all defenses across all datasets.
+- **Bi-level optimization framing is not reflected in the algorithm.** Equation (1) formulates the problem as a bi-level, non-convex, constrained optimization, but Algorithm 1 is a straightforward two-stage heuristic: fix the model and train the generator, then fix the generator and train the model. The paper acknowledges this ("we consider two steps... not alternately"), but the framing as bi-level optimization is somewhat misleading. This is a minor presentational issue.
+
+- **No analysis of the norm values of malicious vs. benign updates.** The paper argues that FTA evades norm clipping because it requires "a much smaller norm to effectively fool the global model" (Section 4.3.1), but never reports the actual norm magnitudes across rounds. This would add mechanistic insight to the claim.
 
 ### Trivial
-None.
+
+- None.
 
 ## Nice-to-Haves
 
-- A head-to-head comparison against a centralized generator (e.g., IBA or LIRA) adapted to the FL setting, to quantify the benefit of FTA's specific design choices.
-- A direct weight-distribution analysis (e.g., histogram of last-FC-layer weights) to validate the P2 claim at the parameter level.
+- The sensitivity to the number of malicious agents (e.g., 1%, 5%, 10%) would strengthen the paper, since the threat model claims <1% attacker fraction.
+- A comparison of FTA's computational overhead in more detail (training time, memory) would help assess practicality.
+- Testing against adaptive defenses that analyze hidden-feature distributions (e.g., activation clustering on the server) would be a natural next step.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points were flagged to be removed; treat them with caution.
 
-- **"Claims to break eight defenses but provides results for only two in the main text"** — removed per rule: the paper explicitly references the appendix for the other six defenses, and the parser strips appendix content. The results exist in the original submission.
-- **"Report computational cost in the main paper"** — removed per rule: the paper references computational cost analysis in the appendix (`\cref{computational_cost}`), which was stripped by the parser.
-- **Strength: "High ASR above 98% under FLAME"** — slightly adjusted. The paper notes that Fashion-MNIST under FLAME has <20% degradation, which means BA may be ~80% on that specific task. The "above 98%" claim is accurate for most tasks/settings but not absolutely universal.
+- **Harsh critic's claim about <1% vs. 10% attacker proportion discrepancy.** The paper states the attacker compromises <1% of *all agents* and the experiment selects 10 agents per round out of a larger pool (total pool size unspecified). With a sufficiently large total pool, 1 malicious agent per round can be <1%. The harsh critic incorrectly assumed the 10 selected agents are the entire population. Removed as factually wrong.
+
+- **Harsh critic's criticism that the bi-level optimization framing is incorrect.** The paper acknowledges the decoupled two-phase approach is a practical solution ("not alternately"). This is a reasonable engineering approximation for a challenging optimization problem; labeling it a "heuristic" rather than true bi-level is a presentation choice, not a flaw.
+
+- **Strength Finder's generic strengths about "addressing important problems."** Strengths like "backdoor attacks is still a relevant issue" and "the problem is important" are generic and add no specific information about this paper's quality.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that generator-based triggers can align hidden features with benign target-label samples to improve backdoor stealthiness in FL — is the paper's own contribution, not one synthesized from the reviews.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add direct parameter-level evidence for P2.** Compute the L₂ distance or cosine similarity between benign and backdoored model weights at the last FC layer specifically (not just the full update). A histogram of weight/bias values in the FC layer for benign vs. FTA vs. baseline-attacked models would substantially strengthen the mechanistic claim.
+1. **Add numerical tables for all main results.** Provide at minimum a table reporting mean BA ± std across multiple seeds for all four datasets under FedAvg (fixed-frequency), and a table for defense evaluation (norm clipping and FLAME) with both backdoor accuracy and benign accuracy. The abstract's "98%" and "97%" claims must be backed by precise numbers.
 
-2. **Include a summary table of BA for all eight defenses across all datasets** in the main paper (even if compact). This would make the "breaks eight defenses" claim self-contained without requiring the reader to consult the appendix.
+2. **Run and report the FLIP defense experiment.** Without this, the paper's signature claim of trigger-inversion evasion is unsubstantiated.
 
-3. **Ablate the target-label feature constraint.** Compare FTA against a version where the generator constrains hidden features to match the *original* sample's features (as in IBA) rather than the target-label features. This would isolate the benefit of the paper's key design choice.
+3. **Ablate the adaptive generator.** Compare: (i) fresh generator each round, (ii) fixed generator from round 1, (iii) proposed adaptive re-training. This directly tests whether the "adaptive" component provides measurable benefit.
+
+4. **Add an imperceptible-trigger baseline.** Adapt LIRA or IBA to FL and evaluate under the same conditions. Use the same generator architecture and norm constraints, without FTA's hidden-feature-to-target-label similarity. This isolates the value of FTA's specific design choices.
+
+5. **Move at least one result table for the "other six defenses" into the main paper.** Even a single table summarizing all 8 defenses on at least one dataset would significantly strengthen the main-text evidence.
 
 ## Score and Decision
 
 **Calibration anchors:**
+| Anchor | Avg Score | Comparison to FTA |
+|--------|-----------|-------------------|
+| `Mb5vJijcHn` (EDBA, Reject) | 3.50 | FTA has a clearer problem motivation and better methodology but falls short of the experimental rigor needed for acceptance. |
+| `0rS9o1uKqu` (TLDR, Reject) | 2.50 | FTA is substantially stronger — it has a clear method, some experimental evidence, and a well-motivated contribution. |
+| `Dc6dgTq2UZ` (DBA-DFL, Reject) | 5.25 | Similar profile: good idea with missing ablations and defenses evaluation. FTA's problem analysis is sharper but experimental gaps are similar. |
+| `79nO2DPjVX` (Bad-PFL, Accept) | 6.00 | Both use generator-based triggers, but Bad-PFL provides more thorough experiments with numerical tables. FTA is weaker on evidential rigor. |
+| `s8lj3C39Ow` (SuDA, Reject) | 4.50 | Both have clear motivation but insufficient evidence. FTA has a more original attack contribution; SuDA is a defense paper. |
+| `RXVYOCGO7g` (Nira, Reject) | 5.00 | Defense paper, not directly comparable. FTA is in a similar quality band. |
+| `nTNgkEIfeb` (FedInverse, Accept) | 7.00 | FedInverse provides thorough numerical evaluation (tables, metrics, multiple seeds). FTA lacks this rigor. |
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `79nO2DPjVX.md` (Bad-PFL) | 6.00 | Similar topic (backdoor attack with generator-based triggers in FL). Bad-PFL targets PFL setting; FTA targets vanilla FL. Comparable evaluation depth and quality. |
-| `Dc6dgTq2UZ.md` (Distributed Backdoor Attacks) | 5.25 | Less comprehensive defense evaluation; more limited contribution scope. FTA is stronger in evaluation breadth and technical novelty. |
-| `Mb5vJijcHn.md` (Decoupling Backdoors) | 3.50 | Outdated baselines, unclear methodology, missing key defenses. FTA is substantially stronger in every dimension. |
-| `nTNgkEIfeb.md` (FedInverse) | 7.00 | Different topic (model inversion, not backdoors). Similar FL security context; FTA has comparable evaluation rigor. |
-| `s8lj3C39Ow.md` (SuDA defense) | 4.50 | Defense paper on related topic. FTA's attack contribution is clearer and better validated. |
+FTA is a good idea paper that identifies real problems (P1–P3) with prior backdoor triggers and proposes a reasonable solution. The t-SNE visualization and FLAME/norm-clipping results provide initial support. However, the experimental validation does not rise to the level required to support the strong quantitative claims made in the abstract and conclusions. The absence of numerical tables, the missing FLIP evaluation, the lack of an imperceptible-trigger baseline, and the unablated adaptive generator are significant gaps that prevent the paper from establishing its contribution convincingly.
 
-The paper makes a clear contribution: a well-motivated generator-based backdoor attack for FL with sample-specific adaptive triggers and comprehensive defense evaluation. The main weakness is that the mechanistic explanation of *why* the attack is stealthy at the parameter level (P2) is not directly validated. This gap is real but does not invalidate the empirical demonstration that FTA works. On net, the paper is comparable in quality to accepted papers in this space (e.g., Bad-PFL at 6.00) and substantially stronger than rejected ones.
-
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

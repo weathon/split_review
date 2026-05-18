@@ -1,54 +1,54 @@
-Now I have all the information I need. Let me compile the consolidated review.
+Now I have all the context I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes Adversarial Perturbation Dropout (APD), a method that applies dropout to perturbation regions during iterative adversarial attack generation. The key idea is to break the "synergy" between perturbations in different attention regions by dropping square blocks around CAM-identified midpoints at each iteration and averaging gradients across the dropped versions. APD can be integrated into existing iterative attacks (MI-FGSM, DIM, TIM, SIM, AAM, AA-TI-DIM) and consistently improves black-box transferability, with average gains of 6.8–15.6% across settings.
+This paper proposes Adversarial Perturbation Dropout (APD), a method to boost the transferability of adversarial examples in black-box settings. The core idea is to apply dropout to perturbation regions during iterative attack generation: at each step, the method uses CAM to identify attention regions of the source model, drops perturbation blocks centered at those regions at multiple scales, computes gradients on each dropped variant, and averages them to update the adversarial perturbation. APD is designed as a plug-in module that can be combined with existing iterative attack methods (MI-FGSM, DIM, TIM, SIM, AAM, AA-TI-DIM). Experiments on ImageNet show consistent absolute improvements of 6–13% across normally trained models, adversarially trained models, defense methods, and diverse architectures including ViT-B/16.
 
 ## Strengths
 
-- **Novel and conceptually clean core idea.** Dropping perturbations (rather than model weights) during attack optimization is a genuine and under-explored idea. It maps straightforwardly onto existing iterative attack pipelines — the modification to the update rule is minimal, and the paper demonstrates it can be layered on top of six different baselines.
+- **Novel and well-motivated method**: Applying dropout to input perturbations (rather than model parameters) during iterative attack generation is genuinely new. The idea that perturbations concentrated on a single model's attention regions should be diversified across regions to improve transfer across models is intuitive and grounded in the known observation that different models attend to different image regions.
 
-- **Consistent and often large improvements across diverse settings.** The results in Tables 1–3 show that APD improves every baseline on nearly every source/target model pair. The gains are not cherry-picked: they hold across normally trained models, adversarially trained models (Inc-v3_ens3/4, IncRes-v2_ens), defense methods (feature denoising, NRP purification), and architectures unseen during source-model training (ViT-B/16: +11.3%, Seq2d_l: +13.3%). This breadth suggests genuine practical value.
+- **Consistent and substantial empirical gains**: APD improves over strong baselines (MI, DIM, TIM, SIM, AAM, AA-TI-DIM) across nearly all settings. Under single-model attack, APD-MI outperforms MI by an average of 12.7%; under ensemble attack, APD-AA-TI-DIM achieves an average improvement of 15.62% over AA-TI-DIM. These margins are material and not cherry-picked.
 
-- **CAM-guided dropout clearly outperforms random dropout.** Figure 4 shows APD (CAM-based) beating random region selection across all four source models and all six target models. This validates the design choice that dropping attention-relevant regions (identified by CAM) is more effective than dropping arbitrary patches.
+- **Seamless integration with existing methods**: The method is demonstrated as a plug-in module for five established input-transformation baselines plus their combination. Tables 1 and 2 show that APD consistently raises the success rate for every baseline, suggesting genuine complementarity rather than a one-off design.
 
-- **Useful ablation on hyperparameters (β, number of centers/scales).** Figures 5–6 provide concrete tuning guidance: β=27 is near-optimal across settings, and performance saturates at ~4 centers and ~7 scales. This suggests the method is not overly sensitive to these knobs beyond a saturation point, which is helpful for practitioners.
+- **Comprehensive evaluation**: The paper tests on four normally trained source models, three adversarially trained models, two defense families (FD, NRP), and three diverse architectures (Seq2d.lstm, ViT-B/16, MnasNet). This goes beyond the typical evaluation scope in transferability papers.
+
+- **Useful ablation studies**: Figure 4 shows CAM-guided selection consistently outperforms random selection across four source models. Figures 5–6 provide hyperparameter sweeps (β, number of centers, number of scales) that give practical deployment guidance.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The observed improvements are not convincingly separated from the effect of increased computation.** APD computes gradients for n×m dropped versions per iteration (default 3×5=15 forward-backward passes per step vs. 1 for I-FGSM). The paper acknowledges this and states the issue is addressed in the appendix (Section 4.4), but the main text contains no controlled experiment — e.g., running MI-FGSM for 150 iterations instead of 10 to match total gradient evaluations, or using multiple random starts — to isolate whether the gain comes from *structured dropout* or simply from *more gradient evaluations*. Without this control, the core claimed mechanism (breaking synergy) is confounded with raw compute budget. This is the most significant weakness because it undermines attributing the improvement to the paper's central conceptual contribution.
+- **The central "synergy" claim is not directly supported by the presented evidence.** The paper asserts that "synergy of perturbations reduces transferability" and that APD "breaks this synergy" (Contributions 1–2). The only supporting experiment (Figure 1b) compares selective removal of perturbations (those the source model attends to but the target does not) vs. random removal of equal size, finding that selective removal causes a larger drop in attack success rate. This shows those perturbations are *important*, but does not demonstrate *synergy* (interdependence between perturbation regions). The term "synergy" is never operationally defined, and no experiment directly measures whether APD reduces interdependence between regions (e.g., via gradient correlation analysis or interaction tests). The method could alternatively be described as robust gradient averaging over masked versions of the input, and the "synergy breaking" narrative is an unsubstantiated overlay. This does not invalidate the method's effectiveness, but Contribution 1 as stated ("We identify that the synergy of perturbations may reduce transferability") is not adequately evidenced.
 
-- **The motivation experiment (Figure 1(b)) that grounds the entire "synergy" thesis is underspecified.** The paper claims that "Selective Noise Removal" (removing noise the source model focuses on but the target doesn't) causes a larger ASR drop than random removal, and uses this to argue that perturbation synergy limits transferability. However, the main text provides no numerical results, no sample size, no error bars, no specification of which source/target models were tested, and no description of how "noise the source model focuses on" is determined. A single bar-chart figure with no quantitative detail cannot support the paper's central conceptual premise. The paper references "A.1" for empirical verification, but this is deferred.
+- **Inconsistency between ablation results and main experimental choices.** The ablation study on the number of centers (Figure 6) shows performance saturates at 4 centers, yet the main experiments use n=3 centers. Similarly, the scale ablation saturates at 7 scales, but the main experiments use m=5 scales. This means the main experiments are operating below the identified optimal configuration, leaving performance on the table. Either the ablation analysis should be internally consistent with the main experiment settings, or the paper should explain this discrepancy (e.g., due to computational budget constraints).
 
 ### Minor
 
-- **CAM-guided region selection is ablated only against random selection (Figure 4).** While beating random is necessary, it is not sufficient to justify the added complexity of computing CAMs at every iteration. A comparison against simpler structured alternatives (e.g., fixed grid regions, uniform patches, or saliency-based selection without CAM) would strengthen the claim that CAM is specifically responsible for the improvement, rather than any structured non-random selection.
+- **CAM computation for non-CNN architectures is not specified.** The paper uses Grad-CAM++ (line 127) to identify attention regions, which is well-defined for CNNs. For ViT-B/16 (Table 3) and Seq2d.lstm, it is not explained how attention maps were obtained. Different architectures may require different CAM variants (attention rollout, Grad-CAM applied to attention heads, etc.), and the absence of this detail makes the results harder to reproduce and interpret.
 
-- **No measures of variance (error bars, confidence intervals) are reported.** All results are single-point attack success rates over 1000 images (1 per class). Some improvements are modest (e.g., +2.6% on defense models in Table 3), and without error bars it is impossible to assess statistical significance. This is especially relevant for the APD-AA-TI-DIM vs. AA-TI-DIM comparison, where the margins are smallest.
-
-- **The definition of "midpoints" from CAM is underspecified.** The paper states that "local maximum points of the CAM" are used as midpoints, but does not specify how multiple midpoints are selected (e.g., top-k by activation value, all local maxima after non-maximum suppression, threshold-based selection). The number of midpoints is fixed to n=3, but the selection criterion matters for reproducibility.
+- **The "synergy" motivation experiment (Figure 1b) could be stronger even as a motivation study.** The paper would benefit from clarifying the experimental setup: how exactly are the "perturbations the source model focuses on but the target does not" identified? Is this done via CAM overlap? Moreover, the experiment only compares selective removal vs. random removal; a comparison against removal of perturbations the target *does* focus on would strengthen the interpretation.
 
 ### Trivial
-None.
+
+- None beyond the issues already described above.
 
 ## Nice-to-Haves
 
-- A comparison against a simpler augmentation baseline: e.g., MI-FGSM + random noise added to the gradient at each step (analogous to input-level dropout without structure). This would help isolate whether the structured (CAM-based) dropout is what matters.
-- A main-text summary of runtime/computation overhead (wall-clock factor) so readers can assess the cost-benefit tradeoff without going to the appendix.
+- A controlled-compute comparison showing that scaling up baseline iterations or adding random transformations to match APD's gradient evaluations yields smaller gains, to definitively rule out the compute confound. (The paper states this is in the appendix; if so, this point is already addressed.)
+- Comparison against other guided region-selection strategies (e.g., gradient magnitude-based selection, saliency maps) beyond random vs. CAM.
+- Analysis of how APD affects white-box attack success rate on the source model, to characterize any trade-off.
 
 ## Removed Points
 
-- **Criticism about Figure 1(b) missing error bars/details** — kept as a minor weakness rather than removed; the central premise experiment is indeed underspecified in the main text.
-- **Strength Finder's claim that Figure 1(b) "provides direct evidence that neglected perturbations synergistically support attention perturbations"** — this conflicts with the verified weakness that the experiment is underspecified; the claim overstates what the figure alone shows. Moved here.
-- **Strength Finder's generic strengths about importance of the problem** — removed as superficial.
-- **Harsh Critic's suggestion about verifying synergy by measuring ASR drop when removing perturbations** — this is a nice-to-have suggestion, not a weakness. Already incorporated.
-- **Criticisms about missing appendix content** — removed per instructions (parser strips appendices; they exist in the original submission).
-- **Harsh Critic's request for white-box ASR discussion** — the paper does mark white-box results with asterisks; the omission of discussion is a minor presentation choice, not a weakness.
+These points are flagged to be removed, treat them with caution:
+
+- **Harsh Critic Point 2 (Computational cost confound)**: The reviewer argues the method lacks controlled compute comparison. However, the paper explicitly states in Section 4.4 (lines 221–222): "Since our method has additional computational cost compared to the original I-FGSM, to demonstrate that the improved transferability originates from our APD approach rather than the increased computation, we include additional discussion and experiments in the A." The appendix (present in the original submission, stripped by the parser) addresses this concern. Per the review guidelines, this weakness is removed.
+
+- **Strength Finder Strength 1 ("Empirical demonstration that perturbation synergy limits transferability")**: This strength claims Figure 1b provides "direct evidence" for the synergy claim. As noted in the Major Weaknesses section, the experiment does not directly measure synergy (interdependence between perturbation regions). Since this strength conflicts with a verified weakness, it is removed.
+
+- **Harsh Critic Point 4 (Synergy claim not established as contribution)**: This is a restatement of Harsh Critic Point 1 and is subsumed by the Major Weakness above.
 
 ## Novel Insights
 
@@ -56,29 +56,25 @@ None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Run a controlled experiment equating total gradient evaluations.** The single most impactful improvement would be: run MI-FGSM for 150 iterations (matching APD-MI's 15×10 passes), or use multiple random restarts with gradient averaging, and show that APD still outperforms. Without this, the paper's central claim that *structured dropout* (not *more computation*) drives improvement is unsubstantiated in the main text.
+1. **Reframe Contribution 1** to match the evidence. Instead of claiming to "identify that synergy reduces transferability," describe the observation more directly: perturbations located in source-model attention regions are disproportionately important for attack success across models, and diversifying perturbation generation across attention regions improves transferability. Alternatively, provide direct evidence of synergy (e.g., gradient covariance analysis showing regions become more independent under APD).
 
-2. **Strengthen the synergy motivation.** Replace Figure 1(b) with a quantitative experiment: report numerical ASR drops with standard deviations, specify which models are used, describe how "noise the source model focuses on" is operationalized. Alternatively, design the controlled experiment suggested by the Harsh Critic (measure ASR drop when random perturbation subsets are removed from APD-generated vs. baseline-generated perturbations) to directly validate the mechanism.
+2. **Align main experiment hyperparameters with ablation results** by using n=4 centers (rather than 3) and m=7 scales (rather than 5), or explain why the lower settings were chosen despite the ablation showing better performance at higher settings.
 
-3. **Add error bars or confidence intervals to the main tables (Tables 1–3).** Given the modest margins on some comparisons (+2.6% on defenses), statistical significance is needed for interpretability.
-
-4. **Specify the CAM midpoint selection procedure** (top-k, threshold, NMS) to ensure reproducibility.
+3. **Specify how CAM is computed for non-CNN architectures** (ViT-B/16, Seq2d.lstm) to ensure reproducibility.
 
 ## Score and Decision
 
-### Anchor Comparison
+**Calibration anchors:**
 
-| Anchor Path | Avg Score | Comparison |
-|---|---|---|
-| `lEsNGN1SjG` (Bias Classifier) | 2.00 | Much weaker paper — flawed claims, toy datasets. Our paper is substantially stronger. |
-| `4NtrMSkvOy` (Channel Pruning) | 3.00 | Weaker — limited evaluation, presentation issues. Our paper has a cleaner idea and broader experiments. |
-| `2ozEpaU02q` (Multiple Randomized Trajectories) | 4.00 | Comparable quality; our paper has a more novel core idea but similar methodological gaps. |
-| `1BuWv9poWz` (Gradient Normalization for ViTs) | 5.33 | Slightly stronger overall — accepted with clear contributions despite some presentation gaps. Our paper has a more novel idea but weaker controls. |
-| `wvFnqVVUhN` (VLM Jailbreak Transfer) | 6.25 | Stronger — comprehensive large-scale study, rigorous execution. Our paper is less thorough experimentally. |
-| `pE6gWrASQm` (Subset Adversarial Training) | 6.50 | Stronger — clean empirical study with well-controlled experiments. Our paper has a more novel idea but weaker experimental design. |
-| `UchRjcf4z7` (Transfer Attack to Watermarks) | 6.50 | Stronger — includes theoretical analysis and thorough experiments. Our paper lacks theoretical grounding. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|--------------------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4NtrMSkvOy.md` (Channel Pruning Transferability) | 3.00 | Significantly weaker: unclear motivation, insufficient experiments, poor presentation. This paper is substantially stronger. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/2ozEpaU02q.md` (Randomized Trajectories Transferability) | 4.00 | Weaker: novelty concerns (gradient averaging under another name), insufficient baselines. APD is more original and better evaluated. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/28U5Olm32r.md` (Model Ensemble Theory) | 5.75 | Comparable overall: that paper had novel theory but limited practical impact; APD has strong empirical results but limited theoretical depth. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/UchRjcf4z7.md` (Transfer Attack to Watermarks) | 6.50 | Stronger: had both theoretical analysis and empirical validation on a well-scoped problem. APD is weaker on the conceptual/theoretical side. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wvFnqVVUhN.md` (VLM Jailbreak Transfer) | 6.25 | Stronger: large-scale empirical study with clear conclusions and no overclaiming. APD has more novel methodology but weaker conceptual framing. |
 
-The paper has a genuinely novel idea (perturbation dropout) and consistent positive results across diverse settings, placing it above the 3.0–4.0 range papers. However, the major confound between the dropout mechanism and increased computation, combined with the underspecified motivation experiment and lack of statistical significance measures, prevents it from reaching the 5.5+ tier of more rigorously executed papers.
+The paper presents a genuinely novel and effective empirical method with thorough evaluation across diverse settings. Its main limitation is the overclaimed conceptual framing (the "synergy" story), which is not directly supported. The empirical contribution itself is solid and practically valuable. Placed relative to the anchors, the paper is clearly stronger than the 3–4 range papers and comparable to the ~5.75 range, though not reaching the conceptual rigor of the 6+ range papers.
 
-MY FINAL SCORE: <score>4.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

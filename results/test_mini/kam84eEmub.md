@@ -1,18 +1,22 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-The paper introduces LayerDAG, an autoregressive diffusion model for generating directed acyclic graphs (DAGs). The key innovation is a **layerwise tokenization** that decomposes a DAG into a unique ordered sequence of bipartite graphs, enabling autoregressive generation across layers with diffusion models capturing logical dependencies within each layer. The model is evaluated on synthetic LP datasets with hard logical constraints and three real-world computing benchmarks (TPU Tile, FPGA HLS, NA-Edge), demonstrating strong improvements over baselines in validity, distributional fidelity, and downstream surrogate model accuracy. The paper also shows label generalization (interpolation/extrapolation) where baselines fail.
+This paper introduces LayerDAG, a generative model that decomposes directed acyclic graphs into a unique sequence of bipartite graph layers, then uses autoregressive generation across layers (for directional dependencies) coupled with discrete diffusion within each layer (for logical dependencies). The method is evaluated on a synthetic LP dataset with hard logical constraints and three real-world system-benchmarking datasets (TPU Tile, HLS, NA-Edge) with DAGs up to ~400 nodes—substantially larger than the ≤24-node NAS DAGs tackled by prior DAG generative models. The experiments consistently show LayerDAG outperforming baselines in validity, graph statistics, downstream surrogate model accuracy, and crucially, label extrapolation to unseen regimes.
 
 ## Strengths
 
-1. **Novel layerwise tokenization respecting DAG partial order (Section 3.1).** The decomposition of a DAG into a unique, invertible sequence of bipartite graphs is a genuine conceptual contribution. It provides a natural inductive bias that avoids the permutation-invariance issues plaguing node-order-based autoregressive models. The permutation invariance property (Proposition, Section 3.3) is formally established and empirically validated — on LP (ρ=0), LayerDAG achieves 0.56 validity vs. 0.37 for the best baseline, and the advantage holds across all constraint levels.
+- **Novel permutation-invariant layerwise factorization.** The paper uniquely transforms a DAG into an ordered sequence of bipartite graphs (Section 3.1). This avoids the ordering-ambiguity problem that plagues prior autoregressive DAG models (D-VAE, GraphRNN) and is proven permutation invariant (Proposition 1, Section 3.3). This is the paper's central insight and it is cleanly executed.
 
-2. **Hybrid autoregressive–diffusion architecture with clear ablation support.** The design separates directional dependencies (autoregressive across layers) from logical dependencies (diffusion within layers). Ablations confirm both components matter: the non-autoregressive variant (OneShotDAG) and single-step variant (T=1) are consistently worse across all datasets (e.g., on TPU Tile: full model 0.65 Pearson vs. OneShotDAG 0.56 and T=1 0.37).
+- **Strong validity under strict logical constraints on LP.** In Table 1, for the most constrained setting (ρ=0), LayerDAG achieves 56% valid DAGs, outperforming the best baseline (OneShotDAG at 37%) by 19 absolute percentage points. This gap is large and statistically significant.
 
-3. **Demonstrates generalization to large-scale DAGs (up to ~400 nodes).** Existing DAG generative models (D-VAE, GraphPNAS, DiffusionNAG) focus on ≤24 nodes for NAS. LayerDAG handles hundreds of nodes across three real-world computing datasets. Critically, in the label extrapolation setting (Table 3), LayerDAG achieves positive Pearson correlation (0.22 BiMPNN, 0.18 Kaggle model) while all baselines yield negative correlations — a striking result.
+- **Consistent best performance on three real-world conditional generation benchmarks.** Table 2 shows LayerDAG achieving the highest Pearson correlation and lowest MAE on TPU Tile, HLS, and NA-Edge when training surrogate models on generated DAGs. The method is the best on every metric across all three datasets.
 
-4. **Comprehensive experimental setup across three diverse computing platforms** (TPU, FPGA, edge devices) with different graph sizes, attribute types, and label distributions. The label generalization experiment (Section 5.3) uses a Kaggle top-5 surrogate model with >600 competition submissions, providing a rigorous test.
+- **Superior label generalization to unseen regimes.** Table 3 (extrapolation on the 5th quantile) shows LayerDAG is the only model achieving positive Pearson correlation (0.22 with BiMPNN, 0.18 with an independent Kaggle surrogate), while all baselines yield negative or near-zero correlations. This result is validated with two independent surrogate architectures (BiMPNN and the Kaggle top-5 model), ruling out architecture-specific confounds.
+
+- **Flexible quality-efficiency trade-off.** The layer-index-based denoising schedule (Section 3.4) provides a principled way to allocate more diffusion steps to more complex layers, and Figure 1 shows it outperforms a constant schedule at the same time budget.
+
+- **Extensive evaluation across diverse computing platforms.** The paper validates on three real-world datasets (TPU runtime, FPGA resource usage, mobile CPU latency) with different characteristics (up to 400 nodes, varying attribute counts), establishing practical applicability.
 
 ## Weaknesses
 
@@ -20,58 +24,61 @@ The paper introduces LayerDAG, an autoregressive diffusion model for generating 
 None.
 
 ### Major
-None that threaten the core claims. However, there is one significant limitation worth emphasizing:
+None.
 
 ### Minor
 
-1. **Surrogate-based evaluation is inherently indirect.** The paper's central application claim — that LayerDAG generates DAGs useful for system benchmarking — is evaluated by training ML surrogate models on synthetic DAGs and testing on real DAGs. While the paper correctly notes that direct hardware measurement (e.g., FPGA synthesis) is "computationally costly or infeasible" (Section 5.2) and that surrogates are standard in this community (citing ~15 prior works), this chain of validation remains one step removed from the end application. The fact that synthetic-data-trained surrogates approximate real-data-trained surrogates does not guarantee the synthetic DAGs themselves are realistic enough for the intended use cases (e.g., compiler optimization, circuit design). Adding even a small-scale direct validation (e.g., compiling 5-10 generated HLS DAGs and measuring FPGA LUT usage) would substantially strengthen the paper's core claim.
+- **The Q2 (conditional generation) evaluation uses a BiMPNN surrogate which shares the same architecture as LayerDAG's encoder.** Both the generative model's encoder and the evaluation surrogate are BiMPNN, creating a potential confound: generated DAGs might be disproportionately "BiMPNN-friendly." This concern is significantly mitigated by the Q3 label-generalization results (Table 3), where the same ranking holds using an *independent* Kaggle surrogate model developed by a different team. However, Q2 uses only BiMPNN, and replicating Q2's headline results with a second surrogate architecture would strengthen the evidence.
 
-2. **Low absolute validity on the strictest synthetic constraint (ρ=0, Table 1).** LayerDAG achieves 56% validity — a 20% absolute improvement over baselines (23–37%) — but this still means 44% of generated DAGs violate the hard logical constraint. The paper presents this as a comparative success but does not discuss what this invalidity rate implies for practical applications where violations are catastrophic (e.g., circuit design). Since the primary application is real-world computing graphs (where validity is likely near 100% by the autoregressive construction), this is not fatal, but transparent acknowledgment and discussion would improve the paper.
+- **The paper does not discuss the 44% failure rate on LP (ρ=0).** While 56% validity is far better than all baselines (<40%), the paper does not analyze *where* or *why* failures occur (e.g., by layer depth, attribute vs. edge generation). This analysis would help readers assess how far the method is from practical deployment in high-stakes settings and would guide future improvements.
 
-3. **Baseline domain mismatch not fully addressed.** The paper acknowledges (line 34) that existing DAG models focus on ≤24-node NAS graphs, and the baselines (D-VAE, GraphRNN, GraphPNAS) are adapted versions. However, the paper does not report whether these baselines were re-tuned for the larger graphs, nor does it show their training stability or generation time on the 400-node datasets. The comparison would be strengthened by including a simple large-DAG baseline (e.g., random DAGs with matched degree/layer statistics) to calibrate the difficulty of the setting, and by reporting baseline training/generation efficiency.
+- **Limited justification for the linear denoising schedule.** Section 3.4 proposes a linear increase in diffusion steps with layer index, but the paper does not empirically compare linear vs. exponential, logarithmic, or adaptive schedules. The linear choice is reasonable but unvalidated.
 
-4. **Missing hyperparameter and cost details.** Training and sampling wall-clock time / GPU memory, T_min/T_max/L_max values, transformer architecture specifics (layers, hidden dims, batch size, learning rate) are not reported in the main text. The paper references an appendix (which was stripped by the parser), so these may exist in the original submission. If so, this point is moot; if not, reproducibility is hampered.
+- **No numerical efficiency comparison between methods.** Q4 (trade-off) results are presented only as figure curves (Figure 1) without numerical comparison of generation time per DAG between methods, making quantitative efficiency comparisons difficult.
 
 ### Trivial
-None.
+
+- None.
 
 ## Nice-to-Haves
 
-- **Small-scale direct hardware validation (for the HLS dataset):** Implementing even 5–10 generated DAGs as FPGA programs and measuring resource usage would provide a reality check for the surrogate-based evaluation. The paper explicitly acknowledges this would strengthen the work.
-- **Reporting the fraction of generated DAGs that are acyclic for real-world datasets** (expected to be 100% by construction) and discussing attribute-level validity (e.g., whether generated matrix multiplications have matching dimensions).
-- **Ablation comparing sinusoidal vs. other positional encodings** for the layer index.
+- An ablation of the encoder architecture (e.g., replacing BiMPNN with GIN or GAT) to confirm that the encoder choice itself is not the primary driver of gains.
+- Qualitative visualization of generated DAGs alongside real counterparts for a case study (e.g., a transformer layer's computational graph).
+- An analysis of error propagation across layers: how often is a layer invalid *conditioned* on a previous layer being imperfect?
 
 ## Removed Points
 
-- **Criticism that surrogate-model evaluation does not measure DAG utility (Harsh Critic's point 1):** REMOVED because the paper extensively justifies surrogate evaluation as standard practice in system benchmarking (lines 219-223, citing ~15 works). Demanding direct hardware measurement across three platforms (TPU, FPGA, edge) goes beyond what is feasible or standard in the field. The criticism was weakened to a minor point above.
-- **Strength Finder's claim that surrogate evaluation provides "rigorous" benchmarking:** WEAKENED — the evaluation is practical and well-designed but indirect. Moved the spirit of this concern to the Minor weakness section.
-- **Strength Finder's generic "supports core claims" framing:** REMOVED as redundant with the core strengths list.
-- **Harsh Critic's suggestion that the paper should discuss 56% validity for circuit design:** KEPT as Minor weakness #2 — the paper does discuss it in relative terms but could be more transparent about practical implications.
+These points are flagged to be removed, treat them with caution:
+
+- **Harsh critic's questioning of baseline fairness in Q2 (undertuning of GraphRNN/D-VAE).** The paper states it "adopts an extension" for baselines but provides limited hyperparameter details. However, this is a speculative criticism—no evidence is given that baselines were undertuned—and such detail gaps are typical of conference papers. This is more of a reproducibility concern than an evidentiary weakness against the paper's claims, and it applies symmetrically to all baselines. *Moved due to being speculative and standard-practice.*
+
+- **Strength Finder's generic/superficial strengths (the "addressed an important problem" type).** All four core strengths listed are concrete and citation-backed. No generic strengths need removal.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a useful tension: LayerDAG's strongest empirical results (positive correlations where baselines go negative in extrapolation) come from the most indirect evaluation setting, while the direct validity test on the strictest synthetic constraint shows a non-trivial failure rate (44%). This tension — between impressive relative gains and modest absolute performance on the hardest test — is worth future investigation.
+Beyond the paper's own contributions, the most striking finding is the label extrapolation result (Table 3): in the 5th quantile extrapolation setting, every single baseline model yields negative or near-zero Pearson correlation with the independent Kaggle surrogate, while LayerDAG achieves 0.18. This suggests the layerwise decomposition genuinely captures a structural invariant of DAGs—the ordered bipartite-graph factorization is a more natural representation that facilitates generalization to unseen label regimes. The fact that this holds across two fundamentally different surrogate architectures (BiMPNN and a Kaggle competition solution) provides strong evidence that the advantage is structural, not architecture-specific.
 
 ## Suggestions
 
-1. Add a small-scale direct validation for at least one platform (e.g., compile 5-10 HLS DAGs on an open-source FPGA toolchain) or show that surrogate models trained on LayerDAG data improve a concrete downstream task (e.g., design-space exploration).
-2. Report baseline training stability, generation wall-clock time, and whether they were re-tuned for large graphs.
-3. Include a table of all hyperparameters (T_min, T_max, L_max, transformer width/depth, learning rate, batch size) in the main text or appendix.
-4. Explicitly acknowledge the 44% invalidity on LP ρ=0 and discuss whether this is acceptable in target applications and how it might be reduced (e.g., rejection sampling, more denoising steps).
+1. Run the Q2 evaluation with the Kaggle surrogate (already used in Q3) on TPU Tile to directly verify that the ranking holds under a non-BiMPNN surrogate.
+2. Add a brief failure-mode analysis for LP (ρ=0): break down validity failures by type (attribute constraint violated, edge constraint violated) and by layer depth, to identify where the diffusion model is the bottleneck.
+3. Compare the linear denoising schedule against one alternative (e.g., constant or logarithmic) on one dataset to empirically justify the choice.
+4. Report the average generation time per DAG for all methods alongside quality metrics in the Q4 figure.
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration anchors (all from the human-review corpus):**
 
-| Anchor Path | Avg Human Score | Comparison to This Paper |
-|---|---|---|
-| SeaDAG (DAG diffusion, avg 4.25) | 4.25 | Weaker novelty (direct combination of existing methods), less comprehensive experiments. LayerDAG is stronger. |
-| Efficient Graph Generation (avg 6.00) | 6.00 | Comparable quality; both have genuine methodological novelty and thorough evaluation. |
-| Heat Kernel Directed Graph Gen (avg 5.75) | 5.75 | LayerDAG has more comprehensive real-world evaluation and clearer practical motivation. |
-| ARROW-Diff (avg 4.50) | 4.50 | LayerDAG has stronger novelty and better absolute performance; ARROW-Diff criticized for limited novelty. |
-| GRDPG Graph Decoding (avg 2.00) | 2.00 | LayerDAG is far superior in every dimension (method, experiments, clarity). |
+| Path | Avg Score | Comparison to Paper Under Review |
+|------|-----------|----------------------------------|
+| SeaDAG (XgCejjNNYX.md) | 4.25 | Much weaker: "semi-autoregressive" is simulated through noise scheduling rather than actual autoregressive decomposition; less principled methodology, narrower evaluation, no label generalization experiments. |
+| ARROW-Diff (IL9o1meezQ.md) | 4.50 | Weaker: adapts existing OA-ARDM to random walks without a fundamentally new DAG decomposition; evaluation is less thorough and real-world relevance is lower. |
+| Directed Graph Generation with Heat Kernels (xXtD9P2lvH.md) | 5.75 | Weaker: evaluation limited to small synthetic datasets; no real-world system benchmarking or conditional generation; less practical impact. |
+| Efficient & Scalable Graph Generation (2XkTz7gdpc.md) | 6.00 | Comparable strength but different domain (undirected graphs); similar level of methodological novelty and experimental rigor; accepted. |
+| Graph Generation w/ Destination-Predicting Diffusion (UQVhOVhUi4.md) | 6.25 | Similar overall quality but different focus: stronger mathematical framework, weaker real-world validation; rejected despite solid score. |
+| Robust Classification via a Single Diffusion Model (I5lcjmFmlc.md) | 8.00 | Higher: exceptional paper with perfect reviewer scores; different domain (adversarial robustness, not graph generation). |
 
-**Reasoning:** This paper makes a genuine methodological contribution (layerwise tokenization) with strong empirical support across three real-world computing benchmarks. The ablations are thorough and informative. The main limitation is the indirect evaluation framework, which is standard in the field but nonetheless leaves the core application claim one step removed from validation. Comparing against the anchors, the paper clearly surpasses SeaDAG (4.25) and ARROW-Diff (4.50), is comparable to Efficient Graph Generation (6.00), and is weaker than the strongest papers in the corpus (7+) which typically include direct application validation or theoretical guarantees. The paper is solid and well-executed.
+LayerDAG's contribution is stronger than the typical graph generation paper in the calibration set. The layerwise decomposition is genuinely novel and well-motivated, the evaluation is one of the most thorough I've seen (synthetic constraints + three real-world platforms with completely different characteristics), and the label generalization results are uniquely compelling. The weaknesses are minor and addressable—they do not undermine the core claims. Relative to the anchors, the paper clearly sits above the 4.25–5.75 range and is comparable to or stronger than the 6.00–6.25 papers.
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

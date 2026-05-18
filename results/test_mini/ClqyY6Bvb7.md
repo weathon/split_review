@@ -1,84 +1,95 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me compose the consolidated review.
+Now I have sufficient context. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper presents ChEF, a modular evaluation framework for Multimodal Large Language Models (MLLMs) that decomposes evaluation into four components—*Scenario*, *Instruction*, *Inferencer*, and *Metric*—that can be combined as *Recipes*. It additionally introduces six desiderata (calibration, in-context learning, instruction following, language performance, robustness, hallucination) with specific evaluation protocols, and conducts a large-scale evaluation of 9 MLLMs across 9 scenarios and all six desiderata, yielding several empirical observations about MLLM capabilities and limitations.
+This paper proposes ChEF, a modular evaluation framework for Multimodal Large Language Models (MLLMs) with four components (Scenario, Instruction, Inferencer, Metric) that can be combined into "Recipes." The framework introduces six evaluation desiderata beyond accuracy (calibration, in-context learning, instruction following, language performance, hallucination, robustness) and evaluates 9 MLLMs across 9 scenarios and these 6 desiderata, yielding observations about model strengths and limitations.
 
 ## Strengths
 
-- **Modular four-component design that unifies disparate benchmarks under a single framework.** Section 3.1 formalizes *Scenario*, *Instruction*, *Inferencer*, and *Metric* as decoupled modules, and Figure 1(b) demonstrates that existing benchmarks (MME, MMBench, SEEDBench, etc.) can be expressed as specific *Recipes* of these components. This is a practical engineering contribution that genuinely simplifies running evaluations across different MLLMs and task formats.
+- **Modular four-component design is practical and extensible.** Decoupling evaluation into Scenario, Instruction, Inferencer, and Metric (Section 4.1) is a genuine architectural contribution. Prior benchmarks (LAMM, LVLM-eHub) are monolithic; ChEF's modularity allows any existing MLLM benchmark to be expressed as a Recipe (Figure 1b) and enables systematic variation of individual components.
 
-- **Introduction of six desiderata with formally defined evaluation metrics that go beyond accuracy.** Section 3.3 defines calibration (ECE, Equation 1–3), in-context learning (RIAM, Equation 4), instruction following (match ratio), language performance (GPT-based scoring), robustness (RRM, Equation 5), and hallucination (POPE-based accuracy). This dimensions-based approach is the paper's most valuable conceptual contribution — it systematically profiles capabilities that standard accuracy benchmarks miss.
+- **Six desiderata expand evaluation beyond accuracy.** The paper formalizes calibration (ECE), in-context learning (RIAM), instruction following (match ratio), language performance (GPT-based), robustness (RRM), and hallucination (POPE-based) within a unified framework. This is a valuable conceptual contribution — prior MLLM benchmarks largely ignore these dimensions, which are critical for interactive agents. The observation that most MLLMs struggle with ICL, instruction following, and robustness (Section 5.3) is supported by the results.
 
-- **Large-scale evaluation of 9 MLLMs on 9 scenarios and 6 desiderata yielding several informative empirical findings.** Table 1 and Figure 5 report results across models (LLaVA, InstructBLIP, Shikra, etc.) and tasks (CIFAR-10, VOC2012, MMBench, MSCOCO, etc.). The experiments support concrete observations: InstructBLIP leads most scenarios, all models struggle with object counting (FSC147), Kosmos-2 cannot handle multi-choice option formats, and instruction following and robustness are weak across the board.
+- **Large-scale standardized evaluation generates useful comparative data.** Evaluating 9 MLLMs across 9 scenarios (Table 1) and 6 desiderata (Figure 6) provides a useful snapshot of the MLLM landscape. The discovery that InstructBLIP and Shikra lead on hallucination while most models struggle on ICL and robustness is actionable information for the community.
 
-- **Stability analysis showing PPL-based inferencers reduce evaluation variance compared to free-form generation.** Section 4.3 and Figure 6 demonstrate that using `PPL` as the *Inferencer* (instead of `Direct` output) substantially narrows the accuracy distribution across different query phrasings on CIFAR-10 and ScienceQA. This provides practical guidance for more reliable evaluation in practice.
+- **Stability analysis demonstrates a concrete advantage of PPL-based inference.** The comparison (Figure 7) showing that PPL inferencer reduces variance across query variations compared to Direct (LAMM, LVLM) methods on CIFAR10 and ScienceQA is a tangible methodological contribution that supports the reliability claim.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The paper overclaims novelty relative to prior work.** The abstract and Section 1 claim "the first *Comprehensive Evaluation Framework*" for MLLMs (line 7, line 138). However, HELM (Liang et al., 2022) already provides a modular evaluation framework with scenarios, metrics, and adaptation procedures for LLMs; LAMM (Yin et al., 2023) and LVLM-eHub (Xu et al., 2023) are existing MLLM evaluation frameworks that the paper acknowledges but dismisses without a detailed, head-to-head comparison of what ChEF adds. The paper cites HELM only twice (lines 208, 326), both times in passing for the calibration metric. A clear articulation of what conceptual advance ChEF provides beyond engineering convenience — and an explicit comparison table showing what HELM/LAMM/LVLM-eHub do not support — would be needed to justify the "first" claim.
+- **Duplicate sections indicate an unedited manuscript.** The paper contains **two Introduction sections** (pages 2 and 5, both with `\section{Introduction}`) and **two ChEF sections** (Section 4 on page 10 and a second "ChEF: A Comprehensive Evaluation Framework" section on page 17). The second set of sections is not an appendix — it repeats the same content (Design Principles, Overview, Desiderata) in slightly different wording. This is not a formatting artifact; it is a compilation error from merging multiple drafts. The paper reads as unedited, and this disorganization undermines the credibility of the framework being presented. No amount of technical merit can compensate for a submission that has not been proofread at the manuscript level.
 
-- **The framework's reliability claims are not adequately validated for their intended purpose.** The paper claims ChEF provides "fair" and "reliable" evaluation (e.g., line 88, line 406), but the experiments do not validate that model *rankings* are stable across reasonable recipe variations. The stability analysis (Section 4.3, Figure 6) shows that PPL reduces *within-model* variance across queries, but does not show whether the *relative ordering* of models changes when different inferencers, instructions, or recipes are used. For a framework that claims to enable "standardized" comparison across models, demonstrating that rankings are robust to reasonable recipe choices is essential.
+- **No quantitative comparison to existing evaluation frameworks.** The paper acknowledges LAMM and LVLM-eHub as prior frameworks but provides no head-to-head comparison showing that ChEF is more reliable, informative, or comprehensive as a complete framework. The stability analysis (Figure 7) compares individual inferencers (PPL vs. Direct) but does not compare the frameworks holistically. Without this, it is unclear whether ChEF is a genuine advance or a reimplementation with a different interface. The claim of being "the first comprehensive evaluation framework" is overstated given prior frameworks exist and have not been systematically outperformed in the paper.
 
-- **The correlation analysis (Section 4.4) is conducted on only 9 data points (one per MLLM) without any statistical rigor.** Pearson correlations on 9 samples are highly unreliable; no confidence intervals, p-values, or bootstrap estimates are reported. Despite this, the paper makes strong interpretive claims: "Calibration is an independent dimension" (line 464), "Hallucination is strongly correlated with MMBench performance" (line 470), and "significant correlation" (line 468). These claims are unsupported by the statistical evidence presented, and several of the interpretive assertions (e.g., causal reasoning about why instruction following correlates with accuracy) go well beyond what a correlation matrix can establish.
+- **PPL-based evaluation of generative tasks is not validated.** For generative scenarios like image captioning (Flickr30k) and object detection (VOC2012), ChEF converts the task into multi-choice QA using PPL over a fixed answer pool. The paper provides no evidence that this proxy preserves model rankings compared to standard metrics (BLEU/CIDEr for captioning, mAP for detection) or correlates with human judgments. The framework's "comprehensive" claim is weakened if it measures only a constrained form of each task.
+
+- **Correlation analysis uses only 9 data points with no confidence intervals.** The Pearson correlation matrix (Figure 8a) is computed over 9 models. At this sample size, correlation estimates are highly unstable and can be driven by single outliers. Claims such as "Hallucination is strongly correlated with the performance on MMBench" are not statistically justified. No p-values, confidence intervals, or leave-one-out analyses are reported.
 
 ### Minor
 
-- **The instruction following evaluation tests only verbalizer manipulation (natural/neutral/unnatural output tokens), which captures a narrow aspect of instruction following.** Real-world instruction following involves complex multi-step instructions, format constraints, content restrictions, and conversational coherence — none of which are evaluated. The paper's conclusion that "MLLMs struggle with instruction following" (line 119, line 435) is based on this single, narrow test.
+- **Stability analysis covers only 2 scenarios and 3 models.** While the stability experiment (Figure 7) is a good start, it is too narrow to support general claims about ChEF providing "stable assessment across all settings." Expanding to more scenarios and models would strengthen the reliability claim considerably.
 
-- **The six desiderata are evaluated on only 2 scenarios (MMBench and ScienceQA) except hallucination (MSCOCO).** While the paper is transparent about this in the figure captions (Figure 4, Figure 5), the limited scenario coverage means claims about desiderata performance (e.g., "poor performance on these dimensions shows that current MLLMs fall short") may not generalize across task types.
+- **Normalization procedure for desiderata scores is underspecified.** Figure 6 states that "the score for each dimension is computed by normalizing the results from the specific metric to a range of 0-100" but does not specify the normalization formula. For instance, "Calibration score is represented by 1-ECE" — ECE ranges [0,1], so 1-ECE also ranges [0,1]; yet the plotted values appear in the 40–80 range, implying an additional scaling step that is not documented.
 
-- **The default recipe selection procedure is described informally.** The paper states the default recipe is the one "behaving most reliably (i.e. stable to *Instruction* variations)" (line 406) but does not formally define the selection criterion (e.g., what threshold of variance reduction qualifies, whether accuracy is also considered). The reader cannot independently verify whether recipes were chosen in a principled way.
+- **No standard deviations reported in Table 1.** The main accuracy table reports single-run results without variance estimates, making it impossible to assess whether differences between models are meaningful.
 
-- **The related work discussion mentions HELM (Liang et al., 2022) and the LM Evaluation Harness (Gao et al., 2021) but does not provide a systematic comparison.** Given that both prior works use modular evaluation designs (scenarios + metrics + adaptation), the paper should explicitly compare ChEF's modular decomposition to these frameworks and show what the multimodal setting demands that the LLM-oriented frameworks do not provide.
+- **Choice distribution explanation is speculative.** The claim that "distinct prior to options … caused by the hallucination issue" (Section 5.4) is not the only possible explanation — training data bias or positional bias could also explain the pattern. This weakens the strength of the correlation claim.
 
 ### Trivial
-None.
+
+- None.
 
 ## Nice-to-Haves
-- Quantify uncertainty in all correlation analyses (confidence intervals, bootstrap estimates) given the very small number of models (n=9).
-- Analyze whether model rankings are consistent across different recipe choices (different inferencers, different instructions).
-- Include a comparison table contrasting ChEF with HELM, LAMM, and LVLM-eHub on design dimensions.
-- Report computational cost or practical usability considerations (e.g., GPT-4 API calls for language performance evaluation).
+
+- Validate PPL accuracy against standard metrics (BLEU/mAP) on a subset of generative tasks to show that model rankings are preserved.
+- Compare ChEF holistically against LAMM and LVLM-eHub on the same set of models and scenarios.
+- Provide bootstrapped confidence intervals or leave-one-out analysis for the correlation matrix.
+- Report raw metric values alongside normalized scores in a supplementary table.
+- Include qualitative examples (e.g., calibration curves, instruction-following failures) to illustrate the desiderata evaluations.
 
 ## Removed Points
-- **Duplicated sections in the parsed text.** The critic noted that the paper has two nearly identical copies of the Introduction and two copies of the ChEF section. Per the meta-review instructions, these are classified as parser-induced artifacts (the original PDF submission does not contain these issues), and this criticism is removed from the main evaluation. It should not be considered in assessing the paper's scientific contribution.
 
-- **Strength about correlation analysis.** The Strength Finder listed "Correlation analysis linking desiderata to visual performance, revealing intrinsic model properties" as a strength. However, this strength conflicts with the verified weakness that the correlation analysis is conducted on only 9 data points without any statistical rigor (no confidence intervals or significance tests). Per the conflict rule, the weakness prevails, and this strength is moved here.
+- **"facilitatesLeveraging" is a parser artifact** (missing space). This is a PDF extraction error, not an author error. Removed per hard rules.
+- **"First Introduction paragraph wastes reader's time"** — reviewer complains about the content of the duplicate introduction. This is subsumed by the major weakness about duplicate sections.
+- **"Claim about prior frameworks lacking scalability not substantiated with specific examples"** — The paper cites LAMM and LVLM-eHub and states they "lack scalability and comprehensiveness" (Section 3.3). This is a reasonable high-level critique; requiring a detailed list of every concrete limitation is scope creep. Removed.
+- **"RIAM assumes linear scale"** — This is a minor mathematical observation; the RIAM formula is standard for measuring relative improvement over random baseline in multi-choice settings. The paper's use is reasonable. Removed as a nitpick.
+- **"Stability analysis too narrow to support general claims"** — Kept as minor, not removed entirely, but weakened from the harsh critic's framing of "evidential gap" to a minor weakness.
+- **Strength Finder strengths about "correlation analysis reveals insights"** — Partially conflicts with verified weakness about insufficient data (9 models, no confidence intervals). Kept the insight as genuine but caveat implicitly absorbed by the major weakness.
+- **Strength Finder strength about "extensibility through easy-to-use interfaces"** — Generic claim without specific evidence of community adoption or demonstrated ease of use. Removed as superficial.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews raise valid methodological concerns but do not surface fundamentally new observations about the paper that the authors have not already partially identified.
+
+None beyond the paper's own contributions. The core observation that current MLLMs struggle with ICL, instruction following, and robustness is useful but consistent with broader trends in the literature.
 
 ## Suggestions
 
-1. **Re-frame the contribution precisely.** Rather than claiming "first comprehensive evaluation framework," describe ChEF as "a modular implementation that unifies existing MLLM benchmarks under common interfaces and introduces a desiderata-based evaluation dimension." This is factually accurate and avoids the overclaim issue.
-
-2. **Validate ranking stability.** Show that the relative ordering of MLLMs is consistent across different recipe variations (different inferencers, different query phrasings, different instructions). This is the core validation needed to support the claim of "fair and reliable" standardized evaluation.
-
-3. **Add statistical rigor to the correlation analysis.** Report confidence intervals or bootstrap estimates for all Pearson correlations. Reduce the strength of interpretive claims accordingly, or collect data on more MLLMs to increase the sample size.
-
-4. **Broaden the desiderata evaluation scenarios** or explicitly acknowledge the limitation more prominently when discussing general conclusions about MLLM capabilities.
-
-5. **Add a comparison table** positioning ChEF relative to HELM, LAMM, LVLM-eHub, and other prior evaluation frameworks, highlighting what each supports and what ChEF adds specifically for the multimodal setting.
+1. **Deduplicate the manuscript.** Merge the two Introduction sections into one coherent narrative; remove the duplicate ChEF section (pages 17–24) entirely. This is the single most impactful fix.
+2. **Add a head-to-head comparison with LAMM and LVLM-eHub** as complete frameworks on a shared set of models/scenarios, measuring variance, ranking consistency, and coverage.
+3. **Validate PPL on Flickr30k and VOC2012** by comparing the ranking of models under PPL accuracy vs. standard BLEU/mAP on free-form outputs. Show that the multi-choice proxy preserves relative ordering.
+4. **Report confidence intervals or bootstrap estimates** for the correlation matrix, or simply reduce the strength of the correlation claims given the small sample (n=9).
+5. **Specify the exact normalization** used for each desideratum dimension in Figure 6 so the results are reproducible.
 
 ## Score and Decision
 
-**Anchor comparison:**
+**Calibration Anchors (from retrieved batch):**
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| MEGA-Bench (2rWbKbmOuM) | 7.00 | Much stronger paper — 500+ real-world tasks, expert annotations, 40+ metrics. ChEF is narrower, less validated. |
-| MME-RealWorld (k5VHHgsRbi) | 6.80 | Much stronger — large-scale manual annotation, 29 models evaluated. ChEF reuses existing benchmarks; does not create new data. |
-| ReForm-Eval (ZuYvrjh2od) | 5.00 | Comparable approach — both unify existing benchmarks. ChEF adds the desiderata dimension but has weaker validation (no ranking stability analysis). |
-| Understanding LLMs in Multimodal Eval (skHPtDnYGa) | 4.50 | Comparable overall quality — both have interesting insights but significant limitations. |
-| Graphical Perception (Yqte21dFVS) | 4.00 | ChEF is broader in scope (general MLLM framework vs. chart-specific) but similar in depth of validation. |
-| MMMT-IF (ic153qXFfx) | 4.00 | Narrower focus (instruction following only); ChEF is more comprehensive. |
-| MCTBench (BVACdtrPsh) | 3.00 | ChEF is clearly stronger — more models, more scenarios, more systematic framework design. |
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|------------------------|
+| `2rWbKbmOuM` (MEGA-Bench) | 7.00 | Far more polished, comprehensive, and rigorously executed. ChEF is weaker across all dimensions. |
+| `k5VHHgsRbi` (MME-RealWorld) | 6.80 | Stronger data contribution, cleaner submission, clearly positioned relative to prior work. |
+| `vJ0axKTh7t` (Labyrinth of Links) | 6.25 | Cleaner execution despite narrower scope; no structural errors. |
+| `skHPtDnYGa` (Role of LLMs in MML eval) | 4.50 | Comparable level of contribution but much better presented. |
+| `Dj1PVLU8fK` (Infinity-Benchmarks) | 3.50 | Weaker contribution and less clear methodology. ChEF is stronger. |
+| `4SrzKsJocx` (Simultaneous DimRed) | 3.80 | Limited scope, synthetic-only. ChEF has broader practical relevance. |
 
-MY FINAL SCORE: <score>4.5</score>
+The paper makes a genuine contribution in its modular framework design and expansion of evaluation dimensions, which are more valuable than the weaker anchors. However, the duplicate sections indicate a lack of editorial care that would not be acceptable in a published paper, and the evidential gaps (no framework comparison, unvalidated PPL proxy, statistically unsupported correlations) prevent the core claims from being fully established. The paper requires major revision to meet publication standards.
+
+**Overall Assessment:** The core framework idea is solid and the breadth of evaluation is useful, but the manuscript is marred by duplicated sections and several evidential gaps that weaken the central claims.
+
+MY FINAL SCORE: <score>4.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

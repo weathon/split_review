@@ -1,66 +1,78 @@
-Now I have all the information needed. Let me write the final consolidated review.
+Now let me write the consolidated review.
 
 ## Summary
-This paper reveals that the MLP-Mixer can be understood as an extremely wide, sparse MLP whose weights naturally take a Kronecker-product structure after vectorization. From this perspective, the paper formally connects Mixers to Monarch matrices (linear case), derives a spectral explanation for why Mixers can scale to larger widths than unstructured sparse MLPs without trainability degradation, and empirically validates that performance improves when token and channel dimensions are balanced (S ≈ C) under fixed parameter budgets — across CIFAR-10/100, STL-10, and ImageNet.
+This paper reveals that the MLP-Mixer can be understood as an extremely wide MLP with sparse, structured weights. The key theoretical contribution is vectorizing the Mixer's feature matrix, which exposes its weight matrices as Kronecker products with identity matrices, making the effective width $m=SC$ and sparsity ratios $1/C$, $1/S$ explicit. From this, the paper derives an optimal width/sparsity condition ($C=S$ under fixed connectivity $\Omega$), connects the Mixer to Monarch matrices and implicit L1 regularization, and introduces a PK family of architectures (including Random-Permuted Mixers) as generalizations. Experiments on CIFAR-10/100, STL-10, and ImageNet-1k show that balancing $S$ and $C$ improves test error, and CKA analysis suggests hidden feature similarity between Mixers and unstructured sparse-weight MLPs.
 
 ## Strengths
-- **Formal expression of MLP-Mixer as a wide sparse MLP (Proposition 1, §3.1).** The algebraic observation that vectorizing the feature matrix turns the Mixer into an MLP with Kronecker-product and permutation-matrix weights, yielding effective width \(m=SC\) and built-in sparsity ratios \(1/S\) and \(1/C\), is simple but was missing in prior work. It provides a clean, pedagogically valuable lens for understanding Mixers.
-- **Connection to Monarch matrices (Corollary 1, §3.3).** Showing that the linear S-Mixer's effective weight matrix is a Monarch matrix with weight sharing (§3.3, Eq. 8) bridges two previously separate lines of structured sparsity. The experimental validation on MNIST (Figure 2d) confirms that the extra weight sharing does not significantly harm performance.
-- **Spectral explanation for Mixer's trainability advantage over SW-MLP (§4.3).** The analysis showing that Mixer's maximal singular values remain bounded by \(c_\gamma = 1+\sqrt{\gamma}\) while SW-MLP's grow unboundedly with width (Eq. 21–22) explains both the divergence in Figure 3 and why Mixers can exploit larger effective widths without training collapse. This is a genuine theoretical insight.
-- **Empirical validation of the optimal-width principle across datasets (Figure 5, Table 1).** The finding that test error is minimized around \(C=S\) — as predicted by maximizing effective width under fixed connections — is demonstrated on four datasets including ImageNet-1k (Mixer-B-W vs. Mixer-B/16, 23.26 vs. 23.56 top-1 error). This is actionable guidance for practitioners.
-- **RP-Mixer as a controlled ablation (§5.2).** Destroying the block-diagonal structure via random permutations while preserving the spectrum is a clean experimental device. The finding that RP-Mixers catch up to normal Mixers at sufficient depth (Figure 6) strengthens the core claim that sparsity level, not the precise Kronecker structure, is the key mechanism.
+- **Vectorization identity and effective-width formulation (Section 3.1).** Showing that $\text{vec}(WXV) = (V^\top \otimes W)\text{vec}(X)$ and that the Mixer's token/channel mixing acts as $(I_C \otimes W)$ and $(V^\top \otimes I_S)$ is a genuinely clarifying observation. It cleanly exposes the effective width $m=SC$ and sparsity ratios $1/S$, $1/C$, which had been implicit in the architecture but not previously articulated. This is the paper's foundational contribution.
+
+- **Optimal width/sparsity condition $C=S$ under fixed $\Omega$ (Section 4.1).** The derivation that $C^*=S^* = (\Omega/\gamma)^{1/3}$ maximizes effective width for fixed connectivity is crisp and actionable. It is validated across CIFAR-10, CIFAR-100, STL-10, and ImageNet-1k (Figures 6, 7), where test error is minimized around $C=S$ for both normal and RP Mixers. This is the paper's strongest contribution and a useful design guideline.
+
+- **Practical improvement by widening under fixed connections (Table 1).** Modifying Mixer-SS/8 to Mixer-SS-W (rebalancing $S$ and $C$ while keeping $\Omega$ fixed) reduces test error on CIFAR-10 from 15.91→12.07 and CIFAR-100 from 44.24→38.13. On ImageNet-1k, Mixer-B-W improves over Mixer-B/16 (23.56→23.26). These results directly demonstrate practical value.
+
+- **Spectral analysis of trainability (Section 4.3).** Connecting the Mixer's bounded singular values ($c_\gamma = 1+\sqrt{\gamma}$, from the Marchenko-Pastur law) to the ability to scale to large widths, while showing SW-MLP's maximal singular value grows linearly with $m$, provides a principled explanation for why Mixers can operate at widths where naive sparse MLPs become untrainable.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+- **Proposition 1 does not establish "implicit sparse regularization".** The inequality (lines 161-167) shows that the L2-regularized Kronecker-product objective lower-bounds an L1-regularized dense objective. This is a relaxation relationship between two regularized objectives, not a result about the inductive bias of the Kronecker parameterization itself. The paper's wording—"implicit bias towards L1 regularization" and "characterizes the implicit regularization of the model"—overstates what the inequality supports. The Hadamard-product analogy cited from prior work does not rescue this, because the translation from L2-on-factors to L1-on-product requires a non-trivial step that the paper does not fully substantiate. This section should be honestly reframed as a loose lower bound, not as evidence of an inductive bias.
+
+- **CKA evidence for "high similarity" between Mixer and SW-MLP is thin (Section 3.4).** The CKA analysis in Figure 2 covers only $S=C=64,32$ on MNIST, with no per-layer breakdown, no comparison across multiple sparsity levels beyond the derived average, and no baseline CKA between two independently initialized Mixers to calibrate what "high" means. The paper's central empirical thesis that sparsity is "the key mechanism" depends on this similarity being real, but the evidence for it rests on one under-described experiment on one small dataset. The paper would be measurably stronger with per-layer CKA across multiple datasets and sparsity levels, plus a calibration baseline.
+
+- **The RP-Mixer is not validated as a proxy for SW-MLP (Section 5.2).** The paper claims RP-Mixer "seemingly becomes much closer to random sparse weights" than the normal Mixer, but provides no quantitative comparison (e.g., CKA between RP-Mixer and SW-MLP features). The RP-Mixer is then used as a stand-in for SW-MLP in large-width experiments where SW-MLP is computationally infeasible. Without validation that RP-Mixer actually behaves like an SW-MLP of matched connectivity, the RP-Mixer results do not directly support the central thesis about sparsity. The paper needs a direct similarity measurement (CKA or other) between RP-Mixer and SW-MLP features.
 
 ### Minor
-- **The "implicit regularization" framing in §3.2 is over-stated.** Proposition 2 shows that Frobenius-norm regularization on Kronecker factors \((V,W)\) lower-bounds L1 regularization on the full matrix \(V\otimes W\). This is a genuine mathematical inequality, but calling it "implicit regularization" (used repeatedly in the abstract, §3.2, and conclusion) is misleading: the result concerns *explicit* regularization, not the bias of an unregularized optimization algorithm. The paper never trains a Mixer without weight decay and demonstrates that the resulting effective weight is sparser, which would be needed to substantiate an "implicit" claim. The mathematical result is interesting in its own right and should be reframed accordingly.
-- **CKA analysis (§3.4) is thin.** Only one figure (Figure 1) shows the CKA comparison, and it plots only diagonal-averaged values rather than full similarity matrices. The paper would benefit from reporting whether the observed similarity is statistically significant across random seeds and from showing the full CKA matrices.
-- **No explicit sparsity ratios \(p\) reported for the Mixer experiments (§5).** The paper talks about "maximizing sparseness" and uses the effective-width framing, but never reports the actual sparsity ratios \(p\) achieved at each \((S,C)\) setting. Reporting these would ground the link to the SW-MLP literature and make the connection to Golubeva et al.'s framework more explicit.
-- **Several derivations and experimental details are deferred to the appendix.** This is acceptable for the page limit, but makes verification harder for the reader. Examples: the derivation of the effective expression for the full MLP-Mixer (not just S-Mixer), the proof of Proposition 2, and architectural hyperparameter tables.
+- **The "hidden connection" to Monarch matrices (Section 3.3) is a direct corollary of the vectorization identity, not a separate discovery.** The paper correctly notes that the S-Mixer without activation equals a Monarch matrix with weight-sharing diagonal blocks. But this follows immediately from comparing Equation (11) and the Monarch definition (1)—it is a straightforward observation rather than a surprising connection. Calling it "hidden" overstates the depth of the discovery.
+
+- **CKA experimental details are under-reported.** The paper cites "mini-batch CKA from Nguyen et al." but omits the number of batches, whether features are pre- or post-activation, and how the "average of diagonal entries" across layers is computed. These details matter for reproducibility.
+
+- **Depth dependence in RP-Mixers (Figure 6) is acknowledged but not analyzed.** RP-Mixers underperform at limited depths and require more depth to match normal Mixers. This suggests that sparsity alone is not sufficient—structure matters for depth efficiency—but the paper does not examine the interaction between depth and the sparsity mechanism.
+
+- **The claim that this equivalence "has been missing in the literature" (line 156) is not substantiated.** The vectorization identity is elementary; the novelty is in drawing consequences from it, not in the identity itself. The phrasing is unnecessary and invites skepticism.
 
 ### Trivial
-- The paper uses "implicit regularization" where "connection between Frobenius and L1 regularization" would be more precise.
-- The notation \(\Omega\) is defined as "average number of connections per layer" but could benefit from an explicit worked example showing how the formula \(\gamma(CS^{2}+C^{2}S)/2\) arises from averaging over the four effective weight matrices.
+- None.
 
 ## Nice-to-Haves
-- Reporting CKA matrices in full (not just diagonal averages) and testing statistical significance across random seeds would strengthen the feature-similarity claim.
-- A small-scale experiment that trains linear Mixers *with weight decay* and measures the effective weight sparsity would directly substantiate the connection in Proposition 2.
+- Including training loss curves and gradient norm diagnostics at large widths would strengthen the spectral explanation (Section 4.3) for why SW-MLP degrades while Mixer does not.
+- A comparison with other structured sparse baselines (e.g., block-diagonal MLP, group-lasso trained MLP) would help distinguish the effect of "sparsity" from the effect of "Kronecker structure."
+- Testing the $C=S$ prediction at larger scale (e.g., varying $S$ for Mixer-B on ImageNet with fixed $\Omega$) would further validate the optimal-width rule.
 
 ## Removed Points
 These points are flagged to be removed; treat them with caution.
-
-1. **Harsh Critic Point 2 (Ω formula is inconsistent/motivated).** The critic counted raw Mixer weight-matrix elements (\(2\gamma S^{2}+2\gamma C^{2}\)) and claimed the paper's formula \(\gamma(CS^{2}+C^{2}S)/2\) is wrong. This is a misunderstanding: the paper's \(\Omega\) is the average number of *non-zero entries in the effective MLP layers after vectorization* — the four effective weight matrices (\(I_{C}\otimes W_{1}, I_{C}\otimes W_{2}, W_{3}^{\top}\otimes I_{S}, I_{S}\otimes W_{4}\)) have \(\gamma CS^{2}, \gamma CS^{2}, \gamma C^{2}S, \gamma C^{2}S\) non-zero entries respectively, whose average is \(\gamma(CS^{2}+C^{2}S)/2\). The derivation \(C^{*}=S^{*}=(\Omega/\gamma)^{1/3}\) follows correctly. *Removed because factually wrong.*
-
-2. **Harsh Critic Point 3 (Figure 3 obscures divergence).** The paper explicitly states: "However, we observed for too-wide cases around \(\gamma m=8000\) in Figure 3 (left), the test error of SW-MLP is higher than MLP-Mixer and there is little change in response to increasing width" and devotes the entire next section to explaining this divergence via spectral analysis. The paper does not obscure the divergence. *Removed because directly contradicted by paper text.*
+- **"Proposition 1 is not properly motivated; the constants are not explained."** The paper explicitly says "$\tilde{\lambda}$ might appear small, but it merely normalizes the change in parameter size (see appendix for details)." The paper does motivate this—it just defers the full explanation to the (parser-stripped) appendix. Removed because the paper already addresses this.
+- **Criticism that Figure 2(d) "uses a tiny model (no details provided)" and "does not establish that the Mixer approximates the Monarch matrix."** The experiment compares Monarch and Kronecker-parameterized models, showing comparable performance. This is a reasonable sanity check. The paper does not claim the Mixer approximates the Monarch matrix—it claims the Mixer's linearized version *is* a special case of Monarch with weight-sharing. Removed as it misreads the claim.
+- **"The paper does not discuss its own limitations."** The conclusion (lines 416-417) explicitly notes that "the solvability of global minima and dynamics in mixing layers, even with linear activation, remains uncertain." The paper does acknowledge limitations. Removed as factually incorrect.
+- **Strength Finder's claim about "implicit L1 regularization from Kronecker structure" as a core strength.** This conflicts with the verified weakness that Proposition 1 does not establish implicit regularization. Per instructions, when strength and weakness disagree, the weakness wins. Dropped from strengths.
 
 ## Novel Insights
-The reviews surface an interesting tension: the paper's strongest contribution (the effective-expression framework in Proposition 1) is almost *too* simple — it is elementary linear algebra — yet its theoretical and empirical consequences (optimal width at S≈C, spectral advantage over SW-MLP, connection to Monarch matrices) are genuinely non-obvious and practically useful. This is a paper whose strength lies not in deep mathematical novelty but in *reframing* an existing architecture in a way that immediately yields testable predictions and design guidance. The RP-Mixer ablation is a particularly clever device for isolating the role of sparsity level from structural pattern.
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Reframe §3.2.** Replace "implicit regularization" with precise language: "Kronecker-parameterized models with weight decay induce an L1-like bias on the effective weight matrix." If possible, add a small experiment training linear Mixers with weight decay to directly measure the sparsity-inducing effect.
-2. **Report \(p\) values** (the ratio of non-zero entries) alongside the \((S,C)\) settings in the experiments of Figures 4–5 to ground the connection to the SW-MLP literature.
-3. **Strengthen the CKA analysis** with full similarity matrices and statistical significance tests across seeds.
-4. **Add an explicit worked example** showing how \(\Omega = \gamma(CS^{2}+C^{2}S)/2\) is derived by averaging over the four effective weight matrices.
+1. Reframe Proposition 1 honestly as a loose lower bound relating two regularized objectives and remove or qualify the "implicit regularization" claim.
+2. Expand the CKA analysis: include per-layer similarity, a Mixer-vs-Mixer baseline for calibration, multiple datasets, and multiple sparsity levels.
+3. Validate the RP-Mixer by directly computing CKA (or another similarity metric) between RP-Mixer and SW-MLP features at matched connectivity.
+4. Discuss how depth interacts with the sparsity mechanism, especially given the depth-dependence of RP-Mixer performance.
 
 ## Score and Decision
-**Anchor comparisons:**
 
-| Anchor | Avg Score | Compared to Current Paper |
-|--------|-----------|--------------------------|
-| *hiHZVUIYik* (Path-norm toolkit) | 7.33 | Stronger — deeper theoretical machinery, rigorous generalization bounds |
-| *i9K2ZWkYIP* (Scaling Laws for Sparsely-Connected Foundation Models) | 7.00 | Stronger — larger-scale experiments on foundation models, more comprehensive empirical study |
-| *uvXK8Xk9Jk* (Sparsity Inducing Activations) | 6.50 | Comparable — both have a clean theoretical insight supported by moderate-scale experiments |
-| *gWHQQagPbN* (V:N:M Sparsity) | 5.80 | Weaker — primarily engineering contributions without architectural insight |
-| *B9XP2R9LtG* (Sparsing Law) | 5.25 | Weaker — limited to empirical scaling laws without mechanistic understanding |
-| *KdR88Qskmw* (Contraction Property of Pooling) | 3.00 | Much weaker — limited contribution, thin analysis |
+### Calibration Anchors
 
-The paper is positioned between the 5.80 and 6.50 anchors. It has a genuinely novel reframing of a known architecture, clean theoretical analysis (spectral bounds, effective width), and validation across multiple datasets including ImageNet. The "implicit regularization" overstatement and thin CKA analysis are real but addressable weaknesses. No fatal flaw exists. Compared to the 6.50 anchor (Sparsity Inducing Activations), this paper's theoretical contribution is less deep but its empirical scope is broader. I rate it slightly below that anchor.
+| Path | Avg Score | Comparison to this paper |
+|------|-----------|--------------------------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/gI0kPklUKS.md` (Bilinear MLPs) | 7.50 | Stronger: cleaner theoretical framing, better-supported experiments, more focused claims. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/HZndRcfyNI.md` (Architecture-aware scaling) | 6.50 | Stronger: more thorough theoretical derivations with comprehensive experiments, better presentation. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LxruQOI93v.md` (Flexibility of NNs) | 5.00 | Comparable: both have interesting empirical findings but some depth-of-analysis concerns. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/nNZzt54ZmU.md` (Depth separation) | 4.60 | Comparable but slightly weaker: the current paper has a more actionable design guideline ($C=S$) while the depth-separation paper has stronger theoretical concerns about relevance. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/izDiFGXn9B.md` (CKA similarity) | 3.50 | Weaker: very limited experiments (only small MLPs on MNIST). The current paper has broader experimental scope. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MxGGdhDmv5.md` (Higher Order Transformers) | 3.75 | Weaker: the current paper has a more clearly identified contribution (the $C=S$ condition). |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/U4ekUAOLsM.md` (SCHEME) | 5.00 | Comparable: both analyze structured MLP variants with some useful insights but limited scope. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/F9JZiGradI.md` (MLP-KAN) | 5.25 | Comparable: both have genuine insights but overclaim relative to experimental support. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/XsHqr9dEGH.md` (Grokking implicit biases) | 6.00 | Stronger: more rigorous theoretical analysis with provable claims. |
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+### Assessment
+
+The paper makes a genuine contribution by exposing the MLP-Mixer's sparse, wide-MLP nature through a simple vectorization identity and deriving the actionable $C=S$ design rule. The practical improvements in Table 1 are real. However, the paper overreaches: the "implicit sparse regularization" claim (Proposition 1) does not withstand scrutiny as an inductive bias result, the CKA evidence for the central "sparsity is the key mechanism" thesis is thin, and the RP-Mixer proxy is unvalidated. The paper's strongest result—the $C=S$ condition—does not depend on these overclaimed parts and stands on its own. A revision that honestly reframes Proposition 1, expands the CKA analysis, and validates the RP-Mixer would substantially strengthen the paper.
+
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

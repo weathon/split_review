@@ -1,70 +1,92 @@
-Now I have a solid set of calibration anchors. Let me construct the review.
-
 ## Summary
 
-xLSTM-Mixer combines a channel-independent NLinear forecast with sLSTM blocks that process variates as sequence elements, plus a multi-view mixing step that reconciles predictions from original and reversed latent embeddings. On four long-term forecasting benchmarks (Weather, Electricity, Traffic, ETT), the model achieves best MSE in 18/28 settings and best MAE in 22/28 settings, outperforming 11 baselines including Transformers, MLPs, and the prior xLSTMTime model.
+The paper proposes xLSTM-Mixer, a multivariate time series forecasting model that combines a channel-independent NLinear forecast with sLSTM-based refinement and multi-view mixing. The model processes variates as sequence elements (rather than time steps) through sLSTM stacks, uses learnable initial tokens inspired by soft prompting, and reconciles two views (original and reversed embeddings) via a linear projection. On standard long-term forecasting benchmarks, xLSTM-Mixer achieves the best MSE in 18/28 settings and best MAE in 22/28 settings, outperforming Transformer, MLP-mixer, and convolutional baselines.
 
 ## Strengths
 
-- **Strong empirical results across multiple benchmarks and horizons**: xLSTM-Mixer achieves the best MSE in 18 out of 28 settings and best MAE in 22 out of 28 settings across Weather, Electricity, Traffic, and ETT (Table 1, Section 4.1). The improvements are not marginal on several datasets — e.g., 2% MAE reduction over xLSTMTime and 4.6% over TimeMixer on Weather.
+- **Strong empirical performance across diverse benchmarks.** xLSTM-Mixer achieves top-1 results in 18/28 MSE and 22/28 MAE settings across multiple datasets (Weather, Electricity, ETT variants), consistently outperforming strong baselines including TimeMixer, PatchTST, iTransformer, and the prior xLSTMTime. The competitive gains on Weather (4.6% MAE over TimeMixer) and ETTm1 (2.4% MAE over TimeMixer) are non-trivial.
 
-- **Clean, well-motivated architecture with principled design choices**: The three-stage pipeline (linear forecast → sLSTM refinement → multi-view mixing) integrates existing ideas (NLinear, sLSTM, reversed embeddings) in a logical manner, with clear motivation for each component.
+- **Comprehensive ablation study isolating each component's contribution.** Table 3 systematically ablates time mixing (NLinear), sLSTM blocks, the initial embedding token, and multi-view mixing across ten configurations and two datasets. The study cleanly demonstrates that all components contribute positively, with sLSTM blocks and time mixing identified as the most critical elements — removing either causes measurable drops (e.g., 3.4% MAE increase on ETTm1 at horizon 96 without time mixing).
 
-- **Multi-view mixing with weight sharing is a novel contribution**: Processing both the original and reversed up-projected embeddings through the same sLSTM stack and reconciling the two forecasts (Section 3.3) is not present in prior xLSTM-based forecasting work. The weight-sharing regularizes without adding parameters, and the ablation confirms its contribution.
+- **Clean architectural narrative and good motivation for design choices.** The three-stage pipeline (linear forecast → sLSTM refinement → view reconciliation) is clearly described and each stage is justified. The learning of initial tokens from soft prompting in LLMs, the transposition to variate-axis processing, and the weight-sharing regularization are well motivated.
 
-- **Comprehensive ablation study across 10 configurations**: The ablation (Table 2, Section 4.2) systematically removes components across two datasets and four horizons, showing that each contributes positively and that sLSTM blocks and time-mixing are particularly critical.
-
-- **Linear runtime scaling in variates and learned initial embedding tokens**: The variate-major processing (Section 3.2) provides O(V) scaling in the number of variates, and the soft-prompt token analysis (Figure 4) reveals interpretable seasonal patterns that vary with forecast horizon.
+- **Empirical validation of robustness to longer lookback windows.** Figure 5 shows that xLSTM-Mixer monotonically improves with increasing lookback length, and that its advantage over transformer-based baselines widens at longer contexts — a practical benefit of the linear-complexity recurrent design.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The claimed advantage of variate-major processing over time-major processing is never directly ablated.** The paper's contribution (i) states: "We argue that marching over the variates instead of the temporal axis yields better results if suitably combined with temporal mixing." However, no experiment directly compares processing variates as sequence elements vs. processing time steps as sequence elements while holding all other components fixed. The comparison to iTransformer (which also uses variate-major tokenization) and to standard RNNs does not isolate this factor. This is the paper's core architectural claim about how to apply recurrence, and the evidence does not support it. Without this ablation, the reader cannot tell whether the model's success stems from processing order, the sLSTM cells themselves, or the specific combination of other components.
+- **No error bars or uncertainty quantification on the main results (Table 1).** The main table reports only point estimates (MSE, MAE) averaged over four horizons, with no indication of variance across seeds or runs. Given that many baselines are highly competitive and margins are often small (2–4% MAE), the reader cannot assess whether the reported improvements are statistically reliable. The paper does compute standard deviations in the sensitivity analyses (Figures 4 and 5), so the infrastructure exists — the omission from the main table is a significant reporting gap. This is the single most important weakness because it undercuts the paper's central claim of "state-of-the-art performance."
+
+- **The claim that variate-axis marching is superior is asserted but never tested in a controlled manner.** Contribution (i) states that "marching over the variates instead of the temporal axis yields better results if suitably combined with temporal mixing." However, no ablation keeps the sLSTM architecture fixed and varies only the marching direction (variate vs. time). Every comparison is to fundamentally different models (Transformers, MLP-mixers, CNNs). An experiment where the sLSTM processes the time axis (each token is the full variate vector at one time step) with identical architecture would directly test this claim. Without it, the paper's most distinctive design rationale is unsubstantiated.
+
+- **The multi-view mixing ablation does not isolate the effect of reversal.** Configuration #6 in the ablation removes multi-view mixing entirely. But a proper ablation would compare against a variant that uses two forward passes with the *same* (non-reversed) embedding and shared weights. This would distinguish whether the benefit comes from the reversal itself or simply from processing the input twice with weight sharing. The paper's explanation ("multi-task learning settings are known to benefit training") is too generic to justify the specific design choice.
 
 ### Minor
 
-- **The main results table lacks statistical support.** Table 1 reports only point estimates (MSE/MAE) without standard deviations or confidence intervals. While variance is shown in two sensitivity analyses (Figures 4, 5), the primary comparison table — on which the headline claim of "state-of-the-art performance" rests — does not report run-to-run variability. Given that time series benchmarks (especially Traffic and ETT) are known to exhibit variance, this limits confidence in the reported win counts.
+- **No computational cost comparison (runtime or memory).** The paper claims linear scaling in variates, but provides no wall-clock times, parameter counts for the full architecture, or FLOPs comparisons against baselines. Given that sLSTM has recurrent (and therefore sequential) overhead, practitioners need to know the efficiency trade-offs.
 
-- **The multi-view mixing ablation does not control for increased computation.** The ablation removes multi-view mixing, which also removes one of the two forward passes through the sLSTM (the reversed-embedding pass). The improvement attributed to multi-view mixing could partly stem from running two forward passes instead of one, rather than from the multi-view signal itself. A control comparing against two forward passes of the same sLSTM without reversing (or against a single pass with twice the hidden dimension) would isolate the benefit of multi-view *per se*. This does not undermine the result — the component clearly helps — but weakens the mechanistic explanation.
+- **The learnable initial token shows only a small positive effect, and the paper acknowledges this honestly.** The ablation (#3 vs. #1) shows that removing the initial token yields results that are "still competitive." This is not a fatal weakness — many components have small individual effects — but it means the claimed novelty of the initial token is modest.
+
+- **No error breakdown by variate on high-dimensional datasets.** On Traffic (862 variates), aggregate metrics may mask poor performance on a subset of channels. A per-variate error distribution would give a more honest picture of robustness.
+
+- **The mLSTM is dismissed as "less suited for joint mixing" (Section 2.2) without empirical backing.** This claim about the relative suitability of sLSTM vs. mLSTM for joint mixing is asserted without evidence. While it is a secondary point, a brief justification or reference would help.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
-- A computational cost comparison (training time, inference speed, parameter counts) with baselines would substantiate the claimed efficiency advantage of recurrence over attention-based models.
-- Reporting results for multiple random seeds (e.g., 3) in the main table would address the variance concern without requiring additional datasets or tasks.
+
+- **Direct comparison with xLSTMTime under identical settings (lookback, horizon, normalization).** The paper mentions that xLSTMTime is hard to reproduce but does not report a re-implementation. A controlled comparison would strengthen the claim of improvement over the prior xLSTM-based approach.
+- **Analysis of why reversal helps.** Visualizing the two latent forecasts (y' and y'') before fusion — e.g., their correlation or per-variate errors — could shed light on the mechanism behind multi-view mixing.
+- **Testing on datasets with very few or very many variates** to explore the acknowledged limitation of variate-axis processing.
 
 ## Removed Points
-- **Criticism that the paper cannot claim SOTA due to missing variance in primary table** is retained in Minor weaknesses (it is a genuine gap), though weakened from the harsh critic's framing of "serious gap" — single-run reporting is standard in this field's main tables, and variance is reported in sensitivity figures.
-- **Criticism about missing comparison to two independent sLSTM stacks** is retained in Minor weaknesses with adjusted wording that acknowledges weight-sharing means no additional parameters, only additional compute.
+
+These points are flagged to be removed; treat them with caution.
+
+- **"The paper's strongest claim rests on thin evidence" (invalidates contribution).** The harsh critic claims the lack of error bars "invalidates the paper's primary empirical contribution." This is an overstatement. Many accepted time series papers report point estimates without error bars in main tables. The absence is a genuine weakness, not a fatal flaw.
+- **"Phrasing like 'resurgence of recurrent models' implies a larger shift than warranted."** This is a style/subjective complaint about framing, not a scientific weakness.
+- **"Several design choices are not justified: why reverse, why weight sharing, why up-projection?"** These are reasonable design choices grounded in prior work (MLP-Mixer for weight sharing, SSMs for up-projection). The paper provides adequate motivation.
+- **Strength Finder claims about "SOTA" framing.** The strength about "achieving SOTA across diverse benchmarks" is kept substantively (it's supported by Table 1) but the strength about ablation completeness is retained — the claim that the ablation is "more granular than many time series papers" is debatable but the ablation is genuinely thorough.
+- **"Comparison to transformer-based models in Fig. 6 is anecdotal."** The figure is an example forecast visualization, not a quantitative comparison. It serves a qualitative purpose.
+- **"41/56 conflates MSE and MAE."** The paper reports 18/28 MSE + 22/28 MAE = 40/56, and the conclusion says 41/56. This 1/56 discrepancy is minor and the claim is clearly broken down by metric.
 
 ## Novel Insights
+
 None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Add the variate-major vs. time-major ablation** — this is the single highest-leverage addition. Hold all components fixed and swap the axis the sLSTM strides over. If variate-major is indeed better, the paper's core architectural claim is supported. If not, the paper should remove that claim.
-2. **Report standard deviations for main results** using 3+ seeds so readers can assess whether the 18/28 and 22/28 win counts reflect reliable advantages.
-3. **Control for computation in the multi-view mixing analysis** by comparing against an equivalent model that runs two forward passes through the sLSTM without reversing the embedding dimensions.
+
+1. **Add standard deviations or confidence intervals to the main results table (Table 1).** Report the mean and std. dev. over at least 3 seeds per dataset-horizon combination. This is the single change that would most strengthen the paper.
+
+2. **Add a controlled ablation of the marching direction.** Process the time axis (each token = variate vector at one time step) with the same sLSTM architecture. This would directly test the paper's central design thesis and significantly strengthen the contribution.
+
+3. **Add a controlled ablation of the reversal in multi-view mixing.** Compare the full model against a version with two forward passes on the *same* (non-reversed) embedding with shared weights.
+
+4. **Report wall-clock inference times and parameter counts** alongside the benchmark results so practitioners can evaluate the efficiency-accuracy trade-off.
 
 ## Score and Decision
 
-**Anchors used for calibration:**
+**Calibration anchors (retrieved batch, all returned):**
 
-| Path | Avg Score | Comparison to xLSTM-Mixer |
-|------|-----------|--------------------------|
-| DAM (4NhMhElWqP) | 7.00 | More ambitious scope (foundation model), stronger methodological novelty, but also has overclaiming issues. xLSTM-Mixer has cleaner empirical validation but narrower scope. |
-| Simple Baseline (oANkBaVci5) | 6.75 | Comparable level of architectural novelty with similar strength of results. The Simple Baseline paper also faced criticism about missing error bars. xLSTM-Mixer has more thorough ablations but also a core claim that isn't directly tested. |
-| TimeKAN (wTLc79YNbh) | 6.00 | Both papers report SOTA results with comprehensive benchmarks. TimeKAN relies on KAN (limited validation); xLSTM-Mixer uses well-established components. However, xLSTM-Mixer's missing variate-major ablation is a clearer methodological gap than TimeKAN's issues. |
-| GRformer (lmShn57DRD) | 4.00 | GRformer has limited novelty (GNN+RNN hybridization) and unconvincing ablations. xLSTM-Mixer is substantially stronger in both architectural reasoning and empirical evidence. |
-| SPACE (v5BouOktUP) | 3.50 | Oversimplifies causality and lacks ablation studies. xLSTM-Mixer has cleaner methodology and more thorough evaluation. |
-| Overcoming Lookback (hVpAjJPfgZ) | 3.25 | Incomplete evaluation, missing recent baselines, presentation issues. xLSTM-Mixer is more complete and rigorous. |
-| FIA-Net (WFlLqUmb9v) | 2.50 | Severe presentation issues, marginal improvements over FreTS, no statistical rigor. xLSTM-Mixer's empirical results and analysis are much stronger. |
+| Anchor | Avg Score | Comparison to this paper |
+|--------|-----------|--------------------------|
+| FITS (bWcnvZ3qMb) | 8.00 | Superior: clearer novel insight (frequency-domain interpolation), extreme parameter efficiency, stronger experimental rigor (std dev reported). |
+| Oscillatory SSM (GRMfXcAAFh) | 8.00 | Superior: strong theoretical proofs combined with solid empirical work. |
+| DAM (4NhMhElWqP) | 7.00 | Stronger: broader scope (foundation model), zero-shot transfer, more ambitious. |
+| Periodicity Decoupling (dp27P5HBBt) | 6.75 | Comparable but stronger: similar level of empirical results, slightly better ablation rigor. |
+| Vision-LSTM / xLSTM (SiH7DwNKZZ) | 5.60 | Very similar: both adapt xLSTM to a new domain with some architectural innovations. Both have questions about incremental novelty and experimental gaps. ViL underperformed at larger scales; this paper's results are somewhat stronger but have similar rigor issues. |
+| Revisiting LTSF (T97kxctihq) | 5.00 | Weaker than this paper: primarily an investigation/analysis paper with limited methodological contribution. |
+| TF-score (RDLvnUJ5JZ) | 3.00 | Weaker: sloppy mathematical work, limited novelty. |
+| LST-Bench (2wwPG1wpsu) | 2.50 | Weaker: benchmark paper with very limited novelty. |
 
-The paper reports genuine improvements and a sensible architecture, but the variate-major design claim — which is explicitly stated as a contribution — is never directly tested. This gap prevents the paper from being in the top tier (6+). The results are clearly above the level of papers scoring 3-4, which typically have more fundamental flaws. On balance, this is a solid but incomplete paper that would benefit from one more iteration.
+The paper is most comparable to Vision-LSTM (5.60) — both are domain adaptations of xLSTM with solid results but incomplete experimental validation of specific design claims. This paper's empirical results are stronger than ViL's, but the lack of error bars in the main table and the untested marching-direction claim are important gaps. The method is sensible and the results are promising enough to warrant further development, but the evidence as presented is not yet fully convincing.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

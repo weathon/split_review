@@ -1,86 +1,92 @@
-Now I have good calibration data. Let me consolidate everything into a final review.
+Now I have a thorough understanding of the paper, the reviewer inputs, and the calibration landscape. Let me produce the consolidated review.
 
 ## Summary
 
-The paper identifies that existing robust learning methods for noisy labels or long-tailed data produce heterogeneous effects across sub-populations (some helped, some hurt). It proposes a Fairness Regularizer (FR) that constrains the per-sub-population performance gap, and shows that adding this regularizer to several baselines (CE, LS, NLS, Focal, PL, Logit-adj) improves overall test accuracy on synthetic and real-world long-tailed noisy datasets (CIFAR-10/100, CIFAR-10N/100N, Clothing1M). The central claim is that fairness constraints *improve* rather than degrade learning in this setting.
+This paper studies learning from data that is both long-tailed and has noisy labels — a realistic but underexplored combination. Through empirical analysis, the authors show that existing robust/long-tail methods have disparate impacts across sub-populations (improving some while hurting others). They propose a Fairness Regularizer (FR) that penalizes accuracy gaps between sub-populations, formulated as a Lagrangian relaxation of equality constraints. Experiments on synthetic and real-world noisy long-tailed datasets (CIFAR-10/100, CIFAR-10N/100N, Animal-10N, Clothing1M) show that adding FR to six baseline methods (CE, LS, NLS, Focal, PL, Logit-adj) yields modest but generally positive accuracy improvements.
 
 ## Strengths
 
-1. **Important, under-explored problem**: The paper correctly identifies that existing work largely treats label noise and long-tailed distributions in isolation, and that the *interaction* between the two produces per-sub-population disparities that prior methods do not address. This framing is timely and practically relevant.
+- **Novel and well-motivated problem framing.** The intersection of long-tailed class distributions and label noise is practically important and genuinely under-studied. The paper's key observation — that robust methods have heterogeneous effects across sub-populations (Figure 2 visualizes this clearly) — is compelling and provides solid motivation for a fairness-aware approach. This observation alone is a useful contribution to the literature.
 
-2. **Novel use of fairness regularization in this context**: While fairness regularizers are standard in algorithmic fairness, applying them to improve *overall accuracy* (not just group fairness) under coupled noise and imbalance is novel. The paper explicitly acknowledges this departs from the usual fairness–accuracy trade-off (line 31), which is an honest and interesting claim.
+- **Simple, plug-and-play regularizer.** FR is conceptually simple (penalizing absolute accuracy deviations from the mean across sub-populations) and can be added to any existing loss. The paper tests this across six diverse baselines, two sub-population separation methods (KNN clustering and a pre-trained G2 model), and multiple datasets, demonstrating the approach's versatility.
 
-3. **Broad experimental scope**: The paper tests 6 baseline methods × 2 noise models (imbalance, symmetric) × 2 noise rates × 3 imbalance ratios on CIFAR-10/100, plus real-world noisy datasets (CIFAR-10N, CIFAR-100N, CIFAR-20N, Animal-10N) with two imbalance levels each, plus Clothing1M with a λ sweep. This coverage is extensive.
+- **Broad experimental validation across many settings.** The experiments cover synthetic CIFAR-10/100 with two noise types (Imb, Sym), two noise rates (0.2, 0.5), three imbalance ratios (10, 50, 100), plus four real-world noisy datasets (CIFAR-10N/100N/20N, Animal-10N) and Clothing1M. This breadth, while not always showing large gains, provides reasonable evidence that FR has positive effects across diverse conditions.
 
-4. **Per-class analysis supports the mechanism**: Figure 4 shows that FR specifically improves tail sub-populations — the blue "improved" points cluster in the lower-left (low baseline accuracy) region. This directly supports the paper's central narrative.
-
-5. **Hyperparameter robustness on Clothing1M**: Table 3 shows that for most methods, a wide range of λ values (0.1 to 2.0) outperform λ=0.0, demonstrating that FR is not brittle to the choice of regularization strength.
-
-6. **Simple, plug-and-play method**: FR can be added to any existing baseline with minimal code change, increasing practical impact.
+- **Per-class improvement visualization.** Figure 5 (per-class accuracy comparison between baseline and FR) provides concrete evidence that FR primarily helps tail sub-populations, which directly supports the paper's central thesis that fairness regularization improves learning in the tail.
 
 ## Weaknesses
 
 ### Major
 
-1. **Inconsistent empirical gains across settings**: While FR(G2) improves in most settings, the gains vary substantially, and there are non-trivial cases where FR *hurts* performance. For example, on CIFAR-10 with symmetric noise (ρ=0.5, r=50), Logit-adj drops from 32.45 to 31.14 with FR(G2); on CIFAR-100 with imbalance noise (ρ=0.5, r=10), Logit-adj drops from 30.92 to 27.57 with FR(G2). The paper does not analyze what distinguishes these failure cases from successes. Without understanding *when* FR works and *why* it sometimes fails, the method remains an ad-hoc regularizer whose effects are unpredictable in individual settings.
+- **No comparison against methods designed for the joint problem.** The paper repeatedly motivates its contribution by noting that prior works "fail to address the coupling effects" of long-tailed distributions and label noise. Yet the experimental evaluation compares FR only against generic robust losses (CE, LS, NLS, PL, Focal) and a generic long-tail method (Logit-adj). Methods explicitly designed for the joint setting — cited in the related work itself (Wei et al. 2021, "Robust learning with noisy labeled long-tailed data"; Karthik et al. 2021; decoupled treatment approaches) — are absent from all experiments. Without these baselines, the paper cannot substantiate its headline claim that FR offers a competitive solution to its stated problem. The reader cannot tell whether FR outperforms, matches, or underperforms existing joint-setting methods. This is the most consequential gap in the evaluation.
 
-2. **Statistical testing methodology is questionable**: The paired t-test in Table 2 aggregates 12 observations from *different* experimental conditions (2 noise types × 2 noise rates × 3 imbalance ratios) into a single test. These 12 points are not drawn from a single population — the data distribution, noise structure, and effective sample sizes differ across settings. While the paired nature (baseline vs baseline+FR under identical conditions) mitigates some concerns, pooling heterogeneous conditions into one test can produce statistically significant but practically meaningless results. The paper's conclusion that FR "consistently improves" based on this test is overstated, especially since FR(KNN) fails significance for most baselines on CIFAR-100 (1/6 significant), and Logit-adj+FR(G2) on CIFAR-10 has p=0.803. **The authors should report per-setting confidence intervals (e.g., over 3–5 seeds) for a representative subset of the main results instead of, or in addition to, the pooled test.**
-
-3. **Weak theoretical grounding**: The paper claims a theoretical result (lines 193–197: "solving the risk minimization on the noisily labeled long-tailed data under the introduced fairness constraints returns the Bayes optimal classifier") but provides no proof, no reference to an appendix, and no experiment demonstrating this. For binary Gaussian data this may be straightforward, but relegating this to an unsubstantiated "observation" box without proof or demonstration weakens the paper's intellectual contribution.
+- **Missing control for the auxiliary sub-population information.** FR requires sub-population indices (via clustering or a pre-trained model) at training time. The baselines do not use this information. The paper does not ablate whether the improvement comes from the regularizer itself or simply from having access to the grouped sub-population structure (e.g., the G2 pre-trained grouping provides meaningful features that any method could exploit). A simple control — such as training on the same sub-population splits without the fairness term — is absent, making it impossible to attribute gains to the regularizer specifically.
 
 ### Minor
 
-4. **The regularizer's behavior under label noise is undertreated**: The relaxation in Equation 5 replaces accuracy with average model probability on the *noisy* label ỹ. This means that when the noisy labels in a sub-population are systematically wrong, the regularizer could encourage the model to have high confidence on incorrect labels — the exact opposite of what is intended. The paper notes (line 324) that it avoids using noisy class labels as sub-population indices for FR(KNN), but the relaxation itself still depends on ỹ. This limitation should be explicitly discussed and ideally analyzed (e.g., what happens when noise rates differ across sub-populations?).
+- **Inconsistent and small improvements in many settings, with unaddressed degradations.** A non-trivial fraction of entries in Tables 1–3 show improvements of <1 percentage point, and several show outright degradation (e.g., Focal+FR(KNN) on CIFAR-10 Imb, ρ=0.2, r=50: 64.16→62.97; CE+FR(G2) on Animal-10N, r=50: 52.60→51.88). The paper consistently highlights green cells (improvements) but does not discuss or attempt to explain the red cells. This selective reporting weakens confidence in the method's reliability.
 
-5. **The empirical motivation (Section 3) is illustrative but limited**: The influence analysis uses only CIFAR-10 with k-means clustering for sub-population discovery, 4 methods, and a handful of selected tail sub-populations. It convincingly shows *that* tail sub-populations have higher influence under noise, but does not establish that this influence is caused by the *coupling* of long-tail and noise (vs. noise alone), nor does it show that FR *reduces* this influence. The gap between the motivating observations and the proposed solution is not bridged by experiment.
+- **No standard deviations or confidence intervals for individual results.** The paper reports only single-run best accuracy without any measure of variance. Given that many reported gains are <1pp, the reader cannot assess whether these improvements are within the range of random seed variation. The paired t-test (which aggregates across 12 heterogeneous settings) does not substitute for per-experiment variance estimates.
+
+- **Questionable hypothesis test design.** The paired t-test in Table 5 pools across two noise types, two noise rates, and three imbalance ratios (12 settings) into a single test. These settings differ substantially in difficulty, and pooling them inflates the effective sample size artificially. The test also does not control for multiple comparisons across methods. Several of the "significant" results may be driven by a few large gains amidst many negligible ones.
+
+- **Disconnect between the influence function analysis and the proposed regularizer.** Section 3's influence-function study (measuring the impact of removing tail sub-populations on test accuracy/confidence) is interesting but is never formally linked to the FR formulation. The regularizer penalizes accuracy deviations from the mean, which is a different target from the influence patterns observed. The narrative would be stronger if the influence analysis directly motivated the specific form of the regularizer.
 
 ### Trivial
 
-6. The number of sub-populations in FR(G2) yields a head:tail ratio of "usually close to 5" (line 322), but no analysis of how sensitive results are to this split point.
+- The "Bayes optimal classifier" observation (Section 4, box) is stated as a claim with no proof, reference, or experimental verification. The paper does not indicate whether a proof exists in a deferred appendix.
+
+- The Clothing1M experiments show that many λ values yield improvements of ≤0.1pp, and for NLS the improvement is essentially zero. The claim of "hyper-parameter insensitiveness" is somewhat overstated given these results.
 
 ## Nice-to-Haves
 
-- Report error bars (standard deviation over 3+ random seeds) for a representative subset of Table 1's settings to substantiate the claimed improvements.
-- Include specialized methods for combined long-tail + noisy labels (e.g., Wei et al., 2021; Karthik et al., 2021) as additional baselines to contextualize FR's relative contribution.
-- Provide a per-class accuracy breakdown (like Figure 4) for settings where FR hurts, to show whether the loss is concentrated in certain classes.
+- A comparison against a simple group-DRO baseline using the same sub-population definitions would help isolate the effect of the specific FR formulation.
+- Per-sub-population accuracy breakdowns (beyond Figure 5) and training loss curves per sub-population would deepen the mechanistic understanding of how FR works.
+- A fairness-accuracy Pareto analysis (e.g., plotting accuracy vs. worst-group accuracy or std. dev. of per-class accuracies) would substantiate the claim that FR moves beyond the typical fairness-accuracy trade-off.
 
 ## Removed Points
 
-- **"The results in Table 1 are deeply mixed"** (harsh critic, point 1): The critic cherry-picks a few settings where FR underperforms while ignoring that FR(G2) improves in the large majority of settings (e.g., CE+FR(G2) wins 24/24 settings). This characterization overstates the inconsistency. However, the underlying concern about non-universal gains is valid and retained as Major weakness #1.
-- **"The paired t-test is invalid"** (harsh critic, point 1): "Invalid" is too strong. The paired structure (same baseline and conditions) does provide meaningful signal; the test would be invalid if the pairs were independent samples from different populations, but each pair is matched. The real concern is that heterogeneous effect sizes across conditions could inflate significance — this is retained as Major weakness #2 but framed appropriately.
-- **"The fairness regularizer introduces an auxiliary learning signal that depends on sub-population labels, but the paper never addresses the fundamental circularity"** (harsh critic, point 2): "Never addresses" is inaccurate. The paper explicitly states (line 324) that it does not use noisy class labels as sub-population indices. However, the concern about the relaxation's dependence on ỹ is valid and retained as Minor weakness #4.
-- **"Comparison to state-of-the-art long-tail + noise methods"** (harsh critic, Missing Parts): Moved to Nice-to-Haves, as missing comparison methods do not constitute a weakness in a paper that already tests 6 baselines across 3 noise types.
-- **"The paper does not show that FR reduces the influence of tail populations"** (harsh critic, point 3): This is a valid request for direct evidence connecting the motivation to the method, retained as Minor weakness #5.
+- The criticism that the paper "does not compare against fairness-aware baselines (group DRO, adversarial debiasing)" is partially removed/weakened. While such a comparison would strengthen the paper, FR is not presented as a new standalone fairness method but as a regularizer for the specific long-tail+noise setting. The paper's contribution is not "we beat existing fairness methods."
+- The criticism that "the empirical motivation uses a toy setting (CIFAR-10, k-means into 17 sub-populations)" is removed as overstated — the influence analysis is qualitative motivation, not a core experimental claim, and CIFAR-10 is a standard benchmark.
+- The criticism that "no dual ascent comparison" is removed — the paper provides a reasonable intuitive justification for fixing λ rather than using dual ascent.
+- Pure presentation/form nitpicks are removed per instructions.
+- The "missing related work" points are removed per instructions (cannot independently verify existence of works not cited).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core insight — that fairness constraints can improve overall accuracy under coupled label noise and long-tailed distributions — is the paper's primary novel claim. The reviews surface this clearly without adding fundamentally new interpretations.
+None beyond the paper's own contributions. The key insight — that fairness regularization can improve overall accuracy in the long-tail+noise setting, contrary to the conventional fairness-accuracy trade-off — is the paper's own contribution, not a novel observation extracted from the reviews.
 
 ## Suggestions
 
-1. Replace the pooled t-test with per-setting confidence intervals from multiple seeds for a representative subset of Table 1 (e.g., CE and Logit-adj on both datasets at ρ=0.5, r=10 and r=100). This would provide more interpretable evidence than the aggregated test.
-2. Add a simple synthetic experiment (e.g., the binary Gaussian case) that demonstrates *why* FR helps, proving or simulating the claim that the fairness-constrained solution recovers the Bayes classifier. This would substantially strengthen the paper's theoretical credibility.
-3. Analyze the failure cases: include a brief discussion of what distinguishes settings where FR hurts from settings where it helps (e.g., does it correlate with baseline quality, noise rate, number of sub-populations?).
-4. Acknowledge the limitation that Equation 5's relaxation depends on the noisy label, and briefly discuss how heterogeneous noise rates across sub-populations could affect the regularizer's behavior.
+1. **Add joint-method baselines.** Before claiming that prior work "fails to address the coupling effects," compare FR against at least two methods designed for this specific setting (e.g., Wei et al. 2021; Karthik et al. 2021). This is the single most important fix; without it, the paper's core claim remains unsubstantiated.
+
+2. **Report standard deviations over multiple runs** (at least 3 seeds) for the main results, so the reader can assess whether sub-1pp improvements are meaningful.
+
+3. **Add an ablation control** that uses the same sub-population splits but without the fairness regularizer, to separate the benefit of grouping from the benefit of the regularizer itself.
+
+4. **Discuss degradation cases explicitly** and provide analysis of when/why FR sometimes hurts performance (e.g., Focal+FR on certain settings). This would strengthen the paper's honesty and scientific value.
+
+5. **Provide per-sub-population accuracy curves** (like Figure 5) for CIFAR-100 and/or real-world datasets to confirm that the mechanism (tail improvement) generalizes beyond CIFAR-10.
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration Anchors (retrieved via calibration_search):**
 
-| Path | Avg Score | How it compares to the paper under review |
-|------|-----------|-------------------------------------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/3GurO0kRue.md` (On Harmonizing Implicit Subpopulations) | 6.50 | Stronger theoretical foundation and more consistent empirical gains; current paper is less rigorous |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/OeKp3AdiVO.md` (Rethinking Classifier Re-Training) | 6.25 | SOTA-level results on long-tail; current paper has more mixed results |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/b66P1u0k15.md` (Pareto Deep Long-Tailed Recognition) | 6.00 | Stronger empirical consistency and theoretical framing |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6ARlSgun7J.md` (Enhancing Tail Performance) | 6.25 | Strong theoretical analysis and consistent gains; current paper weaker theoretically |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wfgZc3IMqo.md` (Robust Classification via Regression) | 6.00 | More established methodology with cleaner empirical story |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/u1yvEwYfK9.md` (Label Shift Correction) | 5.67 | Comparable tier — has clear method but weaker-than-SOTA results |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/dW7FRwi1eA.md` (Meta Denoiser) | 4.25 | Weaker experimental design; current paper is stronger |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/LXnTFMvn8A.md` (Accuracy-Fairness Pareto Frontier) | 3.75 | Weak experimental validation; current paper has stronger empirical evidence |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/RwiUmrEHgR.md` (Cost Sensitive Loss) | 3.00 | Weak baselines, no theoretical grounding; current paper is substantially stronger |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6PGT9OJX5N.md` (Noisy Data Pruning) | 3.00 | Limited novelty; current paper is more novel |
+| Anchor | Avg Human Score | Comparison |
+|--------|----------------|------------|
+| RwiUmrEHgR.md (Long Tail Classification Through Cost Sensitive Loss Functions) | 3.00 | Weaker — lacks breadth of experiments and has more severe methodological gaps. Our paper is clearly stronger. |
+| BLvCdxAi8W.md (Granularity Matters in Long-Tail Learning) | 4.25 | Comparable — both have interesting ideas but incomplete evaluations and missing baselines. Our paper has more extensive experiments across more settings. |
+| SRn2o3ij25.md (IKL: Boosting Long-Tail Recognition with Implicit Knowledge Learning) | 4.67 | Comparable tier — IKL has stronger novelty claims but similar concerns about marginal improvements and missing baselines. Our paper addresses a harder problem (long-tail + noise) but has a simpler method. |
+| OeKp3AdiVO.md (Rethinking Classifier Re-Training in Long-Tailed Recognition) | 6.25 | Stronger — has SOTA results, comprehensive baselines, and rigorous evaluation. Our paper falls short of this standard due to missing baselines and no variance reporting. |
+| BRdEBlwUW6.md (DAFA: Distance-Aware Fair Adversarial Training) | 6.25 | Stronger — has theoretical grounding, clearer comparisons, and well-isolated contributions. Our paper lacks the theoretical depth and cleaner experimental setup. |
+| b66P1u0k15.md (Pareto Deep Long-Tailed Recognition) | 6.00 | Stronger — has a rigorous MOO framing, theoretical justification, and stronger empirical results. Our paper has a simpler method but weaker validation. |
+| TjhUtloBZU.md (Understanding and Mitigating the Label Noise in Pre-training) | 6.25 | Stronger — provides novel insights, extensive analysis, and well-designed experiments. Our paper addresses a related but less thoroughly investigated problem. |
 
-The paper identifies a genuine problem and proposes a novel, simple intervention. It is clearly stronger than papers scoring 3–4, which lack either empirical scope, novelty, or both. However, compared to papers scoring 6+, it falls short on: (a) the consistency of empirical gains, (b) the rigor of its statistical methodology, and (c) the depth of theoretical justification. The unsubstantiated theoretical claim and the lack of per-setting error bars are notable gaps. A 5.0 reflects a paper with a worthwhile core contribution whose evidence is not yet fully convincing.
+**Assessment:** The paper identifies a genuine and important problem, and the idea of a fairness regularizer for long-tailed noisy data is intuitively appealing. The experiments are broad in scope and show generally positive, if modest, results. However, the evaluation has several significant gaps: the most consequential is the complete absence of comparisons with methods designed for the same joint setting. Combined with missing variance estimates, unaddressed degradation cases, and no ablation of the auxiliary sub-population information, the paper cannot fully substantiate its central claims. These issues are fixable but non-trivial.
 
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**Score:** 4.5
+
+**Decision:** Reject (borderline; could be acceptable with major revisions addressing the evaluation gaps, particularly the missing joint-method baselines and variance reporting)
+
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

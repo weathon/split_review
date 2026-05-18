@@ -1,15 +1,20 @@
-Now I have a thorough understanding of the paper and the calibration landscape. Let me produce the final consolidated review.
+Now I have all I need. Let me synthesize the final review.
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
 
-**Summary**: This paper introduces the novel task of unpaired panoramic image-to-image translation (Pano-I2I), where a 360° panorama is stylistically translated (e.g., day→night) using readily available pinhole images as the target style domain. To bridge the large geometric gap between panoramic source and pinhole target domains, the authors propose a dedicated architecture with deformable convolutions (with ERP offsets), spherical positional embeddings, distortion-free discrimination (projecting random panorama patches to pinhole-like views for the discriminator), and rotation augmentation/ensemble. Experiments on StreetLearn→INIT and StreetLearn→Dark Zurich show substantial quantitative and qualitative improvements over standard I2I methods (CUT, FSeSim, MGUIT, InstaFormer).
+This paper tackles the novel task of unpaired panoramic image-to-image translation (Pano-I2I), where the source domain is 360° equirectangular panoramas (daytime) and the target domain is narrow-FoV pinhole images (night, rainy, twilight). The core technical contributions include: (1) a versatile encoder with deformable convolution using ERP offsets to handle panoramic distortion, (2) spherical positional embedding (SPE) for the transformer to encode cyclic spatial structure, (3) distortion-free discrimination that projects panoramic patches to pinhole view for stable adversarial learning, and (4) sphere-based rotation augmentation with ensemble to mitigate edge discontinuity. Evaluations on StreetLearn→INIT/Dark Zurich show consistent improvements over existing I2I methods across FID, SSIM, and a user study.
 
 ## Strengths
-- **First formulation of panoramic I2I with pinhole targets**: The paper identifies and formalizes a genuinely practical problem—translating 360° panoramas without access to panoramic target datasets—and demonstrates a working solution. This opens a new direction for I2I research.
-- **Consistent and large-margin quantitative gains**: Across all translation tasks (day→night, day→rainy, day→twilight) on two datasets (INIT, Dark Zurich), Pano-I2I dominates baselines on FID (e.g., 30.83 vs next-best 60.43 for day→night on INIT) and SSIM (0.397 vs 0.229). The margins are large enough that the relative ranking is robust even if the absolute metric values carry caveats.
-- **Ablation study confirms each component's contribution**: Table 3 cleanly decomposes the impact of distortion-free discrimination, rotation ensemble, two-stage training, and SPE+deformable convolutions. Each removal degrades performance, providing direct evidence that the architectural innovations drive the gains.
-- **Well-motivated panoramic-specific design**: The spherical positional embedding, ERP-aware deformable convolution offsets, and sphere-based rotation augmentation/ensemble are coherently designed to respect the spherical geometry of panoramas, and the paper clearly explains why standard I2I components fail on this task.
+
+- **Novel and well-motivated problem formulation**: The paper is the first to define unpaired panoramic I2I using pinhole images as the target domain, addressing a genuine data scarcity issue (panoramic datasets lack diverse conditions, while pinhole datasets are abundant). The formulation is clearly scoped and practical.
+
+- **Principled architectural solutions for panoramic-pinhole domain gaps**: The distortion-free discrimination (projecting random panoramic patches to pinhole view for the discriminator) is a clever way to decouple geometric differences from style learning. The spherical positional encoding provides explicit cyclic spatial guidance. The ablation confirms distortion-free discrimination alone improves FID from 65.80 to 46.21.
+
+- **Consistent and sizable quantitative advantages**: The method achieves FID 46.21 (vs. CUT 72.76) and SSIM 0.551 (vs. CUT 0.365) on day→night, with similar margins on day→rainy and Dark Zurich. These gaps are large enough that they cannot be explained by any single metric artifact alone.
+
+- **User study corroborates automatic metrics**: A 60-person user study covering overall quality, content preservation, and style relevance shows the method is preferred across all criteria, providing human-grounded evidence that complements the automatic evaluation.
+
+- **Ablation validates each component**: Table 3 systematically isolates the contributions of distortion-free discrimination, rotation ensemble, two-stage training, SPE, and deformable convolution, with each removal leading to measurable degradation in FID and/or SSIM.
 
 ## Weaknesses
 
@@ -17,58 +22,64 @@ Now I have a thorough understanding of the paper and the calibration landscape. 
 None.
 
 ### Major
-- **SSIM as a content preservation metric is problematic for cross-style translation**: The paper uses SSIM between the source panorama and the translated panorama to measure "content preservation" (Tables 1–3). The paper's own justification (line 179) states that SSIM measures similarity "based on luminance, contrast, and structure"—all three of which are intentionally altered by style translation (e.g., day→night dramatically changes luminance). A perfectly content-preserved night panorama would score lower SSIM against a day source simply because the scene is darker. While SSIM can still provide meaningful *relative* comparisons across methods on the same task (all methods face the same bias), the paper's framing that "SSIM shows the degree of content preservation" is misleading, and the absolute SSIM values should not be taken at face value. The paper should supplement SSIM with a metric that factors out luminance/contrast shifts (e.g., LPIPS on grayscale images, or edge-map-based measures) to support the content preservation claim more rigorously.
+
+- **SSIM is an unreliable metric for content preservation in this setting**: The paper uses SSIM between the source (daytime panorama) and output (night/rainy panorama) as the primary content-preservation metric. SSIM combines luminance, contrast, and structure — but a correct day→night translation *should* have drastically different luminance, and a rainy scene has different contrast. A high SSIM could partially reflect *insufficient* style transfer rather than genuine content preservation. This does **not** invalidate the paper's overall findings (the FID advantages and user study provide independent support), but it undermines the specific quantitative content-preservation claims made from SSIM alone, including some conclusions in the ablation study. The paper should supplement or replace SSIM with a style-invariant content metric (e.g., LPIPS, or feature distances from a segmentation/depth model).
 
 ### Minor
-- **No panoramic-aware baselines compared**: The paper compares against standard I2I methods (CUT, FSeSim, MGUIT, InstaFormer) without any adaptation for panoramic input (spherical padding, rotation augmentation, multi-pinhole projection, etc.). While the paper's motivation is precisely that standard methods fail on panoramas, including at least one adapted baseline (e.g., applying a standard I2I method with spherical padding or rotation augmentation) would strengthen the claim that the proposed architecture, not just any panoramic-aware treatment, is responsible for the gains.
-- **Distortion-free discrimination's spatial coverage is not analyzed**: The discriminator receives a random rectilinear crop from the generator's full panorama output, providing local style supervision. While the original (full-panorama) discriminator still operates on the entire output (Eqn. 7 combines both), the paper does not analyze whether the distortion-free component's influence is truly global or only local to the sampled crops. The rotation ensemble partly mitigates this, but an explicit analysis (e.g., visualizing which regions the discriminator affects) would increase confidence.
-- **No confidence intervals or variance reported**: FID and SSIM are reported as single numbers without standard deviations or confidence intervals. Given that FID can have non-negligible variance with finite sample sizes, reporting spreads would aid reproducibility assessment.
-- **User study details are sparse**: The paper states "60 users sort all the methods" but does not specify the scale (Likert vs. forced-choice), randomization procedure, whether tasks were intermixed, or whether statistical significance was tested (e.g., Wilcoxon signed-rank). The bar chart in Figure 5 is informative but lacks error bars or significance markers.
-- **SPE and deformable convolution are ablated together**: Table 3 combines "w/o SPE and deform. conv" into a single row, making it impossible to isolate the individual contribution of each component. Separate ablations would be more informative.
+
+- **Unfair comparison for annotation-dependent baselines**: MGUIT and InstaFormer require bounding-box annotations but are evaluated using pseudo-labels from YOLOv5. Noisy pseudo-labels likely degrade their performance compared to using ground-truth annotations. This weakens the evidence that Pano-I2I "surpasses all existing methods." However, the paper also outperforms annotation-free methods (CUT, FSeSim) by large margins, so the core claim does not rest solely on the unfair comparisons. The paper briefly acknowledges this (line 192) but does not analyze the impact of pseudo-label quality.
+
+- **User study lacks statistical rigor**: The user study (60 users, 10 images per task) provides useful qualitative evidence but does not report inter-rater agreement, confidence intervals, or significance tests. While not fatal, this weakens the inferential strength of the subjective evaluation.
+
+- **Rotation equivariance is claimed but not quantitatively measured**: The paper asserts rotation equivariance as a strength (Fig. 2, abstract) but provides only qualitative visualization. A quantitative measure (e.g., consistency of rotated-then-translated vs. translated-then-rotated outputs) would substantiate this claim.
 
 ### Trivial
-- None beyond what has been noted above.
+
+- **SPE latitude range inconsistency**: In Eq. 4, `ϕ = (2j_p/w − 1)π/2` maps to `[−π/2, π/2]`, while the paper earlier defines latitude `ϕ ∈ [0, π]` (line 67). This is a coordinate-convention mismatch in notation — the method itself is unaffected, but it should be clarified.
+
+- **Missing limitation discussion**: The conclusion does not discuss failure cases or limitations (e.g., reliance on daytime source, potential failure modes with extreme weather).
 
 ## Nice-to-Haves
-- Adding LPIPS on grayscale, edge-map PSNR, or a task-specific measure (e.g., depth consistency via a pretrained depth estimator) would strengthen the content preservation evidence.
-- Including confidence intervals for all quantitative results.
-- A more detailed description of the user study methodology.
-- Analyzing the spatial influence of distortion-free discrimination (e.g., by visualizing discriminator gradients or attention maps).
+
+- **Deformable convolution depth ablation**: The paper uses deformable convolution only at the first layer of the encoders. An ablation studying whether deeper layers also benefit from deformable offsets would strengthen the architecture analysis.
+- **Multiple random FID projections**: Measuring FID from a single projected viewpoint (fixed vertical angle) could be augmented with multiple random viewpoints for a more comprehensive style assessment.
+- **Rotation equivariance quantitative metric**: A systematic evaluation (e.g., measuring consistency across rotations) would directly support the claimed rotation equivariance.
 
 ## Removed Points
-- **Criticism that SSIM is "not a fixable oversight" and "invalidates the core conclusion" (Harsh Critic)**: This overstates the severity. SSIM is widely used in I2I as a relative comparison metric; all methods face the same bias. The relative ordering across methods remains informative even if absolute values are suppressed by luminance shifts. The criticism is kept at the "Major" level but downgraded from "fatal."
-- **Criticism about "no direct training signal for the majority of the panorama" (Harsh Critic)**: The paper uses a weighted sum of the original (full-panorama) discriminator and the distortion-free discriminator (Eqn. 7). The original discriminator still processes the entire panorama. The criticism partially misreads the architecture; the concern is kept in weakened form under "Minor."
-- **Criticism that baseline comparison is "unfair" and "overstated" (Harsh Critic)**: Comparing against unadapted methods is standard practice when proposing a new task that existing methods cannot handle by design. The paper's claim to "surpass existing I2I methods" is accurate in context. The suggestion to include adapted baselines is valid and retained as a minor weakness.
-- **Strength Finder's claim about "SSIM 0.397 vs next-best 0.229" as core evidence**: Since SSIM has been identified as a problematic metric for this task, quoting these values as unqualified evidence of content preservation is somewhat circular. This caution is already captured in the Major weakness above.
-- **Generic strengths from Strength Finder about "important problem" and "practically relevant"**: These are superficial statements that do not constitute concrete evidence. Removed as generic.
-- **Missing related works**: Per instructions, I do not have external sources to confirm and do not mention missing references.
+
+These points are flagged to be removed; treat them with caution:
+
+- **"Distortion-free discrimination ignores geometric differences between projected patch and real pinhole"** — This is a misunderstanding of the design. The discriminator is *intentionally* made blind to geometry so it focuses on style; different underlying geometry is the point, not a flaw.
+- **"Ablation baseline not defined"** — The paper clearly describes each ablated component removed from the full model; the table (an embedded image) is interpretable from the text description.
+- **"Deformable convolution only at first layer may be insufficient"** — Speculative; no evidence of failure is shown. This is a reasonable suggestion but not a verified weakness.
+- **"Missing appendix/proofs"** — Parser artifact; the original submission contains them.
 
 ## Novel Insights
-Beyond the paper's own contributions, the calibration comparison reveals an interesting pattern: several accepted I2I and panoramic-generation papers (4K4DGen at 7.0, StochSync at 6.0) had similar evaluation concerns—questionable metrics, limited baselines, missing variance—yet were accepted based on strong novelty and convincing qualitative results. This suggests that for papers introducing genuinely new tasks or paradigms, the community weights novelty and architectural insight more heavily than complete evaluation rigor. The present paper's key weakness is that its primary quantitative evidence for a core claim (content preservation via SSIM) uses a metric whose validity is directly challenged by the task definition. However, the relative advantage in FID (which is less affected by luminance shifts and is standard for style quality) is unambiguous and large, providing independent support.
+
+The reviews surface an interesting tension in cross-domain I2I evaluation: when the source and target differ not just in style but also in fundamental geometry (FoV, projection), standard metrics break down in ways that generic style-transfer papers do not face. The SSIM criticism specifically points to an underappreciated problem — luminance-bearing similarity metrics conflate "preserving scene structure" with "failing to change appearance." This is a broader issue for any I2I task where the target domain has systematically different low-level statistics (e.g., day→night, clear→foggy). The paper's distortion-free discrimination idea can be seen as a partial solution to the *training* side of this problem, but the *evaluation* side remains open. The paper would benefit from explicitly framing this evaluation challenge as part of its contribution.
 
 ## Suggestions
-1. **Replace or supplement SSIM** with a content preservation metric that is less sensitive to style-induced luminance/contrast changes—LPIPS on grayscale images, edge-map PSNR, or feature-space distance from a network trained on style-invariant tasks (e.g., a self-supervised model).
-2. **Add at least one panoramic-aware baseline**: Apply a standard I2I method with spherical padding, rotation augmentation during inference, or multi-pinhole projection and stitching. This would demonstrate that the improvements come from the full architecture, not just any panoramic adaptation.
-3. **Separate the ablation of SPE and deformable convolution** into two distinct rows in Table 3.
-4. **Report standard deviations** for FID and SSIM across multiple runs or bootstrapped samples.
-5. **Provide more user study details**: statistical significance testing, error bars, and scale description.
+
+1. **Replace or supplement SSIM**: Use a luminance-invariant content metric such as LPIPS, or feature distances from a pretrained segmentation or depth network. Re-run the quantitative tables and ablation with this metric.
+2. **Add a fairer baseline comparison**: Either run MGUIT/InstaFormer with ground-truth annotations on a subset where they are available, or explicitly separate the "annotation-free" and "annotation-based" comparisons with a discussion of pseudo-label impact.
+3. **Quantify rotation equivariance**: Measure consistency under rotation (e.g., LPIPS between rotated-then-translated vs. translated-then-rotated outputs) to substantiate the qualitative claim.
+4. **Report statistical significance for the user study**: Add confidence intervals or inter-rater agreement to strengthen the subjective evaluation.
 
 ## Score and Decision
 
-**Calibration anchors** (from retrieval):
+**Calibration Anchors** (all from the human-review corpus):
 
-| Path | Avg Score | Comparison to this paper |
-|------|-----------|------------------------|
-| qxRoo7ULCo (4K4DGen, panoramic 4D gen) | **7.00** | Stronger technical novelty (4D generation at 4K) and more impressive results; evaluation had similar metric concerns. This paper is less ambitious but tackles a genuinely novel task. |
-| 55uj7mU7Cv (Identifiable UDT) | **6.25** | Similar level of theoretical/architectural contribution; had baseline comparison concerns similar to this paper. Comparable quality. |
-| XPNprvlxuQ (StochSync, panorama gen) | **6.00** | Novel zero-shot formulation with good results; had evaluation metric concerns. Comparable to this paper in overall strength. |
-| 9hjVoPWPnh (ML for I2I) | **6.00** | Strong theory and thorough experiments across multiple model types. Slightly more rigorous evaluation than this paper. |
-| 1YTF7Try7H (IBCD, I2I) | **5.33** | Had marginal improvements and missing variance. This paper's contributions are more distinctive. |
-| CMj18BQQDK (VideoPanda, panoramic video) | **4.75** | Had overfitting issues and poor qualitative results; rejected. This paper has stronger qualitative results and fewer execution flaws. |
-| hrXt6Fdl2P (FV-NeRV) | **2.60** | Fundamental novelty and evaluation problems. This paper is substantially stronger. |
-| 11oqo92x2Z (Solar farms) | **2.50** | Missing details and limited contribution. Not comparable in depth or novelty. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| CMj18BQQDK (VideoPanda) | 4.75 | Weaker paper — our contribution is clearer and the qualitative results are more convincing |
+| M2SsqpxGtc (CubeDiff) | 7.50 | Stronger paper — cleaner evaluation with fewer metric concerns, similar problem framing quality |
+| qxRoo7ULCo (4K4DGen) | 7.00 | Stronger overall — although our problem is equally novel, the evaluation is less rigorous |
+| Pev2ufTzMv (Saliency Metrics) | 3.75 | Much weaker paper — unclear contributions and weak experiments |
+| w73feIekdO (Real-time CV) | 3.25 | Much weaker — poor presentation and insufficient evaluation |
+| kNjrhD67LP (ITIT) | 7.00 | Stronger — clean experiments and well-supported claims |
+| sLregLuXpn (Gaussian Noise I2I) | 5.00 | Similar tier — both have a methodological concern that limits claims but retain genuine contribution |
 
-**Positioning**: The paper sits between the accepted papers at ~6.0 (StochSync, Machine Unlearning for I2I) and the rejected borderline papers at ~5.0-5.3. Its core contribution (first panoramic I2I formulation with pinhole targets, well-designed panoramic architecture) is genuine and well-supported by qualitative results and FID gains. The main concern—SSIM as a content preservation metric—is real but does not invalidate the paper's core claims, as the relative ranking across methods remains meaningful and FID (which is less affected) shows consistent large margins. The evaluation gaps are addressable in revision.
+The paper introduces a genuinely novel and useful task formulation with well-motivated architectural components. The technical contributions are grounded and the ablation study confirms their individual value. However, the reliance on SSIM as a content-preservation metric for day→night translation is a real methodological weakness that undermines the quantitative content-preservation claims. The paper is not fatally flawed — the FID advantages, user study, and qualitative comparisons provide enough supporting evidence that the core contribution is real — but the evaluation needs correction before the paper can be considered fully convincing. Relative to the calibration anchors, this paper is stronger than papers scoring 3-5 but weaker than papers scoring 7+ due to the metric concern.
 
 MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL DECISION: <decision>Reject</decision>

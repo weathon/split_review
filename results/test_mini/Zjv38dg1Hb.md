@@ -1,78 +1,82 @@
-Now I have everything I need. Let me produce the consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Generalized Consistency Trajectory Models (GCTMs), which extend CTMs — originally limited to Gaussian→data translation — to arbitrary source/target distributions via flow matching. The key theoretical contribution shows that the flow-matching ODE can be parameterized in the same form as the CTM PFODE (Theorem 1), and that the standard CTM is a special case (Theorem 2). The paper explores a design space of couplings (independent, optimal transport, supervised) and demonstrates GCTMs on unconditional generation, image-to-image translation, restoration, editing, and latent manipulation, achieving competitive results at NFE=1.
+This paper proposes Generalized Consistency Trajectory Models (GCTMs), which extend CTMs to enable one-step ODE-based translation between arbitrary distributions (not just Gaussian→data) using flow matching theory. The authors prove (Theorem 1) that the FM ODE can be parameterized in the same form as CTMs, and (Theorem 2) that CTM is a special case of GCTM when one marginal is Gaussian. They discuss a design space of couplings (independent, OT, supervised) and Gaussian perturbation to handle one-to-many mappings, then demonstrate GCTM on unconditional generation, image-to-image translation, restoration, editing, and latent manipulation — all with NFE as low as 1 for supervised tasks.
 
 ## Strengths
 
-- **Clean theoretical unification of CTM and flow matching.** Theorem 1 proves that the FM ODE can be parameterized identically to the CTM solution (Eqs. 5–6), and Theorem 2 shows CTM is a special case under a change of variables when the target is Gaussian. This formally extends CTM-style training to arbitrary distribution pairs, which was previously not possible.
-- **Flexible coupling design enables both supervised and zero-shot settings within the same framework.** The paper formalizes three couplings (independent, OT, supervised) in Algorithm 1, allowing GCTM to handle tasks ranging from zero-shot restoration (independent coupling) to paired I2I translation (supervised coupling) — something CTM cannot do. The paper is the only method applicable to both settings among the baselines compared.
-- **Strong empirical results at NFE=1 across multiple I2I benchmarks.** In Table 2, GCTM with NFE=1 achieves the best FID on Edges→Shoes (40.3), best on Facades (111.3), and second-best on Night→Day (148.8), outperforming 5-step SDE methods (Palette, I2SB) and Pix2Pix. LPIPS scores are best or near-best, indicating good input-structure preservation.
-- **Interesting latent manipulation results.** The experiment in Figure 7 demonstrates that the Gaussian perturbation added to $\xx_1$ acts as an interpretable latent vector, enabling controllable synthesis (e.g., changing texture/color by varying the latent). The model generalizes to latent vectors unseen during training, which goes beyond simple one-step generation and hints at controllable synthesis.
+- **Clean theoretical generalization.** Theorem 1 shows that the flow matching ODE between arbitrary distributions admits the same parameterization as CTMs, and Theorem 2 proves CTM is the special case when one side is Gaussian (change of variables in Sec. 4). This is a genuine, non-trivial unification that cleanly connects the CTM and flow matching literatures.
+
+- **Flexible coupling design is well-motivated and validated.** Section 4.1 introduces independent, OT, and supervised couplings with concrete algorithmic implementations (Alg. 1). The choice directly affects task applicability: independent coupling enables zero-shot restoration, OT coupling accelerates unconditional training by ~2.5× (Fig. 3), and supervised coupling paired with Gaussian perturbation yields one-to-many image translation. This design space analysis is practically useful.
+
+- **Convincing one-step I2I and supervised restoration results.** At NFE=1, GCTM outperforms Palette (NFE=5), I²SB (NFE=5), and Pix2Pix (NFE=1) on Edges→Shoes (FID 40.3 vs. 53.9 for I²SB), Night→Day, and Facades (Table 2). On supervised restoration (Table 3), GCTM at NFE=1 achieves the best LPIPS across all three tasks (e.g., 0.009 for SR) while maintaining competitive PSNR/SSIM — the perception-distortion trade-off is clearly visible in the data and Figure 6 shows the qualitative advantage over regression.
+
+- **Training acceleration via OT coupling.** Figure 3 documents up to 2.5× faster convergence (in iterations) when using OT vs. independent coupling on CIFAR-10, with a plausible explanation (straighter ODE trajectories, lower gradient variance). This is a concrete practical benefit.
+
+- **Ablation study validates key design choices.** Figure 11 systematically ablates Gaussian perturbation and σ_max on Edges→Shoes, confirming that both components are necessary: without perturbation, FID never drops below 30; σ_max=500 gives fastest convergence.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
+- **No error bars, statistical significance, or multiple-seed reporting on any quantitative table.** Every numerical result in Tables 1, 2, 3 is reported as a point estimate. Given that the observed gaps between methods are sometimes small (e.g., zero-shot SR: GCTM PSNR 31.61 vs. DPS 31.19), it is impossible to assess whether differences are meaningful. Three runs with standard deviations are a minimum expectation for a paper making performance claims.
 
-- **Missing ablation isolating the necessity of the CTM-style consistency loss.** The paper never compares GCTM against a plain flow-matching model trained with the same coupling and architecture but *without* the consistency distillation term $\mathcal{L}_{\text{GCTM}}(\theta)$. Without this ablation, it is unclear whether GCTM's advantage over baselines comes from the CTM-style multi-step consistency training or simply from using better couplings (e.g., OT) — which is already well-studied in the FM literature. This is the most significant empirical gap, as it directly concerns whether the paper's core claimed mechanism is necessary.
-
-- **CIFAR-10 unconditional results are not state-of-the-art and are not convincingly competitive.** In Table 1, GCTM with OT coupling achieves FID 5.32 at NFE=1 without a teacher, which lags behind iCM (2.51) and is only on par with teacher-trained CTM. The paper acknowledges this but offers only speculation that hyperparameter tuning could close the gap. Given that unconditional generation is the most basic and controlled setting for evaluating distillation quality, the weaker performance here reduces confidence that GCTM's framework is a significant advance over existing one-step methods.
+- **Limited comparison to other one-step I2I methods.** The I2I baselines are Pix2Pix (a 2017 GAN), Palette, and I²SB — the latter two are fundamentally multi-step methods shown at NFE=5. The paper would be much stronger with comparisons to one-step distillation-based I2I methods (e.g., consistency models fine-tuned on paired data, DMD-based I2I, or recent bridge-distillation methods). This makes it hard to assess whether GCTM represents a genuinely superior approach or just a competitive one.
 
 ### Minor
+- **Training procedure references an external paper without explaining how it applies.** The paper states it trains "with the method in Section 5.2 of Kim et al. (2023) to train all GCTMs without pre-trained teacher models" (line 253). However, Algorithm 2 uses the notation $\xx_{t \rightarrow u}$ which was originally defined using a teacher model. A self-contained paragraph explaining how $\xx_{t \rightarrow u}$ is computed in the teacher-free setting (i.e., using an ODE solver with the student network itself, as in consistency training) would significantly improve clarity and reproducibility.
 
-- **The theoretical contribution is a reparameterization, not a fundamentally new framework.** Theorem 1 shows that the existing FM ODE can be rewritten in CTM-parameterization form — this is mathematically correct and useful for enabling CTM-style training, but it is a change of variables on an already-known ODE rather than a new theoretical result. The paper's main novelty is in *application* (extending CTM training recipes to arbitrary couplings) rather than in new ODE theory. The paper is reasonably transparent about this, but the framing as a "generalization of theory" slightly overstates the technical difficulty.
-- **The claim that GCTM "avoids error accumulation" of CMs at large NFE is speculative and unsupported by direct experiment.** The paper says "we speculate" and provides a reasoning (GCTM can traverse to smaller time using velocity), but no experiment compares GCTM vs. CTM/CM at varying NFE on the same task to substantiate this claim. The zero-shot GCTM uses 32 steps, and we have no evidence about one-step GCTM's performance in that setting.
-- **The zero-shot restoration setup for CM as a baseline is underspecified in the main text.** The main paper lists "CM" as a baseline in Table 3 and mentions "CM-based image restoration" but does not explain how a consistency model (designed for unconditional generation) is adapted to conditional restoration. Details are deferred to the appendix. While the appendix exists in the original submission, the main text would benefit from a brief description.
-- **No standard deviations reported for any metric.** Many results in Tables 2 and 3 are close across methods (e.g., Edges→Shoes FID: GCTM 40.3 vs. I2SB 53.9 vs. Regression 54.3). Without variance estimates, it is unclear whether differences are statistically significant.
+- **Unconditional generation lags behind the SOTA.** CIFAR-10 FID 5.32 (GCTM) vs. 2.51 (iCM) and 3.55 (CM with teacher) is a non-trivial gap. The paper acknowledges this honestly but the speculation about "further fine-tuning" is not backed by evidence. This section would benefit from an NFE vs. FID Pareto curve showing where GCTM's advantage lies.
+
+- **The perception-distortion "best balance" claim is qualitative.** The statement that GCTM "strikes the best balance between perception and distortion" (line 460) is a reasonable reading of Table 3 (second-best PSNR/SSIM, best LPIPS), but the paper does not provide any principled trade-off analysis (e.g., perception-distortion curve, PIO-optimal frontier). This weakens what could be a stronger claim.
+
+- **Zero-shot restoration uses NFE=32, not 1.** While the zero-shot setting naturally requires more steps due to the guidance loop, the paper does not show an NFE-ablation for this setting. A plot of PSNR/LPIPS vs. NFE for zero-shot GCTM would clarify whether the method's speed advantage carries over to this setting or is primarily in the supervised case.
 
 ### Trivial
-None beyond the deferred-training-detail pattern noted above.
+- None that are parser-independent (formatting artifacts are parser errors).
 
 ## Nice-to-Haves
-- An NFE-vs-performance sweep for I2I and restoration tasks, showing how GCTM compares to baselines at matched NFE (not just matched wall-clock time at different NFEs).
-- Reporting standard deviations for all metric tables.
-- A brief main-text summary of the zero-shot guided generation algorithm rather than full deferral to the appendix.
+
+- An NFE sweep for I2I and restoration (NFE = 1, 2, 5, 10, 50 alongside baselines at both matched NFEs and their typical high NFE) to reveal the Pareto frontier.
+- Quantitative metrics for the latent manipulation results (e.g., color fidelity in Figure 10).
+- Failure case analysis showing where GCTM produces artifacts vs. where baselines excel.
 
 ## Removed Points
 
-- **"Regression is a strawman baseline."** The paper explicitly discusses the perception-distortion tradeoff and uses regression as a valid point of comparison — it achieves the best PSNR/SSIM in restoration (Table 3) while producing blurry outputs, which is exactly the expected behavior given MSE minimization. This is not a strawman; the paper is transparent about its role.
-- **"CM baseline is never explained."** The paper references the appendix for pseudo-code details, which exist in the original submission. The parser strips the appendix; this is not an author error.
-- **Training details (N, σ_max schedule, distance function) are completely underspecified.** Algorithm 2 provides the training loop, σ_max is discussed in the ablation study (Fig. 6), and the paper explicitly states it uses the method from Section 5.2 of CTM (which trains without a teacher). The paper relies on prior work for some implementation specifics, which is standard practice.
-- **Pure formatting/style nitpicks** and criticisms about missing appendix content are removed per the review guidelines.
+The following criticisms from the reviewers are removed:
+- **"Fatal reproducibility gap"** and "training procedure is non-reproducible": The paper explicitly states it uses the teacher-free method from Section 5.2 of Kim et al. (2023) (line 253). Referencing an existing method for implementation details is standard practice; this is a minor clarity issue, not a fatal flaw.
+- **"Straw-man NFE comparison"** and "baselines evaluated at suboptimal NFE": The paper explicitly controls NFEs for similar inference times (line 379: "We control NFEs such that all methods have similar inference times"). This is a valid experimental design for demonstrating speed-quality trade-offs. Showing baselines at much higher NFEs would be a different comparison (absolute quality), not a fairer one.
+- **"Paper downplays GCTM gap behind iCM"**: The paper openly reports FID 5.32 vs. iCM 2.51 and says "further fine-tuning...could push performance to match" (line 311). This is honest, not downplaying.
+- **Criticism about missing related works**: Cannot verify without external knowledge.
+- **Criticism about "no pre-trained teacher" claim being false**: The paper explicitly says it uses teacher-free training (line 253). The critic's speculation about whether $\xx_{t \rightarrow u}$ uses a teacher is resolved by reading the cited reference.
 
 ## Novel Insights
 
-The latent manipulation experiment (Figure 7) reveals an interesting property that goes beyond the paper's core claims: Gaussian perturbation added to $\xx_1$ in supervised I2I tasks acts as an interpretable latent code that controls output texture and color, and the model generalizes to unseen latent vectors (e.g., leopard spots, pure colors). This suggests that GCTMs learn a disentangled representation where the perturbation captures orthogonal factors of variation — a property that the paper does not deeply explore but that could be a fruitful direction for future work on controllable synthesis with ODE-based models.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add the critical ablation**: Train a plain FM model (minimizing only $\mathcal{L}_{\text{FM}}$) with the same architecture, coupling, and data as GCTM. This will directly isolate whether the $\mathcal{L}_{\text{GCTM}}$ consistency term provides additional benefit over standard FM regression. If FM alone achieves comparable results, the CTM machinery is incidental.
-2. **Report FID vs. NFE on unconditional generation** (e.g., CIFAR-10 at NFE=1,2,4,8) to demonstrate that GCTM maintains quality across varying compute budgets and to substantiate the error-accumulation claim.
-3. **Provide standard deviations** for all metric tables, particularly for results where methods are close in performance.
-4. **Add a brief description of the zero-shot CM baseline and guided generation algorithm** to the main paper for self-containedness.
+1. Add standard deviations over 3 seeds to all quantitative tables.
+2. Add a self-contained paragraph (or a brief note in Algorithm 2) explaining how $\xx_{t \rightarrow u}$ is computed in the teacher-free setting — e.g., using an ODE solver with the current GCTM network, consistent with the consistency training paradigm.
+3. Add NFE-vs-quality Pareto plots for I2I and restoration to support the speed-quality claims more rigorously.
+4. Compare against at least one modern one-step I2I method (e.g., a consistency model variant or DMD-based approach).
+5. Tone down the "unlocking the full potential" language in the conclusion, which overstates the experimental scope relative to what is demonstrated.
 
 ## Score and Decision
 
 **Calibration anchors:**
 
-| Path | Avg Score | Comparison to this paper |
-|------|-----------|------------------------|
-| LyJi5ugyJx.md (sCM, continuous-time CMs) | 9.20 | Far stronger: deep theoretical analysis, SOTA results, scaling to 1.5B params. GCTM is much weaker on all fronts. |
-| FKksTayvGo.md (DDBM, diffusion bridges) | 7.00 | Similar scope (bridging arbitrary distributions) but DDBM proposes a more novel formulation. GCTM is weaker overall. |
-| 2ySt3cdGfJ.md (DisBack, distillation backtracking) | 5.50 | Comparable quality: both have a clean idea with broad evaluation but missing key ablations. |
-| B5IuILRdAX.md (FGM, one-step flow matching) | 5.00 | Similar incremental-contribution level. GCTM has broader application scope and cleaner framing. |
-| jK5r1HBfym.md (RDMD, I2I distillation) | 4.00 | GCTM is stronger: broader evaluation, cleaner theory, more tasks demonstrated. |
-| mzJAupYURK.md (SCT, stable consistency tuning) | 3.00 | GCTM has more novelty and broader scope. |
+| Anchor | Path | Avg Score | Comparison |
+|--------|------|-----------|------------|
+| Shortcut Models | OlzB6LnXcS.md | 8.00 | Significantly stronger experimental validation and clearer novelty; a step above GCTM |
+| DDBM | FKksTayvGo.md | 7.00 | Thorough experiments and clearer novelty; somewhat stronger than GCTM |
+| CTM (original) | ymjI8feDTD.md | 6.50 | Ancestor work with SOTA FID; GCTM has weaker quantitative results but broader task coverage |
+| Consistency Flow Matching | bS76qaGbel.md | 5.67 | Similar conceptual contribution level but GCTM has broader experimental validation |
+| IBCD (one-step I2I) | 1YTF7Try7H.md | 5.33 | Similar topic; GCTM has stronger theoretical grounding (Theorem 2) but similar experimental limitations |
+| Reg. DMD | jK5r1HBfym.md | 4.00 | Limited experiments and incremental contribution; GCTM is clearly stronger |
+| Self-distillation | QKqWnNkwPL.md | 3.00 | Poor performance relative to baselines; GCTM is substantially better |
 
-The paper presents a clean extension of CTMs to arbitrary distributions via flow matching, with broad empirical validation across five tasks. The theoretical unification is real but modest (a reparameterization of the FM ODE into CTM form). The main empirical weakness is the missing ablation isolating whether the CTM-style consistency loss provides any benefit over plain flow matching with a good coupling — this is the most important experiment for supporting the paper's core claims. The paper is comparable to mid-range distillation papers (around 5.5) and weaker than top-tier papers like sCM or DDBM that offer deeper insight or stronger empirical contributions.
-
-**Score:** 5.5
-
-**Decision:** Weak Accept — the paper has a clear, useful extension and broad experiments, but the missing core ablation and modest theoretical novelty prevent a stronger recommendation.
+The paper makes a genuine theoretical contribution (unifying CTM and flow matching) and demonstrates broad applicability across multiple image manipulation tasks. However, the experimental validation is held back by the absence of error bars, limited comparisons to other one-step methods, and a training specification that defers too much to an external reference. Relative to the calibration anchors, this paper sits between the Consistency Flow Matching (5.67, weaker experiments) and CTM (6.50, stronger results) papers — its theory is stronger than CFM's but its experiments are not as thorough as CTM's.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

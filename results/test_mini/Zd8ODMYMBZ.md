@@ -2,80 +2,81 @@ Now I have all the information I need. Let me compose the final consolidated rev
 
 ## Summary
 
-FaviComp proposes a training-free evidence compression method for RAG that uses ensemble decoding — interpolating logits from a compression model and the downstream target model at each decoding step — to produce compressed evidence that has lower perplexity for the target model. This "familiarity-aware" compression simultaneously injects parametric knowledge from the target model when retrieved evidence is incomplete. The method is evaluated on five open-domain QA datasets with three different target models, consistently outperforming prior compression methods (RECOMP, CompAct, LongLLMLingua) by notable margins.
+The paper proposes FaviComp, a training-free evidence compression method for RAG that uses ensemble decoding between a compression model and the target LM. By combining logits from both models during compression, FaviComp generates compressed evidence that has lower perplexity under the target model while also integrating parametric knowledge. Experiments on open-domain QA datasets show improvements over compression baselines, with ablation studies exploring the ensemble coefficient α and a Hits=0/Hits=1 analysis of parametric vs. non-parametric knowledge usage.
 
 ## Strengths
 
-- **Novel and well-motivated idea**: The paper identifies a genuine limitation of prior compression-based RAG — that compressed evidence from one LM may be unfamiliar to the downstream target LM — and proposes a clean, principled solution via ensemble decoding during compression. The link between low target-model perplexity and improved downstream performance is grounded in prior findings (Liu et al., 2024; Gonen et al., 2023).
+- **Training-free ensemble decoding outperforms supervised compression baselines**: Section 4.1 reports that FaviComp consistently beats trained methods like CompAct and RECOMP-abstractive across NQ, HotpotQA, and MuSiQue. This is non-trivial — a training-free method surpassing distillation-trained compressors is a genuine result.
 
-- **Training-free and model-agnostic design validated across diverse model pairs**: FaviComp requires no training and is evaluated with three different target models (Llama3-8B-Instruct, Mistral-7B-Instruct, Mixtral-8x7B-Instruct) paired with different compression models (including using the same model as both compressor and target). This concretely supports the claim of plug-and-play applicability.
+- **Systematic α ablation reveals a non-trivial trade-off, not a mechanical artifact**: Figure 2 sweeps α from 0.0 to 1.0 and shows a U-shaped performance curve peaking at α=0.5. If the method were merely "the model conditioning on its own preferences," perplexity would monotonically decrease and performance would monotonically increase with α. The fact that both degrade at high α (where the model over-relies on parametric knowledge and ignores evidence) provides evidence that the ensemble genuinely balances two information sources.
 
-- **Strong and consistent empirical results**: FaviComp outperforms strong baselines (RECOMP-abstractive, CompAct, LongLLMLingua) across all five datasets and all three target model settings. The gains over the best baseline on several datasets are substantial (up to 23.91% as claimed), and the improvements are consistent rather than cherry-picked.
+- **Hits=0 / Hits=1 decomposition cleanly demonstrates parametric knowledge integration**: Figure 3 shows FaviComp outperforms Zero-shot Summarization and CompAct on the evidence-irrelevant (Hits=0) subset while maintaining comparable performance on the evidence-relevant (Hits=1) subset. This is exactly the right signature for a method that claims to integrate parametric knowledge without harming evidence utilization.
 
-- **Hits=0 / Hits=1 analysis cleanly demonstrates parametric knowledge integration**: Section 4.3 is the strongest evidence that FaviComp actually does what it claims. On the evidence-irrelevant (Hits=0) subset, FaviComp significantly outperforms baselines, showing effective use of parametric knowledge. On the evidence-relevant (Hits=1) subset, it matches or exceeds baselines. This directly supports the method's core motivation about balancing parametric and non-parametric knowledge.
-
-- **Systematic analysis of the ensemble coefficient α**: Section 4.2 shows how performance and perplexity vary with α across three datasets, revealing that α=0.5 (equal weighting) is optimal and that the trend aligns with the paper's theoretical intuition. This provides genuine mechanistic insight.
-
-- **Clear qualitative case study**: Table 2 shows concrete examples where FaviComp selects tokens from the target model when the compression model is uncertain (e.g., inserting "Skeptic" when the evidence omits it), visually demonstrating the claimed behavior.
+- **Method is conceptually clean and model-agnostic**: The ensemble decoding idea is straightforward to implement (once technical details are resolved) and requires no training, making it practically appealing.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No statistical significance or uncertainty quantification for the central claim**: The paper reports point estimates only for all main results (Tab. 1, Tab. 3). Given that the paper's core contribution rests on comparisons showing FaviComp "outperforms" baselines, the absence of confidence intervals, bootstrap estimates, or significance tests makes it impossible to assess whether the reported margins are robust or within the range of noise. This is the most serious weakness because it directly undermines confidence in the paper's primary empirical claims.
+- **Circular evaluation confound is real but overstated**: The target model serves two roles — it provides logits during ensemble decoding that generates the compressed evidence, and it later conditions on that evidence for answer generation. This means the compressed evidence is biased toward tokens the target model already finds probable. However, this does **not** invalidate the core finding. The U-shaped curve in Figure 2 (peak at α=0.5, degradation at both extremes) shows the mechanism is more nuanced than self-reinforcement. If the effect were purely mechanical, performance would track α monotonically. It doesn't. Still, the paper would be substantially strengthened by a decoupled control experiment — e.g., generate compressed evidence using ensemble decoding with target model A, then evaluate a *different* target model B on that evidence — to rule out the concern that the target model is simply conditioning on its own output preferences. Without this, the causal claim that "familiarity drives improvement" is partially confounded with "the model prefers its own tokens."
 
-- **Computational cost is not quantified or even acknowledged**: FaviComp requires running two LMs (the compression model AND the target model) *at every decoding step* during evidence compression — this is fundamentally more expensive than standard compression methods that run a single model once. The paper never reports wall-clock time, latency, FLOPs, or any efficiency metric. While the paper is transparent about being "training-free," the practical inference overhead is a first-order concern for any use case, especially since several baselines (RECOMP, CompAct) also have inference costs. This omission is significant for a paper that positions its method as practical ("easily plugged into any RAG processes").
+- **Perplexity argument lacks a clean control**: The paper shows that FaviComp's compressed evidence has lower perplexity under the target model, and lower perplexity correlates with better performance. But since the target model helped select the tokens, its perplexity on that evidence is mechanically low. A cleaner demonstration would be to generate evidence with a *different* mechanism that also lowers perplexity (e.g., re-ranking compression-model outputs by target-model likelihood) and check if the same performance gains appear. Without this, it's unclear whether low perplexity is a cause of improvement or merely an artifact of the evaluation design.
 
 ### Minor
 
-- **The Zero-shot Summarization comparison is over-emphasized relative to its informativeness**: The paper repeatedly compares against Zero-shot Summarization (which is FaviComp with α=0, using the same compression model). While the paper is transparent about this equivalence and also includes proper baselines (RECOMP, CompAct, LongLLMLingua), the narrative emphasis on beating Zero-shot Summarization gives an inflated sense of the contribution. The real evidence of value comes from beating the independent prior-work baselines, which the paper does, but this should be centered more clearly.
+- **"Zero-shot Summarization is equivalent to FAVICOMP with α=0" is inaccurate when compression and target models differ**: The paper states that Zero-shot Summarization "uses the same LM as the target model" to summarize, and then claims this is equivalent to α=0 (which uses the *compression* model alone). In experimental pair (1), compression is Llama3.2-3B-Instruct and target is Llama3-8B-Instruct — different models of different capability levels. These are not equivalent. The claim only holds for pair (3) where both models are Mistral-7B-Instruct. This needs clarification, though the main comparisons (FaviComp α=0.5 vs. baselines) are not directly harmed.
 
-- **The ensemble decoding formulation lacks mathematical precision in the main text**: Section 2.3 (which would contain the formal definition of how logits are combined, the exact α interpolation, and how the target model logits are computed relative to the partial sequence) appears to be cut in the parsed version. The description in the introduction (line 17) gives the high-level idea but lacks the formal clarity needed for reproducibility — e.g., whether the target model sees the same partial prefix including prior ensemble-decoded tokens, or a separately generated prefix.
+- **The motivation that standard compression outputs are "unfamiliar" is asserted but not measured**: The paper claims prior compression methods produce evidence with high perplexity under the target model, but never quantifies this. Showing the target-model perplexity of raw documents, RECOMP outputs, CompAct outputs, and Zero-shot Summarization outputs vs. FaviComp outputs would ground the motivation empirically. This is an easy fix.
+
+- **Hits=1 performance is "comparable" rather than improved**: The paper acknowledges this honestly, but it means the method's advantage is concentrated on the Hits=0 subset. The claim of "synergy" between parametric and non-parametric knowledge is partially supported — the method adds parametric knowledge without hurting evidence utilization — but synergy in the stronger sense (both sources together outperform either alone) is only shown in the Hits=0 regime where the evidence is defective.
 
 ### Trivial
-None worth listing.
+
+- None beyond those addressed above.
 
 ## Nice-to-Haves
 
-- A latency/throughput comparison against baselines that also require two models (e.g., how much slower is FaviComp than standard compression? How does this trade off against accuracy gains?) would be a natural addition.
-- Reporting bootstrapped confidence intervals or performing paired significance tests (e.g., bootstrap test) for the main results in Tab. 1 would substantially strengthen the evidential basis.
+- Statistical significance / confidence intervals for main results
+- Token-source distribution statistics across the test set (what fraction come from each model, and how this changes with α and Hits status)
+- Decoupled evaluation experiment with different compression and answer-generation models (discussed under Major weaknesses)
+- Varying model capacity ratios more systematically (e.g., 1B→70B gap)
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
 
-- **Harsh Critic's "fairness of Zero-shot Summarization baseline" (treated as full weakness)**: The critic claimed comparing against Zero-shot Summarization is misleading. However, the paper is fully transparent that this is equivalent to α=0, and the paper independently compares against real prior-work baselines (RECOMP, CompAct, LongLLMLingua). The comparison is an ablation showing ensemble value, not a deceptive baseline choice. Retained as Minor (not removed entirely) because the narrative emphasis slightly overweights it.
+These points were flagged by the reviewers but are removed for the following reasons:
 
-- **Strength Finder's generic strengths**: The SF listed strengths like "the paper identifies a genuine problem" and "well-motivated" — these are retained because they're grounded in specific evidence (the perplexity-mismatch motivation is concretely supported by citations and analysis). Generic elements were filtered.
+- **Missing §2.3**: The paper references §2.3 and the section likely exists in the original submission; the extracted text shows a clear gap from §2.2 to §3 that is a PDF parser artifact. Removed as formatting artifact.
+- **Garbled text in §4.1 ("consistently outperform the trains...")**: Parser artifact. Removed as formatting artifact.
+- **"Generated Context is not a compression method"**: The paper includes this as a parametric-knowledge-only baseline, which is informative for understanding the contribution of different knowledge sources. The baseline is fair as a control, not as a compression competitor.
+- **Missing error bars**: Single-run evaluation is standard practice for large-scale LLM benchmarks. While confidence intervals would strengthen the paper, their absence is not a weakness specific to this paper.
+- **Case study is "anecdotal and cherry-picked"**: Case studies are standard qualitative illustrations. The paper's quantitative analysis (Hits=0/1, α ablation) carries the weight of evidence.
+- **Strength Finder claimed "case study confirms selective knowledge integration" as a core strength**: This is a generic illustrative strength, not a core strength. Moved here.
 
 ## Novel Insights
-None beyond the paper's own contributions. The review synthesis does not surface any unanticipated finding that the paper itself does not already articulate.
+
+The most interesting finding from the α ablation is the non-monotonic relationship between α and both perplexity and accuracy. The fact that perplexity bottoms out at α=0.5 rather than at α=1.0 (maximum target model influence) suggests that the target model actually becomes *less* certain when it has no evidential grounding — the perplexity rises again at α≥0.9 because the model is generating context without document support. This provides empirical evidence for a "sweet spot" of uncertainty-augmented generation that prior work on ensemble decoding (Liu et al., 2024) did not examine in the RAG context. The Hits=0 decomposition further corroborates this: the parametric knowledge injection is most helpful precisely where the retrieval fails, and most harmful where it would overwrite good evidence.
 
 ## Suggestions
 
-1. **Add confidence intervals or bootstrap significance tests** to Tab. 1 and Tab. 3. This is the single most impactful improvement — it would turn the headline comparisons from "suggestive" to "evidentially sound."
-
-2. **Report average wall-clock time per query** (or tokens/sec) for FaviComp vs. the most competitive baselines, broken down by compression time and downstream inference time. This addresses the glaring omission of computational cost analysis.
-
-3. **Formalize the ensemble decoding in a short equation** in the main text (currently the parsed version lacks the full Section 2.3): define the interpolation $p(w_t) \propto p_c(w_t | \dots)^{1-\alpha} \cdot p_t(w_t | \dots)^{\alpha}$ and clarify whether $p_t$ is conditioned on the same autoregressive prefix (including previously ensemble-decoded tokens) or on a separate generation.
+1. Add a decoupled experiment: compress with FaviComp using target model A, then answer with a different target model B (and vice versa). If the gains persist, the circular confound concern is fully addressed.
+2. Clarify the Zero-shot Summarization / α=0 relationship: either justify why it's functionally equivalent despite different models, or restructure the baseline to use the same model as the compression model.
+3. Add a table showing target-model perplexity of all compression methods' outputs (raw documents, RECOMP, CompAct, Zero-shot, FaviComp) to empirically ground the "unfamiliarity" motivation.
+4. Report aggregate token-source statistics (compression vs. target model argmax frequency) across the test set.
 
 ## Score and Decision
 
-**Anchor comparison** (all from the calibration corpus):
+### Calibration Anchors
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| RECOMP (mlJLVigNHp.md) | 7.00 | Highly related evidence compression paper. RECOMP trains compressors; FaviComp is training-free with a different approach. Both lack latency analysis — reviewers dinged RECOMP for this too. FaviComp has stronger accuracy gains but similar gaps. |
-| Determine-Then-Ensemble (FDnZFpHmU4.md) | 7.50 | Strong ensemble decoding paper with thorough analysis including latency. FaviComp is weaker on quantitative thoroughness (no confidence intervals, no cost analysis). |
-| Sparse RAG (HE6pJoNnFp.md) | 6.60 | RAG efficiency paper accepted with mixed scores (8,8,6,6,5). Similar "good idea but needs more baselines/analysis" pattern. FaviComp is comparable in overall strength. |
-| EchoQA Parametric/Contextual Knowledge (t21RmVmJrT.md) | 5.00 | Rejected. Analyzed PK/CK interaction without proposing a solution. FaviComp proposes a solution and is thus stronger. |
-| Evidence-Enhanced Triplet (1t1YSuBv3T.md) | 4.67 | Rejected. Limited generalization, modest margins. FaviComp has stronger results and better analysis. |
-| CRAG (JnWJbrnaUE.md) | 3.75 | Rejected. Limited technical contribution, weak baselines. FaviComp has a more novel method and stronger evidence. |
-| Inferring from Logits (t15cWqydys.md) | 3.00 | Rejected. Poor performance, primarily an evaluation paper. FaviComp is much stronger. |
+| Paper | Avg Score | Comparison |
+|-------|-----------|-----------|
+| RECOMP (mlJLVigNHp.md) | 7.00 | RAG compression paper with cleaner evaluation but less novel method. FaviComp is more ambitious but has more evaluation concerns. FaviComp is slightly weaker overall. |
+| BRIGHT (ykuc5q381b.md) | 7.20 | Solid benchmark paper; thorough evaluation. FaviComp has less rigorous evaluation. |
+| SePer (ixMBnOhFGd.md) | 7.25 | Well-executed metric paper. FaviComp is on similar topic (RAG + perplexity) but has more methodological concerns. |
+| CRAG (JnWJbrnaUE.md) | 3.75 | Rejected for insufficient baselines and limited contribution. FaviComp has a clearer contribution and stronger empirical support. |
+| Reward-RAG (oqRe1KvD17.md) | 3.00 | Rejected for weak methodology and unfair comparisons. FaviComp is substantially stronger. |
+| Provence (TDy5Ih78b4.md) | 6.25 | Context pruning paper, accepted. Similar level of evaluation quality to FaviComp. |
 
-The paper sits comfortably above the reject-level anchors (CRAG, EchoQA, Inferring from Logits) due to its novel idea and solid experimental design. It is comparable to accepted papers like Sparse RAG (6.60) and RECOMP (7.00) but slightly weaker than both in terms of quantitative rigor — FaviComp lacks statistical significance testing that those papers also lacked, but adds the extra gap of unquantified computational cost. The idea is cleaner and more novel than several accepted papers, which argues for the higher end of the range.
+**Final assessment**: The paper identifies a real problem and proposes a clean, training-free solution. The α ablation and Hits=0/1 analysis provide reasonable evidence for the core claims. However, the circular evaluation confound prevents unambiguous attribution of gains to "familiarity" vs. self-preference, and the α=0 / Zero-shot Summarization inconsistency is sloppy. The paper is solid but not exceptional — comparable to a mid-range accepted paper in this area, with a clear path to strengthening via the suggested decoupled experiment.
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,60 +1,67 @@
-Now I have enough context. Let me produce the final consolidated review.
+Now I have all the information I need. Let me construct the final review.
 
 ## Summary
 
-This paper proposes "verbose images"—imperceptible adversarial perturbations that cause VLMs to generate abnormally long sequences, thereby increasing energy consumption and latency (an availability/DoS threat). The method uses three complementary loss objectives (delayed EOS probability, output uncertainty via KL divergence from uniform, and token diversity via nuclear norm of hidden states) plus a temporal weight adjustment with momentum, optimized via PGD. Experiments on BLIP, BLIP-2, InstructBLIP, and MiniGPT-4 on MS-COCO and ImageNet show 7.87×–8.56× length increases over original images and outperform adapted baselines (sponge samples, NICGSlowDown).
+This paper proposes "verbose images" — imperceptible adversarial perturbations that cause large vision-language models (VLMs) to generate much longer output sequences during inference, thereby increasing energy consumption and latency (a denial-of-service style attack). The method uses three complementary loss objectives (delayed EOS, token-level uncertainty via KL divergence to uniform, and sequence-level token diversity via nuclear norm maximization of hidden states) optimized with PGD, along with a temporal weight adjustment algorithm. Experiments on BLIP, BLIP-2, InstructBLIP, and MiniGPT-4 across MS-COCO and ImageNet show 7.87×–8.56× increases in sequence length and corresponding energy-latency increases over clean images, substantially outperforming sponge samples and NICGSlowdown baselines.
 
 ## Strengths
 
-- **Novel and timely attack surface.** Prior energy-latency attacks target LLMs or small captioning models; this paper is the first to systematically explore image-level adversarial perturbations for DoS-style attacks on modern auto-regressive VLMs.
+1. **Verbose images achieve substantially longer sequences than prior energy-latency attacks across all four VLMs**: On MS-COCO, verbose images increase average generated length to 318.66 for BLIP, versus 179.42 (NICGSlowDown) and 65.83 (sponge samples); similar gaps hold on ImageNet (Table 1). This demonstrates a clear improvement over existing methods that were designed for LLMs or smaller-scale models.
 
-- **Well-motivated and complementary loss design.** The three losses (delayed EOS, token-level uncertainty, sequence-level token diversity) are conceptually distinct and the ablation study (Table 3a) exhaustively tests all 7 combinations, confirming that each contributes positively and the full combination is strictly best. This granularity is rare in adversarial attack papers.
+2. **Three complementary loss objectives together outperform any subset**: The ablation on BLIP-2 (Table 2) shows that the full combination yields 226.72 average length on MS-COCO, while the best single loss achieves 139.54 and the best pair 177.95. This confirms the multi-objective design is necessary for the reported gains (Section 5.3).
 
-- **Consistent and large improvements over baselines across diverse architectures.** The method outperforms adapted sponge samples and NICGSlowDown by a wide margin on all 4 VLMs and both datasets (e.g., BLIP MS-COCO: 318.66 vs. 179.42 vs. 65.83). The evaluation spans encoder-decoder (BLIP), Q-Former + OPT (BLIP-2), and instruction-tuned Vicuna-7B models (InstructBLIP, MiniGPT-4), demonstrating generality.
+3. **Temporal weight adjustment with momentum significantly improves over a naive PGD baseline**: The ablation on optimization modules (Table 3) shows temporal decay + momentum increases generated length from 152.49 to 226.72 on MS-COCO (BLIP-2), demonstrating the optimization technique is a key enabler (Sections 4.2, 5.3).
 
-- **Mechanistic analysis beyond raw metrics.** Grad-CAM visualizations show dispersed attention under verbose images, and CHAIR hallucination metrics rise sharply (e.g., BLIP CHAIR_i from 11.41% to 79.93%), providing a plausible explanation for why longer, less coherent sequences are generated.
+4. **Systematic evaluation across four diverse VLM architectures and two datasets**: Results are reported for BLIP (224M), BLIP-2 (OPT-2.7B), InstructBLIP (Vicuna-7B), and MiniGPT-4 (Vicuna-7B) on both MS-COCO and ImageNet (Table 1), showing the attack generalizes beyond a single model or dataset.
 
-- **Controlled perturbation budget.** The attack uses ε=8 (l∞, on [0,255]) with low LIPIS values, keeping perturbations visually imperceptible.
+5. **Trade-off analysis between perturbation magnitude and attack success / detectability**: The paper varies ε from 2 to 32 and reports both sequence length and LIPIS perceptual dissimilarity (Table 5), giving practitioners a practical view of the strength-detectability trade-off.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Optimization procedure is underspecified, making the method hard to reproduce.** The losses L₁, L₂, L₃ depend on the probability distributions f_i(x') and hidden states g_i(x'), which in turn depend on the auto-regressively generated token sequence. The paper does not state whether (a) teacher forcing with a fixed sequence is used, (b) greedy decoding or nucleus sampling is run during the PGD forward pass, or (c) the computation graph is unrolled through sampling. This is the single most important implementation detail—it determines whether the described method can be straightforwardly implemented as written. The reviewer's claim that the method is "likely infeasible" is overstated (teacher-forced PGD through logits is standard in adversarial ML and is almost certainly what is done here), but the paper's silence on this point is a genuine barrier to reproducibility.
+1. **Trajectory mismatch in loss computation is not discussed**: The losses L₁, L₂, L₃ are defined over the generated token positions i=1,…,N. During optimization at iteration t, the VLM must generate some sequence to determine these positions and compute the losses. The paper never specifies whether it uses a greedy decoding pass with the current perturbation x′_{t-1} to get the token sequence, nor does it discuss how gradients propagate through (or around) the non-differentiable sampling operation used at inference time. This is a known challenge in adversarial attacks on autoregressive models: the gradient signal only touches the softmax logits, not the discrete token selection, so there is a disconnect between the loss landscape and the actual generation behavior. While many papers in this area accept this and rely on empirical validation, the omission of any discussion is a significant gap. The paper would be stronger if it addressed this (e.g., by confirming that gradients from the current forward pass transfer to the next iteration's trajectory, or by using a differentiable relaxation).
+
+2. **No confidence intervals or variance reported despite sampling-based evaluation**: The paper reports averages over three runs and mentions "considering the randomness of sampling modes," yet the main results table (Table 1) and all ablation tables report only point estimates. Given the stochasticity of nucleus sampling, readers cannot assess whether the differences between methods (e.g., verbose images vs. NICGSlowdown on InstructBLIP: 140.35 vs. 93.70) are statistically significant. This is particularly important because the gap is narrower on some model/method combinations.
 
 ### Minor
 
-- **No error bars or variance estimates.** All results are averages over 3 runs with no standard deviations, confidence intervals, or significance tests. Given the known variance of nucleus sampling, the reader cannot assess whether the reported gaps over baselines are statistically meaningful. This is standard practice in many ML papers but the paper would be stronger with error bars (especially for the smaller-margin cases like InstructBLIP where verbose images give 140.35 vs. NICGSlowDown's 93.70—a gap that, while large in relative terms, lacks variance context).
+1. **Baselines compared without adaptation the paper itself argues is necessary**: The paper claims in Section 2 that sponge samples and NICGSlowdown "cannot be directly applied to VLMs" for two reasons (LLM/small-model focus; NICGSlowdown's reliance on specific output token logits incompatible with VLM sampling). Yet the experiments compare against exactly these methods without any modification. While verbose images clearly outperform them (making the comparison favorable to the authors), the paper's own critique of these baselines undermines the claim that the comparison is rigorous. The paper should either adapt the baselines to be VLM-compatible or soften the claim that they "cannot be directly applied."
 
-- **Baseline adaptations are not described.** The paper states that sponge samples and NICGSlowDown "cannot be directly applied to VLMs" (Section 2) yet uses them as baselines by applying PGD within the same threat model. Exactly which activations were maximized for sponge samples (all layers? last layer? which norm?) and which token logits were minimized for NICGSlowDown on auto-regressive VLMs is not specified. Without this, the reader cannot separate the benefit of the proposed losses from the choice of adaptation strategy.
+2. **Linear correlation claim in Fig. 1 is not quantified**: The paper states energy and latency are "approximately positively linearly correlated" with sequence length based on scatter plots, but reports no correlation coefficients or goodness-of-fit measures. The scatter plots show considerable variance. Quantifying this relationship (e.g., Pearson r) would strengthen the motivation.
 
-- **Correlation evidence for the energy/latency–length link is only qualitative.** Figure 1 shows scatter plots but reports no correlation coefficients or R² values. The paper's entire attack strategy is built on the premise that maximizing length is a reliable proxy for energy-latency cost. The paper would be more convincing with Pearson/Spearman correlations and a brief discussion of whether the relationship holds equally for all model–dataset pairs (the MiniGPT-4 plots in Figure 1 show substantial scatter).
+3. **Token diversity loss (L₃) has a confound with sequence length**: L₃ maximizes the nuclear norm of the hidden-state matrix. The rank (and thus nuclear norm) of an N×C matrix is bounded by min(N,C), so longer sequences automatically have higher potential rank. The ablation shows L₃ alone increases length from ~8 to 104, but some of this gain may be an artifact of the confound. An analysis controlling for sequence length (e.g., normalizing the nuclear norm by N) would clarify whether L₃ independently encourages diversity.
 
-- **Temporal weight parameters are presented without justification or sensitivity analysis.** The log-decay parameters (a₁=10,b₁=−20,a₂=0,b₂=0,a₃=0.5,b₃=1) are listed without derivation, grid search, or sensitivity study. The ablation (Table 3b) shows these components are critical (removing both drops length from 226.72 to 152.49), but whether the specific functional form and parameter values are near-optimal or fragile is unknown.
+4. **Temporal decay parameters appear ad hoc with no sensitivity analysis**: The temporal decay functions T₁(t)=10·ln(t)−20, T₂(t)=0, T₃(t)=0.5·ln(t)+1 are stated with no justification or sensitivity analysis. The ablation shows the combination helps, but it is unclear whether these specific forms and coefficients are critical or whether other choices would work as well or better.
 
-- **No comparison against a "trivial max-length" baseline.** Since generations are capped at a maximum length (512 tokens), one simple baseline would be to check whether prompting the model to "describe the image in great detail" or similar instruction-based approaches could also increase length, to isolate the need for adversarial perturbations.
+5. **Attack severely degrades output quality**: The CHAIR hallucination metrics (Table 4) show that verbose images increase hallucination rates dramatically (e.g., BLIP CHAIRᵢ jumps from 11.41% to 79.93%). While this does not invalidate the attack (a DoS attack does not need to produce good outputs), it does mean the longer sequences consist largely of nonsensical/hallucinated content, which could be trivially detectable as anomalous. The paper does not discuss this detection risk.
+
+6. **No code or detailed reproducibility materials**: While code release is not mandatory, the ambiguity around the trajectory computation (point 1 in Major) would be substantially mitigated by providing an implementation that clarifies the forward-pass procedure at each optimization step.
 
 ### Trivial
-
-- The normalization in Equation (4) uses ||L₂||₁ in the numerator for all three weight formulas. This is a deliberate design choice (using L₂ magnitude as a reference scale) rather than an error, but it deserves a brief explanatory comment to avoid confusion.
+None.
 
 ## Nice-to-Haves
 
-- Report the computational cost of crafting verbose images (e.g., GPU-hours per sample for 1000 PGD iterations). This would clarify the attack's practicality.
-- Include qualitative examples showing original vs. verbose images and their corresponding generated captions, to help readers assess perceptual similarity and the nature of hallucinated content.
-- Briefly discuss potential mitigations (input filtering, length monitoring, time-out mechanisms) to strengthen the paper's security framing.
+- Testing with alternative sampling policies (greedy decoding, top-k, temperature scaling) to assess whether the attack is robust across decoding strategies.
+- Black-box transferability evaluation (whether verbose images optimized for one VLM affect others).
+- Perplexity, repetition rate, or distinct n-gram counts of generated sequences to characterize the nature of the long outputs beyond hallucination.
+- A discussion of potential defenses (e.g., input sanitization, anomaly detection on output length, constrained generation).
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **Harsh critic's "Structural" classification of the optimization issue as fatal.** The reviewer claimed the method is "likely infeasible." In fact, teacher-forced PGD through differentiable logits/hidden states is standard in adversarial ML and feasible for 7B models at 1000 iterations (amortized over many samples). The issue is clarity and reproducibility, not feasibility. Downgraded from fatal to major.
-
-- **Harsh critic's Claim 5 "notation inconsistency" about Eq. 4.** The reviewer asked whether `||L₂||₁` in the numerator should be `||L₁||` for λ₁. This is a deliberate design choice (using L₂ as a common reference scale), not an error. The criticism is factually wrong and removed.
-
-- **Strength Finder's strength #1 about empirical evidence for the correlation.** While Figure 1 does show scatter plots, the evidence is weak (no R²). This strength is partially qualified by the weakness above. Kept as a qualified strength.
-
-- **Strength Finder's generic strengths.** Several strengths were generic ("timely and underexplored problem," "intuitively motivated") and were dropped as superficial. The remaining strengths are concrete and specific to the paper's content.
+- *"Uncertainty loss can cause gibberish or break generation entirely"* — The paper already reports hallucination rates (CHAIR) which characterize this effect. The attack's purpose is to induce length, not quality; reporting quality degradation is a feature, not a missing analysis.
+- *"The paper does not specify whether N in L₁ is fixed or changes during optimization"* — Algorithm 1 computes losses at each iteration t on x′_{t-1}, implying a forward pass with the current perturbation. The generated length N naturally depends on the current perturbation, which is how PGD works in this setting.
+- *"Grad-CAM qualitative interpretation does not demonstrate causal link"* — The Grad-CAM analysis is presented as visual interpretation ("we conjecture"), not as causal proof. It is appropriately qualified.
+- *"The paper does not discuss whether the attack could work in a black-box setting"* — The paper clearly states a white-box threat model in Section 3.1 and correctly scopes the contribution. Asking for black-box extension is scope creep.
+- *"Delayed EOS loss averaging over all positions — N depends on generated sequence"* — Already addressed by the major weakness on trajectory mismatch; this specific sub-point is a restatement.
+- *"Momentum weight update confusing: λ′ⱼ(t) vs λⱼ(t)"* — Algorithm 1 defines λ′ⱼ(t) = m × λ′ⱼ(t-1) + (1-m) × λⱼ(t), which is standard momentum. The notation is clear enough.
+- *"The paper cites Fazel (2002) but provides no analysis"* — The paper correctly cites the nuclear norm as a convex relaxation of rank minimization, which is a standard textbook-level reference. No further analysis is needed.
 
 ## Novel Insights
 
@@ -62,27 +69,25 @@ None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add standard deviations** (at least over the 3 runs already reported) for all main results and consider running more seeds (5–10) for a subset to establish statistical significance.
-2. **Clarify the forward/backward pass** during PGD optimization: specify whether teacher forcing with the greedily-decoded sequence is used, whether nucleus sampling or greedy decoding is used during attack optimization, and report approximate GPU-hours per sample.
-3. **Describe baseline adaptations** precisely: for sponge samples, state which layers' activations are maximized and which norm is used; for NICGSlowDown, state which token logits are minimized and how the objective is handled for auto-regressive VLMs with stochastic sampling.
-4. **Report Pearson/Spearman correlation** and R² for Figure 1, or at minimum acknowledge the scatter and discuss whether the linearity assumption holds uniformly.
-5. **Add a sensitivity analysis** for the temporal weight parameters (a₁,b₁,a₃,b₃) or justify the chosen values through a simple search procedure.
-6. **Include qualitative examples** (original image → verbose image → original caption → verbose caption) to help readers intuitively understand the attack's effect.
+1. Run multiple optimization trials with different random seeds and report confidence intervals (or standard deviations) on all metrics, especially for the main results table.
+2. Add a paragraph in Section 4 explaining exactly how the forward pass is performed at each PGD iteration: are generated tokens obtained via greedy decoding, or from the same nucleus-sampling used at test time? If the latter, discuss why gradients from a sampled trajectory are effective despite the non-differentiable sampling operation.
+3. Report Pearson correlation coefficients for the energy-length and latency-length relationships in Fig. 1.
+4. For the L₃ token diversity loss, add a version that normalizes the nuclear norm by N (or by √N) to disentangle diversity from sequence-length effects.
+5. Provide the code or pseudocode for the full optimization loop (including the forward pass) in the supplementary material.
 
 ## Score and Decision
 
-**Anchor comparisons:**
+**Calibration anchors** (all from the calibration set):
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7OO8tTOgh4.md` (Non-targeted Adv. Attacks on VLMs) | 5.25 | Similar domain (VLM adversarial attacks with multiple losses). That paper was weaker on ablations but similar on missing error bars and baseline comparisons. This paper has stronger ablations and wider model coverage. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wvFnqVVUhN.md` (Failures to Find Transferable Image Jailbreaks) | 6.25 | More comprehensive experiments (40+ models) and clearer conclusions, accepted. This paper is narrower in scope but has a novel problem formulation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Zt4b6yJ3yo.md` (DoS Poisoning Attacks against LLMs) | 4.00 | Similar threat model (DoS), but different approach (data poisoning vs. adversarial). That paper was criticized for novelty; this paper has better novelty but similar underspecification issues. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/q8XGHj7yrC.md` (Are Large VLMs Robust to Adv. Visual Transformations?) | 3.50 | Confused threat model and conceptual flaws. This paper has cleaner formulation and no such conceptual problems. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/PdA9HAxO4w.md` (Universal Adv. Perturbations against VLP) | 5.00 | Similar score band. That paper had underspecified methodology and limited comparison, but comprehensive experiments. Comparable quality overall. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/X1OfiRYCLn.md` (Dynamic Multimodal Evaluation) | 7.50 | Higher-quality paper with clearer methodology and comprehensive evaluation. This paper is further from this anchor. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/wvFnqVVUhN.md` (VLM jailbreak transfer) | 6.25 | More rigorous experimentation (40+ models, confidence intervals), stronger contribution framing. The current paper is less thorough experimentally. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/m4eXBo0VNc.md` (Engorgio prompt on LLMs) | 5.75 | Very similar contribution (DoS via sequence length), but on LLMs rather than VLMs. Slightly better experimental rigor (multiple perturbation magnitudes, code provided). The current paper's VLM focus is a reasonable extension. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7OO8tTOgh4.md` (MIE attack on VLMs) | 5.25 | Similar scope (adversarial attack on VLMs) but targets caption quality, not sequence length. The current paper has stronger experimental evaluation (more models, ablations). |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/B6Sdw56GQJ.md` (DoS on LLM safeguards) | 4.75 | Different DoS attack vector (prompt injection into safeguards). Less thorough evaluation. The current paper is stronger in experimental scope. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/Zt4b6yJ3yo.md` (DoS poisoning on LLMs) | 4.00 | Weaker experimental design, unclear novelty. The current paper is substantially stronger in both method novelty and evaluation. |
 
-The paper addresses an original and timely problem, the three-loss design is well-motivated and validated by fine-grained ablation, and the results are consistently strong across diverse models. However, the underspecified optimization pipeline (how gradients flow through the auto-regressive generation during PGD), missing variance estimates, undescribed baseline adaptations, and ad hoc temporal weight parameters prevent the paper from being immediately reproducible or fully convincing. With clarification of the optimization details, addition of error bars, and better documentation of baselines, this could be a solid contribution. In its current form, the weaknesses are addressable but nontrivial.
+The paper makes a genuine contribution — it identifies a novel attack surface on VLMs (energy-latency DoS via verbose images), proposes a coherent method with three well-motivated losses, and provides reasonably broad evaluation. However, the lack of discussion around the trajectory/gradient approximation issue, absence of confidence intervals, ad hoc temporal parameters, and somewhat contradictory baseline treatment prevent it from being a strong accept. Relative to the Engorgio paper (5.75), the VLM-specific contribution is valuable but the methodological clarity and experimental rigor are slightly lower. Relative to the MIE paper (5.25), this paper has stronger experiments but similar methodological gaps.
 
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

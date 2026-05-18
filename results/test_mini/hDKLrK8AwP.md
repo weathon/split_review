@@ -1,88 +1,85 @@
-Now I have a thorough understanding of the paper and calibration anchors. Let me synthesize the final review.
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-The paper tackles the underexplored problem of readability in automatically generated SVG code. It proposes three desiderata (good structure, appropriate element use, redundant element removal), three metrics (SPI, ESS, RQ) to quantify each, and three differentiable proxy losses (L_SC, L_EA, L_RR) that can be added to any SVG-generation pipeline. Experiments on font reconstruction and a GPT-3.5 question-answering study are presented.
+This paper tackles the under-explored problem of SVG code readability in generative models. It proposes three readability desiderata (Good Structure, Appropriate Element Use, Redundant Element Removal), three corresponding metrics (SPI, ESS, RQ), and three differentiable proxy losses (L_SC, L_EA, L_RR) for optimizing readability during training. Experiments on the SHAPES dataset (evaluated via GPT-3.5 question-answering) and SVG-Fonts dataset show improvements on the proposed metrics, albeit with accuracy trade-offs.
 
 ## Strengths
 
-- **First systematic framework for SVG code readability.** The paper moves beyond the informal observation that auto-generated SVG code is hard to read by explicitly defining three desiderata (Sections 2.1) and three corresponding metrics (Section 2.2). Prior SVG generation work focused entirely on visual accuracy; this work is the first to operationalize readability as a measurable property. This framing is valuable for the community.
+- **First formal attempt to define SVG code readability desiderata (Section 2.1).** The paper identifies three concrete principles — logical structure, element simplicity, and brevity — that are intuitive, domain-appropriate, and provide a foundation the community can build on. Prior work (Im2Vec, DeepVecFont, etc.) focused purely on visual fidelity, making this a useful step.
 
-- **Differentiable proxy losses that connect readability to gradient-based optimization.** Converting discrete readability desiderata into differentiable functions (Section 3.2) is a non-trivial engineering contribution. The losses (L_SC, L_EA, L_RR) can be dropped into any existing SVG generator that uses differentiable rendering, lowering the barrier for future work to incorporate readability.
+- **Differentiable proxy losses with evidence of efficacy (Sections 3.2.1–3.2.3, Table 3).** The three losses (L_SC, L_EA, L_RR) are designed to be differentiable, circumventing the discrete nature of SVG element selection. The ablation study (Table 3) provides direct evidence: L_SC improves SPI, L_EA improves ESS, and L_RR improves RQ when added to a base VAE. The paper is also transparent about the limitations of each proxy, which is good scientific practice.
 
-- **GPT-3.5-based evaluation provides an automated readability proxy.** Using an LLM to answer visual questions from SVG code is a creative approach to automated readability assessment. The reported gap between the proposed method and baselines on this task (Table 1) is the paper's strongest direct evidence that the SVGs are more interpretable.
+- **Systematic ablation and weight-sensitivity study (Tables 3, 4).** The paper decomposes the effect of each loss term and examines weight sensitivity, confirming independent contributions from each component. This level of analysis goes beyond simply reporting aggregate metrics.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The metrics are not validated against human judgment.** The paper's entire claim that readability is improved rests on SPI, ESS, and RQ. But none of these metrics is validated against any human annotation, user study, or established readability heuristic. Without evidence that lower SPI / lower ESS / higher RQ correlates with faster human editing time, fewer errors, or any human-perceived notion of readability, the reported numbers are uninterpretable. This is the single most important missing piece — it prevents the evaluation from supporting the paper's central claim.
+- **RQ metric is not operationalized (Section 2.2.3).** The formula RQ = 1/(1+e^{−(1/N)ΣΔR(e_i)}) is given, but ΔR(e_i) — "the change in rendering when an element is omitted" — is never defined with a concrete formula or algorithm. Without specifying how ΔR is computed (pixel-space difference? perceptual metric? what distance function?), the RQ metric cannot be computed or reproduced. This is a genuine gap in the paper's core contribution. (Note: the proxy loss L_RR uses a different, operationalized approach based on gradient magnitudes, but that does not fix the metric definition.)
 
-- **SPI has practical saturation issues that undermine its discriminative power.** The SPI formula is 1/(1+e^{-Σ(|P(e_{i+1})-P(e_i)| - 1)}). For any SVG rendered at typical resolutions (the paper uses 128×128), the Euclidean distance between consecutive elements is almost always > 1 pixel, making each term in the sum positive. Summing N-1 positive terms and passing through a sigmoid yields SPI ≈ 1 for nearly all SVGs regardless of ordering quality. The sigmoid does not normalize for image scale or element count, so the metric cannot meaningfully distinguish between well-ordered and poorly-ordered SVGs in practice. This is a structural issue with the metric itself, not a nitpick.
+- **No external or human validation of the readability metrics.** The paper claims SPI, ESS, and RQ measure readability, but never validates this claim against human judgment. The font reconstruction experiments (Table 2) show improvements on these metrics, but since the method is trained with losses derived from them, this is a self-referential evaluation. Without demonstrating correlation with human readability ratings or a downstream editing task, it is unclear whether optimizing these metrics leads to practically more readable SVGs. The paper itself acknowledges the metrics are "a reflection of the best we can offer at this juncture" (Section 2.2.3), but offers no external grounding.
 
-- **RQ metric computation for evaluation is underspecified.** The metric RQ is defined (Section 2.2.3) in terms of ΔR(e_i), "the change in rendering when an element e_i is omitted" — a discrete, combinatorial computation. The loss L_RR (Section 3.2.3) uses a differentiable gradient-magnitude proxy. The paper never states which method is used to compute the RQ values reported in Tables 2 and 3. If the omission-based definition is used, the threshold for "significant change" is unspecified. If the gradient proxy is used, the evaluation is circular (the loss directly optimizes the thing being measured). This ambiguity affects the core experimental results.
+- **GPT-3.5 study (Section 4.2) lacks experimental rigor.** The study design is underspecified: no details are given about exact prompts, number of questions, question templates, or how randomness/variance was controlled. The comparison is also confounded — the proposed VAE is designed to output simple shape primitives, while baselines (MultiImplicits, Im2vec) produce path-heavy SVGs by design. The paper states "predefining the number of simple shapes in accordance with the characteristics of the test images" (Section 4.2), which further suggests the advantage may stem from architectural choices rather than the readability losses. An ablation of the losses in this experiment is not performed, so the claim that readability losses cause the improvement is unsupported.
 
-- **The GPT-3.5 study is insufficiently described for reproducibility.** Section 4.2 does not specify: (a) the exact format in which SVG code is presented to GPT-3.5 (full XML? filtered?), (b) the exact question templates and the number of questions, (c) whether answers are extracted via prompting or post-processing, or (d) how accuracy is computed. Reproducibility requires these details.
+- **Missing SOTA baselines in font reconstruction.** The paper cites DeepVecFont (Wang & Lian, 2021) and LIVE (Ma et al., 2022) as related works, but does not compare against them. The chosen baselines (MultiImplicits, Im2vec) are from 2021 and are not the strongest available for font vectorization. Given that the proposed method shows lower accuracy than even these baselines (Table 2), comparison with more recent methods is essential to contextualize the readability-vs-accuracy trade-off.
 
 ### Minor
 
-- **The ablation study (Table 3) is partially circular.** L_SC directly penalizes a quantity correlated with SPI, and L_RR's gradient proxy is correlated with RQ. So observing that L_SC improves SPI and L_RR improves RQ is expected and does not independently validate the loss design. (The L_EA → ESS link is less circular since L_EA uses edge detection on rasterized output while ESS measures element type complexity, making this the most interesting result in the ablation.)
+- **Loss weights omitted from main results.** The paper states "For brevity, the weight of each term is omitted from the equation" (Section 3.3) and does not report the default configuration used for Tables 1–2. While the parameter study (Table 4) explores weight effects, the main results are not tied to a specific configuration, impeding reproducibility.
 
-- **The accuracy–readability trade-off is acknowledged but not properly characterized.** Table 2 shows the proposed method degrades SSIM, L1, and s-IoU relative to baselines. The paper frames this as a "balanced trade-off" but provides no analysis (Pareto front, ablation across weight settings, or downstream task) to help a practitioner decide whether the readability gain justifies the accuracy loss. Without that, the trade-off claim is unfalsifiable.
+- **No discussion of computational cost.** The redundancy loss L_RR requires computing per-element gradients through the differentiable renderer for every training step. No runtime or training-time analysis is provided, making it difficult to assess practical feasibility.
 
-- **The architecture description is incomplete.** The decoder produces "various SVG primitives such as rectangles, circles, and more" (Section 3.1), but the paper does not describe how element types and counts are determined. Is the number of elements fixed or learned? How does the decoder decide between outputting a `<rect>` vs a `<path>`? This matters for understanding how the losses interact with the generation process.
-
-- **Complexity scores for ESS are ad-hoc with no justification.** Assigning 1 to `<rect>/<circle>/<line>` and 3 to `<path>` is a reasonable starting point, but the paper offers no rationale for these specific values or the two-tier scheme. This is a minor issue since any such scoring requires some judgment, but the paper could strengthen this by calibrating against human complexity ratings.
+- **Accuracy degradation unaddressed.** The paper honestly acknowledges the accuracy trade-off (Section 4.3), but does not discuss how to mitigate it or under what conditions the trade-off is acceptable. A more detailed analysis of failure cases (e.g., when readability optimization causes significant visual degradation) would strengthen the paper.
 
 ### Trivial
-
-- The paper states the sigmoid "normalizes the result" in several places (e.g., lines 72, 91, 106, 145). The sigmoid maps to (0,1) but does not normalize for element count or image scale — this wording is misleading and should be corrected.
+None.
 
 ## Nice-to-Haves
 
-- A user study (e.g., measuring developer editing time or error rates on generated SVGs) would directly validate whether the readability metrics capture anything humans care about.
-- Reporting a Pareto front of accuracy vs. readability across multiple loss weights would let readers assess the trade-off quantitatively.
-- A synthetic experiment with ground-truth readable/unreadable SVGs would test whether the metrics discriminate as intended.
+- A human evaluation study correlating SPI/ESS/RQ with human readability ratings would validate the entire framework.
+- Comparison against simple baselines that directly minimize element count or path length would test whether the proposed losses add value beyond trivial regularization.
+- Applying the framework to more complex graphics (logos, icons, clip art) beyond fonts and synthetic shapes.
 
 ## Removed Points
 
-- **Criticism that "Two SVGs with identical visual layouts but different code orderings would produce different SPI values, which is arguably opposite to what readability should capture":** Removed — this misunderstands the metric. Code ordering is a key part of readability, and SPI is designed to penalize poor ordering. This is the intended behavior.
-- **Criticism about "no baseline comparison for GPT-3.5 on raw raster images":** Removed — the study is about SVG code readability, not image understanding from raster inputs. Comparing against raster baselines tests a different question.
-- **Criticism that "the reported table (image) is not readable in the text":** Removed — parser artifact; tables as images in the PDF are standard and readable in the original submission.
-- **Claim that the ablation is "nearly tautological" across all three losses:** Partially removed — this is true for L_SC→SPI and partly for L_RR→RQ, but L_EA→ESS is non-trivial (edge-detection loss improving element-type-based metric). The weakness is kept in Minor form, softened.
-- **Strength about "Comprehensive ablation and parameter studies":** Removed — dropped from Strengths because the ablation mostly validates expected correlations; it is not a genuine strength relative to the paper's core claims.
+The following points from the original reviews were removed under the review guidelines:
+
+- Criticisms questioning the SPI metric's validity ("poorly defined", "not measuring what it claims") — the SPI formula is clearly defined (Section 2.2.1) and conceptually sound: it penalizes large visual distances between consecutive code elements, which directly reflects structural coherence. The critic's objection that it "simply penalizes large Euclidean distances" describes exactly what it is supposed to do.
+- Criticism about ESS conflating count with complexity — while the metric is simplified, the paper explicitly acknowledges this, and the loss function L_EA uses a different approach (edge detection) that the paper discusses honestly.
+- Reproducibility concerns about undisclosed hyperparameters beyond loss weights — the VAE architecture and training setup are described in reasonable detail for a conference submission.
+- The claim that "the paper's empirical foundation is unsound" due to metric invalidity — this overstates the severity; two of three metrics are operationalized, and the issues are limitations rather than invalidity.
+- Formatting/style nitpicks and missing related work mentions (per guidelines, these cannot be verified externally).
+- Strengths from the Strength Finder that were generic ("addresses an important problem") or contradicted by verified weaknesses.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight (that SVG readability can be decomposed into structure, element appropriateness, and redundancy) is the paper's own framing, and I see no additional novel synthesis emerging from the reviews.
+None beyond the paper's own contributions. The two reviews agree on the paper's core strengths (the framework and losses) and core weaknesses (lack of human validation, incomplete metric definition, weak GPT-3.5 study), with no genuinely novel synthesis emerging from the combination.
 
 ## Suggestions
 
-1. **Validate the metrics against human judgment.** This is the most impactful improvement. A small user study with developers editing SVGs (measuring time, error rate, or subjective ratings) would either confirm that SPI/ESS/RQ correlate with human-perceived readability or reveal that they don't. Without this, the core claim is unsubstantiated.
-
-2. **Fix SPI's scale sensitivity.** Either normalize the distance by image dimensions or element count, or use a per-element ranking correlation (like a variant of Kendall's τ between code order and spatial proximity) instead of the current unbounded sum through a sigmoid.
-
-3. **Clarify RQ evaluation.** State explicitly whether RQ in Tables 2 and 3 is computed via actual element omission (with the threshold T documented) or the gradient proxy, and discuss any resulting circularity concerns.
-
-4. **Provide full GPT-3.5 study details** (prompt template, question list, answer extraction method, and number of samples) in an appendix to enable reproducibility.
-
-5. **Characterize the accuracy–readability trade-off** with a weight-sweep experiment showing SPI/ESS/RQ vs. SSIM across a range of loss weights, giving practitioners the information they need to decide whether the trade-off is acceptable.
+1. **Operationalize the RQ metric** by specifying how ΔR(e_i) is computed (e.g., per-element masking followed by L1 distance in pixel space between original and masked renders).
+2. **Validate the metrics externally** via a human study where participants rate SVG code readability, and report Spearman correlation between SPI/ESS/RQ and human ratings.
+3. **Compare against a trivial baseline** that simply minimizes element count or total path command length, to isolate whether the proposed losses provide benefit beyond naive complexity reduction.
+4. **Report loss weights** used in the main experiments and include a reproducibility statement with hyperparameter configurations.
 
 ## Score and Decision
 
-**Anchor comparison:**
+### Calibration Anchors
 
-| Path | Avg Human Score | Comparison |
-|------|----------------|------------|
-| AutomaTikZ (v3K5TVP8kZ) | 6.50 (Accept) | Much stronger: has human evaluation, SOTA results, released dataset. The present paper has no human eval and weaker results. |
-| Sketch2Diagram (KvaDHPhhir) | 6.25 (Accept) | Stronger: human evaluation, benchmark dataset. The present paper's validation is substantially weaker. |
-| SVG+LLM (pwlm6Po61I) | 5.67 (Reject) | Similar topic area. That paper had more comprehensive experiments across 3 tasks. The present paper has a narrower scope with weaker validation. |
-| Stroke-clouds (O2jyuo89CK) | 5.67 (Accept) | Both have validation gaps (no quantitative results there, no human eval here). That paper was accepted despite weaknesses; its novelty was stronger. |
-| VDLM (ubIxE93FLM) | 4.50 (Reject) | Comparable. Both propose a framework for vector graphics readability/interpretability and both have significant validation gaps. |
-| Proxy loss paper (YWaXJWd9nu) | 4.50 (Reject) | Comparable — both deal with proxy losses where the connection between loss and target is incompletely validated. |
-| Code readability (diXvBHiRyE) | 3.60 (Reject) | Similar: proposes readability metrics without sufficient validation against human judgment. |
+| Anchor | Avg Score | Comparison |
+|--------|-----------|------------|
+| AutomaTikZ (v3K5TVP8kZ) | 6.50 | Much stronger: has human evaluation, comprehensive baselines, clear practical contribution (dataset + models) |
+| Stroke-clouds (O2jyuo89CK) | 5.67 | Stronger theoretical grounding but limited experiments; our paper has more evaluation but weaker theoretical foundation |
+| SVG+LLM Visual Understanding (pwlm6Po61I) | 5.67 | Comparable topic but cleaner experiments; our paper has more methodological issues |
+| RACE Code Quality Benchmark (diXvBHiRyE) | 3.60 | Similar pattern — proposes metrics without human validation, limited scope; comparable quality |
+| Disentanglement Metrics (hv8l922Ad7) | 3.40 | Similar structure (proposing new metrics with validation gaps); our paper has slightly more practical framing |
+| Protein Gen. Model Metrics (1S8ndwxMts) | 3.00 | Systematic analysis of existing metrics rather than proposing new ones; less ambitious |
 
-The paper identifies a genuine gap and proposes a reasonable framework, but the validation is insufficient to support the core claims. The metrics have technical issues (SPI saturation, RQ ambiguity), none are validated against human judgment, the GPT-3.5 study is underdescribed, and the accuracy trade-off is not properly characterized. Relative to the calibration anchors, this paper sits between the 3.60–4.50 range — papers that had interesting ideas but insufficient evidence.
+The paper proposes a well-motivated framework for SVG code readability and provides differentiable objectives backed by ablation evidence. However, the evaluation is critically weakened by (a) one metric (RQ) that is not fully operationalized, (b) the lack of any external validation of the metrics against human judgment, making the improvements in SPI/ESS/RQ self-referential, and (c) a GPT-3.5 study that lacks rigor and confounds architectural choices with loss effects. Missing strong baselines further undermines the font reconstruction results. Relative to the calibration anchors, the paper sits below medium-quality publications but above the lowest tier — it has a genuine idea and some evidence, but the execution falls short of what is needed to support the core claims convincingly.
 
-MY FINAL SCORE: <score>4.0</score>
+MY FINAL SCORE: <score>3.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

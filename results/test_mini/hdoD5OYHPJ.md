@@ -1,86 +1,88 @@
-Now I have all the information needed. Let me construct the final consolidated review.
-
----
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes AutoCLIP, a method that reweights prompt template contributions per image at zero-shot inference time using a single gradient step on a logsumexp objective, entirely in the embedding space (no extra encoder passes). The method is simple (a few lines of code), unsupervised, and improves accuracy on ~85% of 990 tested configurations across 7 datasets, 6 VLMs, and 3 prompt strategies, with an average gain of 0.45 pp and peak gains of ~3 pp.
+This paper proposes AutoCLIP, a method that improves zero-shot CLIP classification by automatically learning per-image weights for prompt templates at test time. Instead of uniformly averaging all prompt-template class descriptors, AutoCLIP performs a single gradient ascent step on a logsumexp objective in embedding space to up-weight templates whose descriptors are more similar to the test image. A bisection-based entropy tuning mechanism makes the step size self-calibrating, yielding a method with essentially one globally fixed hyperparameter (β=0.85). The method is evaluated across 6 vision-language models, 8 datasets, 3 prompt-generation strategies, and template counts from 4 to 500, showing consistent improvements: 0.45 percentage points on average and up to ~3 pp, with improvement in 840/990 settings (~85%).
 
 ## Strengths
 
-- **Clean, well-motivated method with genuine practical advantages.** AutoCLIP performs per-image prompt reweighting via a single closed-form gradient step on logsumexp, entirely in the embedding space without additional forward/backward passes through VLM encoders. This is a concrete practical advantage over test-time prompt tuning methods that require multiple augmentations and backpropagation through text encoders.
+- **Broad and rigorous empirical evaluation**: The paper tests across 6 VLMs (RN50, ViT-B/32, ViT-B/16, ViT-L/14, DataComp ViT-L/14, CoCa ViT-L/14), 8 datasets (including ImageNet variants and fine-grained benchmarks), 3 prompt strategies (CLIP, DCLIP, WaffleCLIP), and 4 template counts. 990 total settings with 7-run averages is genuinely comprehensive and directly supports the claim of consistent improvement.
 
-- **Unusually extensive evaluation.** The paper tests 990 combinations (7 datasets × 6 VLMs × 3 prompt strategies × multiple K values) with 7 runs each and standard errors reported. The scale and rigor of this evaluation substantially exceed what is typical for this sub-area — compare to the calibration anchors in this space (e.g., CARPRT, BaFTA, BAT-CLIP), which evaluate on fewer settings.
+- **Clean, principled method with negligible inference overhead**: AutoCLIP operates entirely in embedding space — one gradient step, no additional forward/backward passes through the VLM encoders, no augmentations, no source data. The closed-form gradient (Section 3.3) enables deployment where autograd is unavailable. The method is simple enough to implement in a few lines of additional code on top of standard CLIP zero-shot inference.
 
-- **Ablations justify key design choices.** The paper compares logsumexp against max, mean, and entropy objectives (Figure for results_tta_losses, confirming logsumexp as best), and ablate β sensitivity (Figure for results_entropy_rate, showing stability over [0.7, 0.9] for most datasets). The weight visualization (Figure for weights) provides compelling qualitative support for the method's intuition.
+- **Entropy tuning via bisection removes dataset-specific step-size tuning**: The β-parameterized entropy reduction (β=0.85) makes the step size interpretable and transferable, and Figure 5 shows accuracy is stable across β ∈ [0.7, 0.9] for most datasets. This is important for zero-shot settings where per-dataset hyperparameter tuning is infeasible.
 
-- **Benefit scales with prompt diversity and size.** The average gain monotonically increases from Δ=0.06 (K=4) to Δ=0.57 (K=200), and is largest for WaffleCLIP (Δ=0.61). This trend is clean empirical evidence that the method leverages prompt set diversity as intended.
+- **Ablation validates the logsumexp objective**: Figure 4 compares logsumexp against mean, max, and entropy objectives on 7 datasets; logsumexp consistently performs best, grounding the design choice empirically.
 
-- **Controlled synthetic experiment provides useful mechanistic insight.** The simple toy model (varying class-prompt entanglement ρ and instance noise ε) offers a plausible explanation for why AutoCLIP helps more on smaller VLMs and less on larger ones, and why it can slightly hurt on ViT-L-14 + ImageNet-C. While the analysis is simplified, the paper appropriately hedges its conclusions.
+- **Controlled analysis provides mechanistic explanation**: The synthetic embedding experiment (Section 5) shows AutoCLIP outperforms both mean and max aggregation under moderate class-prompt entanglement, offering a plausible explanation for why the method helps more on smaller VLMs (higher entanglement) and less on larger ones.
 
 ## Weaknesses
 
 ### Major
 
-- **No empirical comparison to ZPE (Allingham et al., 2023), the most closely related prior work.** The paper correctly notes that ZPE operates in a different setting (batch-level, requiring source-distribution statistics), while AutoCLIP is single-image and source-free. However, these are differences in setting, not incomparability — one could run ZPE in its native setting (batches of test images with pre-computed source features) alongside AutoCLIP on the same datasets and compare accuracy. Without this comparison, the reader cannot assess whether AutoCLIP's more restrictive (but more practical) assumptions come at an accuracy cost or whether it is actually competitive or superior. Since ZPE is the only other method that reweights prompts in embedding space, this omission is a significant evidential gap. CARPRT (a contemporary paper on class-aware prompt reweighting) includes ZPE as a baseline; AutoCLIP should do the same.
+- **Missing comparison to simpler non-gradient weighting schemes on real data**: The paper compares AutoCLIP to uniform weighting (the standard baseline) and to different objective functions (mean, max, entropy) for the gradient step, but never evaluates the obvious simpler alternative: directly computing weights as softmax of per-template similarities (e.g., softmax of the mean similarity across all classes, or softmax of the max similarity). A "softmax aggregation" baseline is included in the controlled setting (Section 5, Figure caption), where it trails AutoCLIP, but this comparison is never run on any real benchmark. Without it, the reader cannot assess whether the gradient ascent machinery is necessary or if the same benefit could be obtained by a trivial closed-form normalization. The experiments as currently designed conflate "non-uniform weighting" with "gradient-based weighting," and separating these is critical for establishing the contribution's value.
 
 ### Minor
 
-- **The "essentially without free hyperparameters" claim is overstated.** The paper states that AutoCLIP "comes essentially without free hyperparameters" (line 42), yet it acknowledges that β (the entropy reduction factor) is "the new free hyperparameter" (line 143). The ablation (Figure for results_entropy_rate) shows that β=0.7 beats the default β=0.85 on several datasets (e.g., Oxford Pets and EuroSAT), and the paper itself recommends β=0.7 for future work. This does not invalidate the method — the β=[0.7, 0.9] range is reasonably stable for most datasets — but the claim of being hyperparameter-free should be softened to reflect that one globally-set hyperparameter (β) exists and modestly impacts results on some datasets.
+- **Modest absolute gains and no formal significance testing**: The average improvement is 0.45 pp, with very small gains on major benchmarks (ImageNet +0.17, ImageNetV2 +0.20) and a negative result on EuroSAT (-0.24 pp). Standard errors across 7 runs are reported in figure captions but are on the order of 0.1–0.2 pp, meaning several per-dataset improvements may be within noise. The paper makes no attempt at statistical significance testing (paired tests, confidence intervals, effect sizes). While formal significance tests are not universally standard in this area, the small effect sizes make the lack of such analysis more consequential than usual.
 
-- **Average gains are modest and the paper could frame this more transparently.** The average gain across all 990 settings is 0.45 pp, and EuroSAT actually degrades (Δ=-0.24). The abstract highlights "up to 3 percent point accuracy," which is accurate (max observed is +2.9 pp) but the full distribution is heavily stacked near zero. The paper does report the 85% improvement rate and the average, but providing a histogram of Δ across all 990 settings would give readers a more complete picture of how often the method helps vs. hurts and by how much.
+- **Method hurts on EuroSAT without sufficient failure analysis**: EuroSAT is the one dataset where AutoCLIP systematically underperforms uniform weighting (-0.24 pp average). The paper offers only a brief hypothesis ("image encoder produces embeddings that are not very informative about image properties") without any deeper analysis — e.g., examining whether the gradient update moves weights in the wrong direction, or whether certain templates are being incorrectly up-weighted. A few case studies or weight visualizations for failure cases would substantially strengthen the paper.
 
-- **The controlled synthetic experiment's conclusions, while hedged, extend beyond what the evidence supports.** The paper uses a simple additive Gaussian noise model (parameter ρ for "entanglement") to explain real VLM behavior (e.g., "for smaller VLMs, the text embeddings are more entangled"). This is a plausible hypothesis, but the paper does not provide any direct measurement of actual class-prompt entanglement in real CLIP models of varying sizes. The hedging language ("possible explanation") is appropriate, but the narrative weight placed on this explanation (it appears in both the controlled setting section and the conclusion of the main experiments) risks over-interpreting a toy model.
+- **Bisection overhead and runtime not quantified**: The paper claims "minor additional computation overhead" but never measures or reports the actual per-image runtime. The bisection procedure for entropy tuning requires multiple evaluations of softmaxentropy(α·g) to find the step size (bisection on α ∈ [0, 10^10]), which adds non-trivial overhead per image. Reporting milliseconds per image and comparing to both the baseline and TPT methods would substantiate the efficiency claim.
+
+- **Controlled setting is suggestive but limited**: The synthetic experiment assumes additive class and prompt means with Gaussian residual noise, which does not realistically model real VLM text encoder behavior. The paper is appropriately cautious ("While the setting is strongly simplified") but occasionally over-interprets the results (e.g., attributing model-size performance differences to "entanglement" without evidence from real embeddings). This experiment is a useful sanity check, not a rigorous explanation.
 
 ### Trivial
 
-- **No runtime numbers provided.** The paper repeatedly claims "minor additional computation overhead" but does not report wall-clock time per image, which would help practitioners weigh the cost-benefit. Given that the method operates entirely in embedding space (no extra encoder passes), the overhead is almost certainly small, but a concrete number would be useful.
-
-- **The default β=0.85 is used in the main experiments, but the ablation later recommends β=0.7.** This creates a minor inconsistency between the reported numbers (β=0.85) and the recommended configuration. The authors should either re-run main experiments with β=0.7 or update the default and recommendation to match.
+- None beyond those already listed.
 
 ## Nice-to-Haves
 
-- A histogram showing the distribution of Δ across all 990 configurations (instead of only averages and standard errors).
-- An analysis of why EuroSAT systematically hurts (e.g., comparing image embedding variance or average similarity to class descriptors across datasets, to test the "uninformative embeddings" hypothesis).
-- A comparison to ZPE under ZPE's native setting (batch + source distribution) to clarify the trade-offs between the two approaches.
-- Ablation on the number of gradient iterations (the paper says preliminary experiments showed no benefit beyond one iteration, but this data is not shown).
+- **Comparison to prior TPT methods (TPT, RLCF) on a subset of datasets**: The paper frames AutoCLIP as a test-time adaptation method and notes its lower compute relative to TPT, but never compares accuracy or runtime against any TPT method. A comparison on even 2–3 datasets with one VLM would ground the claimed accuracy–compute trade-off.
+- **Runtime measurement**: Reporting milliseconds per image for AutoCLIP vs. uniform baseline (and optionally vs. TPT methods) would substantiate the efficiency claim.
+- **Weight visualizations for EuroSAT failure cases**: Figure 6 (Food101 weights) is informative; similar visualizations for EuroSAT would illuminate why the method fails there.
 
 ## Removed Points
 
-- **Strength Finder claim re: "Hyperparameter-free step-size tuning via entropy control"** — The strength is partially valid (the bisection method does automatically determine α given β), but conflicts with the verified weakness that β is a free hyperparameter with tangible impact on results. Moved here because the "hyperparameter-free" framing is inaccurate.
-- **Strength Finder claim: "Consistent accuracy improvement across diverse settings"** — Verified as correct from the paper; kept in strengths above.
-- **Harsh Critic's concern about "up to 3 percent point" rounding** — The largest gain in Table 1 is +2.9 pp, which is appropriately rounded. Not a real issue.
-- **Harsh Critic's claim about the synthetic experiment being "speculative" at a Fatal level** — The paper uses appropriate hedging language ("possible explanation," "likely corresponds"), so this is a minor weakness, not fatal.
-- **Human-finder's (Harsh Critic) demand for "histogram of Δ across 990 settings"** — Kept as nice-to-have, not a core weakness.
+- **β=0.7 being better than β=0.85 "undermines" the paper**: Removed — the paper transparently reports this finding, recommends β=0.7 for future work, and the claim about "default...shared across all experiments" is factually accurate (they used 0.85 across all experiments; the recommendation for future work is separate).
+- **"Fully zero-shot" phrasing is misleading**: Removed — the paper clarifies "does not require any supervision from the target task," which is the standard definition of zero-shot in this literature. Test-time adaptation without labels is consistent with zero-shot classification.
+- **No error bars on Figure 1**: Removed — the figure caption explicitly states "mean and standard error over 7 runs." Error bars are present.
+- **Controlled setting is oversold**: Weakened to minor — the paper explicitly acknowledges the setting is simplified ("While the setting is strongly simplified"), and the interpretations are appropriately hedged.
+- **Missing related works**: Removed per instruction — I cannot verify the existence of missing related works.
+- **Formatting/typo criticisms**: Removed per instruction — these are parser artifacts.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The review surfaces no insight that was not already present in the paper's own framing and results.
+None beyond the paper's own contributions. The core insight — that logsumexp gradient ascent in embedding space with entropy-constrained step sizes yields consistent (if modest) improvements over uniform weighting — is well articulated by the authors themselves. The reviewer trajectory surfaces no deeper observation that the paper does not already make.
 
 ## Suggestions
 
-1. Add an empirical comparison to ZPE (Allingham et al., 2023) on a representative subset of datasets and models. Even if the settings differ (batch vs. single-image, source vs. source-free), running ZPE in its native configuration alongside AutoCLIP would clarify the practical trade-offs.
-2. Soften the "essentially without free hyperparameters" claim to something like "with a single, globally-shared hyperparameter β that is stable over [0.7, 0.9] for most datasets." Alternatively, update the default to β=0.7 based on the ablation evidence.
-3. Add a histogram of Δ accuracy across all 990 settings to help readers assess the full distribution of gains and losses.
-4. Provide a brief runtime measurement (e.g., milliseconds per image added by AutoCLIP) to substantiate the "minor overhead" claim.
-5. Either move the EuroSAT drop from discussion to a more prominent limitation, or provide additional analysis to explain why it occurs.
-
----
+1. Add the softmax aggregation baseline (directly computing w_i = softmax of mean/max similarities across classes) on the main benchmarks. If it matches AutoCLIP's performance, the paper becomes an important negative result. If AutoCLIP clearly surpasses it, the contribution is strongly justified.
+2. Add confidence intervals (e.g., 95% bootstrap CI) or paired difference tests for the main per-dataset improvements to establish statistical reliability.
+3. Report per-image runtime (ms) for AutoCLIP vs. uniform baseline, and discuss the bisection overhead explicitly.
+4. Analyze the EuroSAT failure case: show per-dataset weight distributions and examine whether the gradient update systematically harms performance.
 
 ## Score and Decision
 
-**Calibration Anchors** (all from the human-reviewed corpus):
+### Calibration Anchors (all from human-review corpus)
 
-| Anchor | Path | Avg Score | Comparison to Paper |
-|--------|------|-----------|---------------------|
-| CARPRT | fRpAUgKJhT.md | 5.75 | Similar topic (prompt reweighting for CLIP); CARPRT compares to ZPE but has more limited experiments. AutoCLIP has cleaner method and more thorough eval but lacks ZPE comparison. Slightly weaker than CARPRT due to this gap. |
-| BaFTA | KNtcoAM5Gy.md | 5.50 | Both are lightweight test-time methods for CLIP. BaFTA uses online clustering; AutoCLIP uses gradient on logsumexp. Comparable quality and depth. |
-| BAT-CLIP | z7PhIgVmZU.md | 5.50 | More complex (bimodal TTA with multiple losses). AutoCLIP is simpler and has fewer methodological concerns. Slightly stronger. |
-| InCPL | Rc3RP9OoEJ.md | 5.00 | InCPL uses labeled in-context examples (information leakage concern). AutoCLIP is fully unsupervised and cleaner. Stronger. |
-| DefNTaxS | B2ChNpcEzZ.md | 4.00 | Prompt augmentation via taxonomies. AutoCLIP has more rigorous evaluation and cleaner method. Stronger. |
-| Active TTP | pdzHpQbGrn.md | 2.50 | Poorly motivated with marginal improvements. AutoCLIP is much stronger. |
+**High-scoring:**
+- `5Ca9sSzuDp.md` (avg 8.00) — "Interpreting CLIP's Image Representation via Text-Based Decomposition": Deep mechanistic analysis of CLIP with downstream applications. Far more ambitious and novel than AutoCLIP. AutoCLIP is a solid engineering contribution but not at this level of insight.
 
-AutoCLIP's position relative to these anchors: it is comparable to or slightly better than the 5.5-level papers (BaFTA, BAT-CLIP) on method cleanliness and experimental thoroughness, but the missing ZPE comparison is a real gap that papers in this band typically fill. It is clearly stronger than the 4-5 band papers. It is not at the 6+ level, as the average gains are modest and the method is an incremental (albeit clean and practical) contribution.
+**Medium-scoring:**
+- `kIP0duasBb.md` (avg 6.67) — "Test-Time Adaptation with CLIP Reward": TTA method with broader task coverage (classification, retrieval, captioning). AutoCLIP has cleaner methodology and broader VLM evaluation, but smaller improvements and narrower task scope. Comparable quality.
+- `fRpAUgKJhT.md` (avg 5.75) — "CARPRT: Class-Aware Prompt Reweighting": Very similar topic (prompt weighting for VLMs), similar magnitude of gains. AutoCLIP has broader evaluation (more models, prompt strategies) and a more principled per-instance adaptation mechanism. Slightly stronger than CARPRT.
+- `KNtcoAM5Gy.md` (avg 5.50) — "BaFTA: Backprop-Free Test-Time Adaptation": Similar setting (backprop-free TTA). AutoCLIP is cleaner methodologically and has more thorough evaluation. Comparable or slightly stronger.
+- `lF9QXpfNHm.md` (avg 4.67) — "Efficient Open-world Test Time Adaptation": More complex setting with more methodological issues. AutoCLIP is clearly stronger.
+
+**Low-scoring:**
+- `pdzHpQbGrn.md` (avg 2.50) — "Active Test Time Prompt Learning": Poorly motivated, marginal gains, weak novelty. AutoCLIP is substantially stronger on all dimensions.
+
+AutoCLIP sits between the 5.75–6.67 range — cleaner and more thoroughly evaluated than CARPRT (5.75) and BaFTA (5.50), but with smaller absolute gains and a missing baseline that the 6.67 anchor papers handle better. The method is well-motivated and the evaluation breadth is commendable, but the core weakness (no real-data comparison against a simple softmax weighting baseline) tempers the contribution.
+
+**Score: 5.5** — The paper makes a credible incremental contribution with strong empirical breadth, but the missing baseline comparison and modest effect sizes leave the core claim incompletely supported. The method is clean and the entropy-tuning mechanism is thoughtful, but the evidence does not yet establish that the gradient-based approach is necessary over simpler alternatives.
+
+**Decision: Reject** — The paper should add the missing softmax-aggregation baseline on real data and strengthen the statistical analysis before it is ready for acceptance. The contribution is plausible and potentially useful, but in its current form the main claim is not fully substantiated.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

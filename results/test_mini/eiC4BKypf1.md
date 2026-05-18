@@ -1,94 +1,86 @@
-Now I have sufficient calibration. Let me compose the final review.
+Now I have sufficient information from the paper and anchors. Let me synthesize the final review.
 
 ## Summary
 
-The paper proposes CENTaUR, which uses frozen LLaMA-65B embeddings with a finetuned linear probe to predict human choices in decision-making tasks. On two domains (decisions from description using choices13k, and decisions from experience using the horizon task), CENTaUR achieves lower negative log-likelihood than two specific cognitive models (BEAST and a hybrid model). The paper further shows that CENTaUR captures human-like choice patterns, models individual differences, and — when finetuned jointly on two tasks — generalizes to a held-out third task.
+This paper introduces CENTaUR, which trains a linear classifier (regularized logistic regression) on top of frozen LLaMA-65B embeddings to predict human choices in decision-making tasks. The method is evaluated on two paradigms (decisions from description using choices13k, decisions from experience using the horizon task) plus a hold-out generalization task. The results show that the linear probe on LLM embeddings outperforms domain-specific cognitive models (BEAST, hybrid model), captures individual differences via random effects, and generalizes to a held-out experiential-symbolic choice task—both quantitatively (lower NLL) and qualitatively (reproducing the human-like overvaluation of described options).
 
 ## Strengths
 
-- **LLM embeddings capture human choice patterns better than two established cognitive models**: On choices13k, CENTaUR achieves NLL=48,002.3 vs BEAST's 49,448.1; on the horizon task, CENTaUR achieves NLL=25,968.6 vs the hybrid model's 29,042.5 (Section "Finetuned language models beat domain-specific models"). The gap is substantial on both tasks.
+1. **Cross-task generalization is the strongest result.** A model finetuned (linear probe) on two decision-making datasets generalizes to a third, unseen task—achieving NLL=4,521.1 vs. LLaMA's 6,307.9—and reproduces the qualitative human bias of overvaluing described over experienced options (Figure 4f,g). This is non-trivial and supports the promise of the approach as a step toward generalist cognitive models.
 
-- **Qualitative behavioral patterns are restored by finetuning**: Raw LLaMA shows neither of the two exploratory effects known from human data (increased randomness with longer horizon in equal-information trials, increased selection of the informative option in unequal-information trials), but CENTaUR reproduces both (Figure 2c–h; Section "Model simulations reveal human-like behavior"). This goes beyond aggregate likelihood comparisons.
+2. **Individual-difference modeling is a meaningful extension.** The random-effects variant (NLL=23,929.5) outperforms both the fixed-effect version (25,968.6) and the hybrid model with the same random structure (24,166.0). That 52/60 participants are best fitted by CENTaUR demonstrates the embedding space carries fine-grained information beyond aggregate behavior.
 
-- **Individual participant modeling is convincingly demonstrated**: CENTaUR is the best-fitting model for 52/60 participants on the horizon task, and a random-effects extension (NLL=23,929.5) outperforms the hybrid model with the same random-effects structure (NLL=24,166.0) (Figure 3; Section "Language model embeddings capture individual differences").
+3. **Model simulations verify qualitative behavioral alignment.** CENTaUR reproduces both key exploratory-choice effects from the horizon task (randomization under equal information, directed exploration under unequal information) that raw LLaMA fails to show, confirming the probe captures psychologically meaningful patterns rather than just improving likelihood.
 
-- **Generalization to a held-out task is demonstrated**: A CENTaUR model finetuned on two tasks and tested on the experiential-symbolic task achieves NLL=4,521.1 vs random (5,977.7) and raw LLaMA (6,307.9), and qualitatively replicates the human tendency to overvalue description-based options (Figure 4; Section "Evaluating goodness-of-fit on hold-out tasks").
-
-- **Uses a fully public model**: LLaMA-65B weights and architecture are publicly available, enabling full reproducibility.
+4. **The core idea is creative and timely.** Using LLM embeddings—which live in a common representational space across tasks—as features for cognitive modeling opens a new direction for building unified models of human behavior, distinct from traditional handcrafted cognitive models.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Baselines are too narrow to support the comparative claims**: The paper claims that CENTaUR "beat[s] domain-specific models" and "outperforms traditional cognitive models," but only compares against two models (BEAST from 2017 for choices13k, and a hybrid model from 2018 for the horizon task). Well-established models such as Cumulative Prospect Theory with component-specific parameters or more recent neural-network-based choice models are not included. Given that CENTaUR uses a 65B-parameter LLM plus a linear probe, outperforming two specific models from 2017–2018 is a useful result but does not constitute comprehensive "state-of-the-art" evidence against the broader cognitive modeling literature. The paper should either weaken the comparative claims or add stronger baselines.
+1. **The title and abstract overstate what is done.** The paper claims to "turn large language models into cognitive models" by "finetuning them on data from psychological experiments" (abstract, title). In reality, the LLM weights are never updated—only a linear layer on top of frozen embeddings is trained. This is a linear probe, not finetuning of the LLM itself. While the technical description in Section 2 is transparent ("finetuned a linear layer on top of these embeddings"), the high-level framing throughout the paper (title, abstract, Discussion) consistently implies the LLM itself is being adapted. This mismatch is significant: the paper's headline narrative suggests something more ambitious than what is actually done.
 
-- **The generalization experiment cannot support the claim that multi-task finetuning is responsible**: The paper finetunes on both choices13k + horizon task and tests on the experiential-symbolic task, but provides no control condition finetuned on only one of the two training tasks. It is possible that finetuning on choices13k alone (which already involves description-based decisions, the key feature of the hold-out task) would produce similar or better performance on the hold-out task. Without this control, the specific claim that *multi-task* finetuning drives generalization is unsupported. The paper should include single-task finetuning controls or reframe the claim.
+2. **No prompt sensitivity analysis.** The method relies on embeddings from a single prompt template per task. LLM embeddings are notoriously sensitive to prompt phrasing, yet the paper provides no evaluation of alternative prompts, no ablation of prompt components, and no discussion of robustness. Without this, the observed "human-like" representations could be artifacts of careful prompt engineering rather than a property of the embedding space.
 
-- **No ablation isolating the contribution of LLM pretraining**: The paper does not compare against a simpler model (e.g., a small MLP or logistic regression trained directly on task features, or embeddings from a smaller language model). Without this, the paper cannot establish that the LLM's pretrained representations are responsible for the performance — the success might stem entirely from the high-dimensional feature space and the regularization used. This weakens the "turning LLMs into cognitive models" framing, since the LLM may be replaceable.
+3. **No uncertainty reporting for the headline NLL numbers.** The paper reports single NLL values (e.g., 48,002.3 vs. 49,448.1) without confidence intervals, standard errors, or any measure of uncertainty. Given that these differences are relatively small in log-likelihood space, it is impossible to assess whether the improvements are statistically reliable without uncertainty quantification.
 
 ### Minor
 
-- **The framing oversells a linear probe**: The title "Turning large language models into cognitive models" and the "half human, half ungulate" analogy suggest the LLM itself is being transformed. In reality, only a linear layer on top of frozen embeddings is finetuned (standard linear probing). The LLM weights are untouched. While the method is clearly described, the framing creates expectations that the paper does not deliver on.
+4. **The comparison against domain-specific models (BEAST, hybrid) is informative but incomplete.** The baselines are appropriate for the claim "beats standard cognitive models," but the paper also makes broader claims about the richness of LLM representations. Without comparing against other feature extractors (e.g., BERT embeddings, GloVe, bag-of-words, or a shallow net trained from scratch on behavioral data), it is unclear whether the advantage comes from the LLM's pre-training or simply from having very high-dimensional features. This is a standard omitted-baseline issue.
 
-- **No exploration of model size or layer choice**: Only LLaMA-65B and the final transformer layer are used. It is unknown whether a 7B model or earlier layers would work as well or better, which would inform both practicality and robustness claims.
+5. **The "generalist cognitive model" claim in the Discussion outruns the evidence.** The paper states that "if one would include enough tasks in the training set, the resulting system should—in principle—generalize to *any* hold-out task." This is pure speculation based on a single hold-out experiment using a task that is still a binary decision-making paradigm, similar in structure to the training tasks. Generalization to more distinct cognitive domains (memory, reasoning, perception) would be needed to support this vision.
 
-- **No sensitivity analysis of prompts**: Prompts are stylized examples; the paper does not test whether modest rewording changes embeddings or predictions. This is a known concern with LLM-based cognitive models.
+6. **The individual-difference analysis (52/60 participants best fit by CENTaUR) lacks a formal statistical test.** A binomial test or similar would strengthen the claim that this is unlikely under chance, though the result is clearly above chance even informally.
 
 ### Trivial
-None.
+
+None that survive filtering.
 
 ## Nice-to-Haves
 
-- Standard errors or confidence intervals for all NLL comparisons would be helpful, together with formal model comparison tests.
-- A discussion of computational cost (65B model inference is expensive) would help readers gauge practicality.
+- Comparing against other feature extractors (BERT, GloVe, or a small MLP trained from scratch on task features) would strengthen the claim that the LLM's pre-training is specifically beneficial, not just its high dimensionality.
+- A prompt sensitivity study (3–5 paraphrases per task) would substantially increase confidence in the robustness of the results.
+- A LoRA finetuning comparison (actually updating LLM weights) would directly test whether adapting the LLM further improves cognitive fidelity, and would align the method with the paper's stated framing.
+- Reporting bootstrapped confidence intervals for all NLL values would allow readers to assess statistical reliability.
 
 ## Removed Points
 
-The following points from the reviewers were checked against the paper and removed:
+These points are flagged to be removed; treat them with caution.
 
-- *Criticism that the method "is a standard linear probing technique" and "not turning LLMs into cognitive models"* — WEAKENED to Minor (framing vs. substance). The paper clearly states it finetunes "a linear layer on top of these embeddings," so there is no deception. The reviewer's framing objection is fair but the paper is transparent about the method.
-
-- *Criticism that the random guessing baseline is not proper* — The paper includes random as a baseline; the critic's mention of LLaMA being "worse than random" is factually correct (NLL 6,307.9 vs 5,977.7 for random), and the paper acknowledges this.
-
-- *Criticism about missing appendix/implementation details* — REMOVED per instructions: the parser strips these sections.
-
-- *Nitpicks about undisclosed hyperparameters* — REMOVED per instructions: trivial reproducibility concerns about standard procedures.
+- *Criticism about missing appendix/supplementary materials*: The parser strips these sections from all papers; they exist in the original submission.
+- *Criticism that the method is "misrepresented" as finetuning and this is a "fatal" flaw*: The paper clearly describes "finetuned a linear layer on top of these embeddings" (Section 2, Figure 1 caption) and "regularized logistic regression model from the extracted embeddings" (Section 2). While the title/abstract framing is inflated, the technical description is accurate. This is a significant overclaim but not fatal—the contribution (LLM embeddings as features for cognitive modeling) remains valid.
+- *Claim that model simulations just reproduce training distribution*: This ignores the non-trivial qualitative patterns (choice curves, horizon effects) that the model reproduces and that raw LLaMA fails to show. The simulations verify internal consistency in a useful way.
+- *Request for "why does the LLM embedding work?" mechanistic analysis*: Interesting but well outside the paper's stated scope as an empirical demonstration.
+- *Strength about "public availability of LLaMA"*: Generic; most modern LLM papers use open or API-accessible models.
 
 ## Novel Insights
 
-The reviewers' discussions converge on a useful distinction rarely foregrounded in this literature: the paper demonstrates that LLM *embeddings* suffice for cognitive modeling, but it does not test whether LLM *pretraining* is necessary — or whether any high-dimensional learned feature space would work. The generalization result, while promising, is confounded with multi-task training scope. The most robust finding is the individual-differences analysis (52/60 participants best fit), which suggests that the embedding space captures subject-level variability more naturally than hand-designed parametric cognitive models. This specific strength is worth emphasizing more in the paper.
+None beyond the paper's own contributions. The core observation—that a linear probe on LLM embeddings can outperform handcrafted cognitive models and generalize across tasks—is itself the paper's novel finding. The reviews do not surface a deeper insight beyond what the paper already claims.
 
 ## Suggestions
 
-1. **Add stronger cognitive model baselines**: Include CPT with component-specific parameters, and for the horizon task include standard RL baseline models (e.g., Kalman filter, Bayesian mean-tracking). This is the single most impactful change — if CENTaUR still outperforms them, the paper's claim is much stronger; if not, the claims need to be appropriately scoped.
+1. **Re-titles and revise abstract to accurately reflect that only a linear probe is trained, not the LLM itself.** For example: "LLM embeddings as features for cognitive modeling" or "Using representations from large language models to predict human decision-making." The current framing invites justified skepticism.
 
-2. **Add single-task controls for the generalization experiment**: Finetune on choices13k alone and horizon task alone, then compare on the hold-out task. This is essential to attribute any improvement to multi-task training.
+2. **Add prompt sensitivity analysis** as described above. This is cheap (just re-run embedding extraction with paraphrased prompts) and would significantly strengthen the paper.
 
-3. **Ablate the LLM**: Replace LLaMA embeddings with features from a smaller model (e.g., 7B LLaMA, or a 2-layer MLP trained on the same prompts) to test whether the LLM's scale and pretraining are actually responsible for the performance.
+3. **Add bootstrapped confidence intervals** for all NLL comparisons. These are standard in cognitive modeling and necessary given the moderate effect sizes.
 
-4. **Tone down comparative claims**: Replace "state-of-the-art" and "outperforming traditional cognitive models" with claims appropriately scoped to the specific baselines tested.
+4. **Add at least one alternative feature extractor baseline** (e.g., BERT-base embeddings, or a simple bag-of-words + logistic regression) to demonstrate that the LLM's pre-training contributes specifically to the improvement.
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| Tn8EQIFIMQ.md (Language Models Trained to do Arithmetic Predict Human Risky Choice) | 7.00 | Stronger methodology (cleaner experimental design, better baselines). Paper under review is broader but less rigorous. |
-| vodsIF3o7N.md (Modeling Capabilities of LLMs for Sequential Decision Making) | 5.50 | Also explores LLMs for decision-making; accepted despite limited novelty. Paper under review has a more specific empirical contribution. |
-| CfdPELywGN.md (How language models extrapolate outside training data) | 5.20 | Makes overclaimed connections to human cognition; rejected. Similar in having a promising idea with incomplete validation. |
-| 5d4UTqXjmS.md (VLLMs Human-Level Cognitive Flexibility) | 3.67 | Weaker methodology (ceiling effects, no statistical tests). Paper under review is clearly stronger empirically. |
-| koza5fePTs.md (Exploring Planning Capabilities of LLMs) | 2.00 | Very limited novelty; rejected. Paper under review has more concrete empirical contributions. |
-| UXCfRU2Qs4.md (LLMs as windows on psychopathology) | 4.25 | Mixed reviews due to methodological circularity questions. Paper under review has cleaner methodology but narrower scope. |
+| Anchor | Avg Score | Comparison to this paper |
+|--------|-----------|--------------------------|
+| Arithmetic-GPT (Tn8EQIFIMQ) | 7.00 | Stronger: trains a model from scratch on controlled arithmetic data, more careful framing, more thorough baselines. Current paper is less controlled but broader in task scope. |
+| DeLLMa (Acvo2RGSCy) | 7.33 | Stronger: more thorough evaluation, clearer methodology, but different topic (decision support, not cognitive modeling). |
+| Cognitive model paper (KC58bVmxyN) | 6.75 | Comparable quality but different approach: builds a custom neural cognitive model vs. using LLM embeddings. |
+| Distributional reasoning (L9j8exYGUJ) | 5.00 | Weaker: more limited experiments, single dataset. Current paper is empirically stronger. |
+| VLLM Cognitive Flexibility (5d4UTqXjmS) | 3.67 | Weaker: overclaimed results, methodological flaws, poor statistical rigor. Current paper is substantially stronger. |
+| L-MSA (xi3sDtf8A0) | 3.00 | Much weaker: unclear contribution, insufficient validation. Current paper is clearly stronger. |
 
-### Assessment
+The paper presents a creative and empirically grounded approach with its strongest evidence being the cross-task generalization (Section 5). However, the framing overreach (implying the LLM itself is finetuned when only a linear probe is trained), the absence of prompt sensitivity analysis, and the lack of uncertainty quantification are genuine issues that prevent the paper from reaching the level of the stronger anchors (6.75–7.33). Relative to the medium-scoring anchors (5.00), this paper is empirically stronger. I position it between those bands.
 
-The paper presents a genuinely interesting proof of concept and produces several compelling empirical results (particularly the individual-differences analysis and the qualitative replication of behavioral effects). However, the comparative claims are not backed by sufficiently strong baselines, the generalization experiment is missing a critical control, and there is no ablation isolating the role of LLM pretraining. These issues do not invalidate the paper's core finding — that LLM embeddings can serve as useful features for predicting human choices — but they prevent it from supporting the stronger claims made in the abstract and title.
-
-The paper compares favorably to the lower-scoring anchors (3–4 range) but falls short of the methodological rigor of the higher-scoring ones (6–7 range). It most closely resembles the 4–5 range papers: interesting idea, some good results, but incomplete validation relative to the claims made.
-
-MY FINAL SCORE: <score>4.5</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

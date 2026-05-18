@@ -1,78 +1,85 @@
-Now I have all the information needed to produce the final consolidated review. Let me synthesize everything.
+Now I have a good set of calibration anchors. Let me write the final consolidated review.
 
 ## Summary
 
-The paper proposes Maestro, a framework for training low-rank neural networks via ordered decomposition (LoD). It factorizes each layer as \(U V^\top\), applies rank sampling (one rank per layer per step) with hierarchical group lasso to prune unimportant ranks, and progressively shrinks the rank space during training. Theoretically, it shows that for linear mappings with uniform data, LoD recovers SVD/PCA. Empirically, it evaluates on MNIST, CIFAR-10, ImageNet (ResNet-18/50, VGG-19, LeNet), and Multi30k translation (Transformer), reporting competitive or better accuracy-efficiency trade-offs against Pufferfish, Cuttlefish, IMP, and XNOR-Net.
+This paper presents Maestro, a framework for trainable low-rank decomposition of DNN layers. It applies Ordered Dropout to factorized (U×V^T) weights, enabling importance-based rank sampling during training, combined with hierarchical group-lasso (HGL) regularization and progressive shrinking to eliminate redundant ranks. The method is evaluated across FC, CNN, and Transformer layers on MNIST, CIFAR-10, ImageNet, and Multi30k, showing competitive or better accuracy/efficiency trade-offs compared to SVD-based baselines (Pufferfish, Cuttlefish) and other compression techniques.
 
 ## Strengths
 
-1. **Clean, well-motivated method with sound technical design.** Extending Ordered Dropout to factorized weights is a natural and principled idea. Combining rank sampling (one rank per layer per step), hierarchical group lasso, and progressive shrinking into a single training procedure is technically coherent and avoids the iterative SVD calls and per-layer rank selection required by prior low-rank methods (Pufferfish, Cuttlefish).
+- **First application of ordered dropout to decomposed DNN layers.** The paper explicitly contrasts with prior ordered-representation work (Horváth et al. 2021, Rippel et al. 2014, Diao et al. 2021) and applies importance-based ordered sampling to the *factorized* (U,V) representation of each layer rather than to layer width. This is a clear and genuine extension of the ordered-dropout idea.
 
-2. **Ablation study cleanly demonstrates the necessity of each component.** Table 3 (labeled Tab.~\ref{tab:ablation}) shows that removing group lasso increases train GMACs by 33% (retaining full 11.2M parameters), removing progressive shrinking also costs 33% more GMACs, and full-training (sampling all ranks) costs 97% more GMACs — all without accuracy improvement (94.04–94.12% vs. 94.19%). This confirms that the efficiency gains come from the design, not from accuracy compromise.
+- **Theoretical grounding with empirical verification.** Theorem 1 shows that the LoD formulation recovers SVD for uniform data on the unit ball and PCA for identity mapping. The empirical verification (Fig. 2) backs this up, connecting the method to well-understood linear-algebra foundations and providing a principled basis for why ordering emerges.
 
-3. **Theoretical grounding in a special case.** Theorem 1 (informal) proves that for linear mappings with uniform data, LoD recovers SVD; for identity mappings it recovers PCA. Figures 2a–2b empirically verify these predictions. While the theory does not directly cover deep nonlinear networks, it provides a foothold that the objective is not arbitrary.
+- **Strong empirical results across architectures.** On ImageNet (Tab. 3), Maestro achieves 71.54% accuracy with full decomposition (+0.51pp over Pufferfish) at fewer parameters and GMACs. On the Transformer translation task (Tab. 2), Maestro achieves perplexity 6.90 vs. Pufferfish's 7.34 at roughly a quarter of the compute and half the parameters. These are concrete, measured gains.
 
-4. **Multi-modal evaluation across diverse architectures.** The method is tested on fully-connected (LeNet), convolutional (ResNet-18/50, VGG-19), and Transformer (6-layer encoder-decoder) models spanning vision (MNIST, CIFAR-10, ImageNet) and language (Multi30k translation) — demonstrating generality.
-
-5. **Graceful accuracy-latency trade-off without retraining.** Figure 5 shows that a single trained Maestro model can be pruned via greedy search to reduce compute by 50% and parameters 10× while retaining 87.7% accuracy, outperforming SVD-based pruning at every latency budget.
+- **Ablation confirms component contributions.** Tab. 4 shows that removing HGL, progressive shrinking, or using full-rank sampling all increase training cost (1.33×–1.97×) without improving accuracy, validating that the sampling and shrinking mechanisms are responsible for the training savings.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The central claim of "data-aware" decomposition is not validated for deep networks.** The paper frames data-dependency as LoD's key advantage over SVD-based methods (Pufferfish, Cuttlefish), but the theoretical guarantee (Theorem 1) covers only linear mappings with uniform data. The paper honestly acknowledges (Sec. 3.3, line 176) that "it is unclear whether this property still holds" for deep nonlinear networks. No controlled experiment isolates the data-ordering effect from the regularization effect of hierarchical group lasso, the training dynamics of progressive shrinking, or better hyperparameter tuning. A simple control — e.g., comparing LoD with SVD-initialized training where the ordering is frozen (not updated via gradient descent) — would disentangle these factors but is not provided. This gap means the paper's central framing overstates what is empirically demonstrated. The contribution is still valuable as an automated rank-selection training procedure, but not as evidence that data-dependent ordering causally improves over a priori SVD.
+- **Core novelty claim is not directly tested.** The paper's central claim is "the first time importance ordering via sampling is applied on the decomposed DNN structure." Yet there is no experiment that compares *ordered* rank sampling against *uniform* random rank sampling (or any other non-ordered scheme) in the factorized setting. The ablation removes HGL or progressive shrinking but never removes the ordering property while keeping everything else fixed. The theoretical analysis (Theorem 1, Fig. 2) shows that ordering emerges in the linear case, but for the DNN setting this remains an untested assumption. This does not invalidate the paper — the theory provides support, and the empirical gains over baselines are real — but it means the specific contribution of the ordering mechanism is not empirically isolated from the broader combination of factorization + HGL + progressive shrinking. This is the single most important experiment the paper lacks.
 
-2. **The Transformer baseline comparison raises concerns about experimental fairness.** Table 2 reports Maestro perplexity 6.90 vs. Pufferfish 7.34 at 0.248 GMACs. However, the "Non-factorized" Transformer achieves perplexity 9.85 — substantially *worse* than both low-rank variants. Since lower perplexity is better, this means the full model underperforms the compressed models, which is atypical and suggests a mismatch in training protocol (e.g., different training budgets, learning rate schedules, or hyperparameter tuning intensity). The Pufferfish result is cited from the original paper (not reproduced under identical conditions), and no details are given about how the Pufferfish hyperparameters (per-layer ranks, warmup epochs) were configured relative to Maestro's setup. Without apples-to-apples verification, the claim of a 6% perplexity improvement at ¼ the compute is on uncertain ground.
-
-3. **Incomplete tabular presentation of key results.** The paper repeatedly references tables that are either absent from the parsed text or contain sparse data: `Tab.~\ref{tab:cifar10_baselines}` (CIFAR10 baseline comparison), `Tab.~\ref{tab:lenet_gp_lambda}`, `Tab.~\ref{tab:resnet_gp_lambda}`, and `Tab.~\ref{tab:vgg_gp_lambda}` (hyperparameter λ_gl sensitivity) are referenced but not present. The CIFAR10 results are partially described in text (lines 401–402), but the granular breakdown across multiple operating points promised by the table reference is missing. A paper whose contribution is empirically driven should present its central comparisons in fully accessible tabular form.
+- **Training-cost advantage over baselines is asserted, not measured.** The paper repeatedly claims lower training overhead than SVD-based methods like Pufferfish/Cuttlefish, citing their warm-up rounds and iterative decompositions. However, no wall-clock training times, FLOP counts, or energy measurements are provided for *any* baseline comparison. The only training cost numbers (Tab. 4) are relative GMACs for Maestro's own variants, not cross-baseline comparisons. Given that Maestro's training procedure includes rank sampling, HGL penalty computation, and per-epoch progressive shrinking, a direct cost comparison is necessary to substantiate the "lower training overhead" claim.
 
 ### Minor
 
-1. **No statistical rigor for most results.** Error bars are reported only for the Transformer (Table 2) and ablation (Table 3). The core CIFAR10 results (ResNet-18: 94.19%, VGG-19 comparisons) and ImageNet results are reported as point estimates without standard deviations across multiple seeds. Given the multiple hyperparameters (λ_gl, ε_ps, rank sampling), single-run reporting risks cherry-picking.
+- **Gradient variance from rank sampling is not analyzed.** The method samples one rank per step per layer, but the paper provides no analysis of how this affects gradient variance or convergence compared to using the full expectation over ranks. A comparison of training loss curves with different sampling budgets (1 rank vs. 3 ranks vs. full expectation) would strengthen the claims about sampling efficiency.
 
-2. **No sensitivity analysis for ε_ps.** The threshold ε_ps = 10⁻⁷ is set uniformly across all experiments. Since this threshold directly controls the final per-layer ranks, a sensitivity analysis showing how accuracy and rank vary with ε_ps across, say, 10⁻⁵ to 10⁻⁹ would be informative.
+- **HPO cost claim is not demonstrated.** The paper states the HPO algorithm (Alg. 2) "typically requires at most 2–3 times the computational effort (in terms of FLOPs) compared to a single training loop with an optimally chosen λ_gl." No empirical verification of this claim is provided.
 
 ### Trivial
-- The text at line 399 is truncated mid-sentence ("Results are depicted in... and Tab."), suggesting content loss in the source.
+
+- The greedy pruning method (Sec. 3.3) uses a single mini-batch to estimate loss. The sensitivity of this estimate to batch size and content is not discussed.
+
+- Equation (7) uses uniform weighting 1/(Σ r_i) across all (layer, rank) pairs. Layers with larger maximum rank contribute proportionally more sampled terms during training. The practical impact is not discussed.
 
 ## Nice-to-Haves
-- The hyperparameter optimization (Algorithm 2) is said to cost 2–3× a single training loop. Including this overhead when making any claims about training cost relative to baselines (which may also need tuning) would improve fairness.
-- A brief discussion of how the method scales to very large models (e.g., ViT, LLMs with billions of parameters) would help readers assess practical applicability, though the authors note this is not the paper's focus.
+
+- Extending the comparison to recent PEFT methods (e.g., LoRA) would help contextualize the contribution within the broader low-rank literature.
+- A deeper analysis of the nested-rank observation (Fig. 4c) — e.g., verifying whether ranks learned with λ=0 are indeed supersets of those learned with higher λ — would strengthen the ordering claim.
+- Accuracy vs. MACs Pareto frontiers for at least one dataset, comparing Maestro's sweep against baselines at multiple compression levels, would give a more complete picture than single operating points.
 
 ## Removed Points
-- **"Key experimental results are missing / cannot be independently assessed"** — The CIFAR10 baseline numbers ARE reported in the body text (lines 401–402: "94.19±0.07% for 4.08M parameters ... 93.97±0.25% for 2.19M parameters compared to the 94.17% of Pufferfish at 3.3M parameters"), and ImageNet and Transformer tables are present. The missing referenced tables are a presentation weakness (kept as Weakness 3 above), but the reviewer's phrasing that quantitative claims "cannot be independently assessed" is an overstatement.  
-- **"No details about how Pufferfish/Cuttlefish baselines were configured"** — The paper states (line 402) "both Pufferfish and Cuttlefish, by default, do not decompose all layers and have warm-up full-training rounds" and notes that baselines are cited from original works. More detail would be better, but the statement that "no details are given" is inaccurate. The core concern (non-factorized perplexity discrepancy) is kept.  
-- **Strength Finder's generic strengths** ("important problem," "well-motivated") — removed as superficial; they add no specific evidence about the paper's contribution.  
-- **Strength Finder's claim about "Hyperparameter optimization algorithm reduces tuning burden"** — weakened; the claim of 2–3× overhead vs. baselines' "full-rank warm-up" is reasonable but not demonstrated with wall-clock comparisons.
+
+These points are flagged to be removed; treat them with caution.
+
+- *"Key results tables and figures are missing from the provided manuscript"* — REMOVED as factually incorrect. The CIFAR-10 results are presented in Fig. 2 (fig:cifar10_baselines) with described numerical values in the text. The accuracy-latency trade-off curves are presented in Fig. 4 (fig:acc_latency_trade_off). The pruning and quantization results are described with specific numbers in the text. While some cross-references appear truncated (likely parser artifacts), the data is present in the manuscript.
+
+- *"Equation (7) weighting causes bias toward layers with larger rank"* — REMOVED. The weighting 1/(Σ r_i) is uniform across all (layer, rank) pairs. The critic's concern about implicit per-layer bias is a misunderstanding of the formulation.
+
+- *"Theoretical contribution is modest and not novel for factorized setting"* — REMOVED. The paper explicitly states that the extension of ordered-dropout theory to the factorized setting is a known result (citing Horváth et al.), and the novelty lies in applying it to decomposed weights. The critic's framing misrepresents the claimed contribution.
+
+- *"Missing appendix, missing proofs in appendix"* — REMOVED per instructions. The parser strips appendix sections from all papers.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not reveal a perspective that the authors' own analysis misses, except the observation that the non-factorized Transformer baseline's worse perplexity (9.85 vs. 6.90–7.34) may indicate a training protocol mismatch rather than a genuine superiority of low-rank approaches — this is something the authors should address directly rather than leaving implicit.
+
+The most interesting finding that emerges from the paper — but is not fully developed — is the nested-rank observation (Sec. 4.3, Fig. 4c): models trained with different HGL penalties produce learned rank structures where the ranks found at higher λ appear to be subsets of those found at lower λ. If this holds generally, it would imply that the ordering property enforced during training produces a globally consistent rank importance hierarchy across layers, not just within each layer. This goes beyond the within-layer ordering inherited from ordered dropout and would be a qualitatively new contribution of the factorized setting. The paper notes this as future work but does not analyze it, which is a missed opportunity to deepen its own core narrative.
 
 ## Suggestions
-1. **Run a controlled experiment isolating data-dependent ordering.** Train the same low-rank network with LoD (full sampling + HGL) and with a version where the SVD ordering is computed once at initialization and frozen. If LoD's advantage persists, it is due to training dynamics other than data-aware reordering. If it disappears, the data-awareness claim is supported.
-2. **Reproduce Pufferfish under identical conditions for the Transformer experiment** or clearly explain why the non-factorized perplexity (9.85) is worse than both low-rank variants. Without this, readers cannot assess whether Maestro's advantage is real or an artifact of different training protocols.
-3. **Provide standard deviations for all main results** (at least 3 seeds), especially CIFAR10 and ImageNet.
-4. **Include the missing sensitivity tables** (λ_gl sweep, ε_ps sweep) either in the main paper or a clearly indicated appendix.
-5. **Tone down the "data-aware" framing** or provide the controlled experiment suggested above. The method works well and is useful; it does not need an unsupported theoretical claim about why.
+
+1. **Add the critical ablation**: Compare Maestro (ordered sampling) against a variant that samples ranks *uniformly* from the same factorized layers, with HGL and progressive shrinking held fixed. If ordered sampling provides no benefit, the contribution reduces to "factorized training with regularization," which is less novel. If it provides tangible gains, the paper's central claim is directly supported.
+
+2. **Provide training-cost measurements**: Report training wall-clock time or FLOPs for at least one main experiment (e.g., ResNet-18 on CIFAR-10) comparing Maestro against Pufferfish and Cuttlefish. This is necessary to back the repeated claims of lower training overhead.
+
+3. **Verify the HPO cost claim**: Show empirically that the HPO algorithm (Alg. 2) indeed requires at most 2–3× the compute of a single optimal training run.
+
+4. **Deepen the nested-rank analysis**: Verify whether the nested structure holds systematically (not just as an anecdotal observation) and present it as evidence for the ordering property in the DNN setting.
 
 ## Score and Decision
 
 ### Calibration Anchors
 
-| Anchor Path | Avg Score | Comparison |
-|---|---|---|
-| `6aRMQVlPVE.md` (Rank-adaptive spectral pruning) | 4.33 | Similar topic (low-rank training with adaptive rank selection) but narrower scope (CNNs only, CIFAR-10 only). Maestro has broader evaluation (vision + language, ImageNet, Transformer) and a cleaner method without iterative SVD. Maestro is stronger. |
-| `0tsJ7Nv5hk.md` (OIALR) | 4.25 | Similar topic (SVD-based low-rank training). OIALR has weaker baselines (no Pufferfish/Cuttlefish comparison) and narrower evaluation. Maestro is clearly stronger. |
-| `XbydvPq92M.md` (IOB) | 4.00 | Related (ordered compression via dropout). IOB lacks the progressive shrinking and training efficiency focus. Maestro has stronger empirical backing. |
-| `7Cx05z4pUc.md` (Decomposed Learning & Grokking) | 5.00 | Different focus (grokking, not training efficiency), narrower experiments (only modular arithmetic). Maestro covers more ground but has the data-awareness claim gap. Comparable quality. |
-| `fD8Whiy7ca.md` (Low-Dimensional Error Feedback) | 5.50 | Different topic (feedback alignment). Better theory but still incomplete empirical evaluation. Maestro's empirical coverage is more thorough. |
-| `ADDCErFzev.md` (Dropout & visual systems) | 6.00 | Different topic but strong paper (solid empirical work, clear narrative, accepted). Maestro's data-awareness gap and baseline concerns keep it below this level. |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/ZTvUT49JjL.md | 3.40 | Implicit bias in matrix factorization — much weaker experimental evaluation, unclear practical contribution. Maestro is substantially stronger. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/6aRMQVlPVE.md | 4.33 | Rank-adaptive spectral pruning of conv layers — similar topic, also lacked training cost analysis, but evaluated only on small-scale (CIFAR-10). Maestro has broader evaluation (ImageNet, Transformer). |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/0tsJ7Nv5hk.md | 4.25 | OIALR low-rank training — incremental contribution, no strong baselines. Maestro has clearer novelty and better empirical validation. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/pAVJKp3Dvn.md | 5.67 | GBLR structured matrices — accepted, solid method with missing baselines. Comparable quality to Maestro, though Maestro has stronger theory but weaker ablation of core claim. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/DLDuVbxORA.md | 6.25 | OATS — accepted, well-evaluated on large models, but also had missing ablations and computational cost concerns. Maestro is slightly weaker due to the untested core novelty claim. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/TwJrTz9cRS.md | 8.00 | HiRA — very strong ablation studies, clear contribution isolation. Maestro is weaker on experimental isolation of its core claim. |
 
-### Judgment
-The paper introduces a clean, well-designed method for training low-rank neural networks without manual rank selection. The method is technically sound and the empirical results, where fully reported, are competitive. However, the paper makes an overclaimed central argument (data-aware ordering superiority) that is not empirically supported for DNNs, and the Transformer baseline comparison has a suspicious signal (non-factorized model underperforming low-rank variants) that undermines confidence. These are addressable issues, but they prevent the paper from being a strong contribution in its current form. Relative to anchors: clearly above the 4.25–4.33 level of comparable low-rank training papers (wider evaluation, cleaner method) but below the 6.00 level of a strong paper with fully substantiated claims. The score is positioned relative to the 5.00–5.50 anchor papers.
+**Calibrated score: 5.5** — The paper has real contributions (first application of ordered dropout to factorized weights, theoretical grounding, broad empirical evaluation) but is held back by two significant gaps: (1) the core novelty claim is not directly tested via an ordered vs. uniform ablation, and (2) the claimed training-cost advantage over baselines is not measured. These are addressable but the current manuscript does not support them, placing it below the acceptance threshold relative to the calibrated anchors.
 
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

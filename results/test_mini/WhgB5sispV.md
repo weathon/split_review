@@ -1,22 +1,20 @@
-Now I have all the information needed. Let me synthesize the final review.
-
----
+Now I have all the information needed. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes representing dynamic scenes with full 4D Gaussians that treat space and time as a unified 4D volume. The key technical innovations are: (1) parameterizing each Gaussian's covariance via a full 4D rotation (using two quaternions), which enables joint spatiotemporal modeling rather than treating space and time independently, and (2) 4D Spherindrical Harmonics (4DSH) for time-evolved view-dependent appearance. The method is trained end-to-end on entire videos without frame-by-frame optimization and achieves real-time rendering (145+ FPS on Plenoptic Video).
+This paper introduces 4D Gaussian Splatting (4DGS), a representation that treats space and time as a unified 4D volume using anisotropic 4D Gaussians with full 4D rotation (parameterized via double quaternions) and 4D Spherindrical Harmonics for view- and time-dependent appearance. By extending 3D Gaussian Splatting into a 4D primitive with a principled conditional/marginal rendering pipeline, the method achieves state-of-the-art rendering quality on both multi-view (Plenoptic Video) and monocular (D-NeRF) dynamic scene benchmarks while maintaining real-time rendering speeds — something no prior dynamic scene method achieves.
 
 ## Strengths
 
-- **Conceptually clean and well-motivated representation.** Treating space and time symmetrically via a full 4D Gaussian with 4D rotation (two quaternions, Eqs. 153-177) is mathematically elegant. The derivation of the conditional 3D Gaussian from the 4D Gaussian (Eqs. 183-185) and the rendering equation (Eq. 4) are sound. The ablation against the "No-4DRot" baseline (space-time independence) confirms that the full 4D rotation is empirically beneficial.
+- **Principled 4D Gaussian formulation with 4D rotation.** The paper treats space and time symmetrically via a full 4D covariance matrix decomposed as R S S^T R^T, with 4D rotation implemented as a product of left and right quaternion rotations. This is mathematically sound and ablations (Table 3, "No-4DRot" vs. "Default") confirm that 4D rotation is essential for modeling motion — PSNR drops from 31.43 to 30.21 on "flame salmon" without it. This cleanly differentiates the approach from simpler time-weighted 3D Gaussians or deformation-field-based methods.
 
-- **4D Spherindrical Harmonics are a natural extension of SH to dynamic scenes.** The combination of spherical harmonics (for view dependence) with Fourier series (for time evolution) in Eq. 204 forms an orthonormal basis that is interpretable and ablated cleanly — removing 4DSH degrades PSNR, validating its concrete contribution.
+- **State-of-the-art rendering quality with real-time speeds on multiple benchmarks.** The method outperforms all prior methods on the Plenoptic Video dataset (e.g., surpassing HexPlane, K-Planes, and deformable GS variants in PSNR and LPIPS) and on the D-NeRF dataset. It is the only method in the Plenoptic Video benchmark capable of real-time rendering, with reported speeds of hundreds of FPS.
 
-- **Real-time rendering with strong visual quality.** On the Plenoptic Video dataset, the method achieves the highest metrics among the methods included in the comparison (PSNR 30.78, SSIM 0.975, LPIPS 0.067) while rendering at 145+ FPS — an order-of-magnitude speed advantage over prior MLP/grid-based approaches, most of which require seconds per frame.
+- **4D Spherindrical Harmonics improve temporal appearance modeling.** The 4DSH basis extends SH with cosine Fourier series for time-evolved color. Ablation in Table 3 ("No-4DSH" vs. "Default") shows a clear quality degradation (PSNR drops from 31.43 to 30.67 on "flame salmon"), confirming the benefit of modeling temporal color evolution beyond static SH.
 
-- **End-to-end training on entire videos.** Unlike frame-by-frame or multi-stage optimization used by some dynamic Gaussian methods, the pipeline trains on whole videos in a single stage (Section 3.3), with temporal batch sampling to mitigate flicker.
+- **Emergent motion capture without explicit supervision.** The optical flow visualization (Figure 5) demonstrates that 4D Gaussians naturally learn to track scene motion from photometric loss alone, without any flow or correspondence supervision. This emergent property is valuable for downstream tasks.
 
-- **Emergent optical flow without motion supervision.** The conditional mean of the 4D Gaussian naturally yields scene flow (Figure 4), demonstrating that the representation captures coarse dynamics purely from photometric loss.
+- **End-to-end training on entire videos.** Unlike methods requiring frame-by-frame optimization or multi-stage pipelines, the approach trains on full video sequences with a single photometric loss, simplifying the workflow.
 
 ## Weaknesses
 
@@ -24,64 +22,59 @@ This paper proposes representing dynamic scenes with full 4D Gaussians that trea
 None.
 
 ### Major
-
-- **Missing comparison against the most relevant dynamic Gaussian baselines.** The paper claims state-of-the-art performance yet compares only against non-Gaussian methods (TiNeuVox, K-Plane, HexPlane, NeRFPlayer, etc.). The following methods that also extend 3DGS to dynamic scenes are cited in the related work but not included in any quantitative experiment: Luiten et al. "Dynamic 3D Gaussians," Yang et al. "Deformable 3DGS," Wu et al. "4D Gaussian Splatting," and Kratimenos et al. "DyMF." These are the paper's closest competitors — they operate on the same datasets (Plenoptic Video, D-NeRF) and share the Gaussian splatting paradigm. Without this comparison, the paper's core claims of superiority are unsubstantiated. The "first ever" claim for real-time high-fidelity dynamic scene synthesis (Conclusion) cannot be evaluated. This is not a minor omission; it requires re-running experiments against these baselines. (Verified: the paper cites all four methods at lines 59-64 but includes none in Tables 1-2.)
-
-- **An unacknowledged and restrictive prior: constant spatial covariance over time.** From the conditional distribution of a 4D Gaussian (Eq. 184): Σ_{xyz|t} = Σ_{1:3,1:3} − Σ_{1:3,4} Σ_{4,4}^{-1} Σ_{4,1:3}. This expression is independent of t. Each Gaussian can only translate with constant velocity (μ_{xyz|t} moves linearly with t, Eq. 183), and its spatial shape/orientation cannot change over time. This is a strong assumption that the paper never discusses. On datasets with non-rigid or articulated motion (e.g., D-NeRF jumping jack, rotating head), this limits expressiveness. The ablation of "No-4DRot" vs. full 4D rotation does not isolate whether the benefit comes from enabling linear translation or from something else. The paper should analyze this limitation and, if possible, show that densification compensates for it (e.g., tracking Gaussian count across scenes with varying motion complexity).
+None.
 
 ### Minor
 
-- **Lack of quantitative analysis of temporal stability.** The paper acknowledges "temporal flickering and jitter" in challenging scenes and describes a "straightforward batch sampling in time" solution (lines 215-216), but provides no ablation or metric (e.g., warp-based temporal consistency, per-frame PSNR variance) demonstrating its effectiveness. The reader cannot assess whether the reported results are representative or cherry-picked.
+- **Cosine-only 4DSH basis is theoretically incomplete.** The 4DSH basis uses only cosine functions: Z_{nl}^{m} = cos(2π n/T t) Y_l^m. For a complete Fourier basis on the interval, both sine and cosine (or equivalently complex exponentials) are needed. The paper claims "The 4D spherindrical harmonics form an orthonormal basis in the spherindrical coordinate system" which is technically inaccurate for cosine-only on the full time range — a cosine series is a complete orthonormal basis for even functions (or functions on [0, T/2]). The practical mitigation is that each Gaussian has its own temporal mean μ_t, so the network collectively can represent asymmetric functions through different Gaussians activating at different times. This does not invalidate the empirical results but is a genuine theoretical gap that should be acknowledged and preferably addressed (e.g., by adding sine terms or providing a justification).
 
-- **The ablation isolates only the presence/absence of components, not why they help.** The "No-4DRot" baseline (block-diagonal covariance) is compared against the full model, but there is no finer-grained ablation (e.g., allowing 4D rotation only in spatial dimensions vs. full 4D, or allowing only translational coupling without rotational coupling). Similarly, the densification-in-time ablation (last two rows of the ablation table) could be better isolated from spatial densification.
+- **Real-time rendering claim lacks sufficient documentation.** The paper claims "real-time" and "far beyond real-time" rendering but does not specify rendering resolution, GPU hardware, or whether the reported FPS includes the per-frame computation of conditional 3D Gaussians (μ_{xyz|t}, Σ_{xyz|t}) from the 4D representation or only the subsequent rasterization. These details are necessary for reproducibility and fair comparison.
+
+- **The conditional/marginal derivation for rendering is presented concisely but leaves a jump.** The paper states that p_i(u,v,t) factorizes as p_i(t) p_i(u,v|t) and notes that p(x,y,z|t) is a 3D Gaussian, but the step from this to p(u,v|t) being obtained via projection (Eq. 4-5) is implicit. Making this explicit would improve clarity.
 
 ### Trivial
-
-- None (the paper is generally well-written and the parser artifacts are not author errors).
+None.
 
 ## Nice-to-Haves
 
-- A direct numerical characterization of the expressivity of the 4D Gaussian: what types of motion (e.g., non-linear trajectories, non-rigid deformation) require more Gaussians to approximate, and at what cost?
-- Including temporal consistency metrics (e.g., inter-frame PSNR, LPIPS over time, or flow warping error) would strengthen the evaluation.
+- **Ablation on Fourier order n for 4DSH.** Showing PSNR vs. max n (e.g., n=0,1,2,3) would directly quantify the benefit of temporal frequency components in color modeling beyond the current 4DSH vs. no-4DSH binary comparison.
+
+- **Rendering time breakdown.** Splitting the per-frame cost into (a) computing conditional 3D Gaussians from 4D representation, (b) depth sorting, and (c) rasterization would clarify the real-time claim and help others optimize.
+
+- **Visualization of individual 4D Gaussian trajectories.** Showing the 3D trajectory of μ_{xyz|t} for selected Gaussians over time would directly demonstrate the motion capture capability beyond the aggregate optical flow visualization.
 
 ## Removed Points
-
-**From Harsh Critic:**
-- The critic's framing that missing comparisons "fundamentally undermines the contribution" is too absolute — the core representation contribution (4D Gaussian with 4D rotation) is novel and independently interesting regardless of whether it beats every concurrent method. The missing comparison remains a major weakness, but it does not invalidate the methodology itself.
-
-**From Strength Finder:**
-- Several "supporting strengths" (e.g., "end-to-end training on entire videos," "emergent optical flow") are retained as they are concrete and verified.
-- The claim that the method "achieves state-of-the-art" is kept but caveated — the evidence supports SOTA against the included baselines, but the omission of dynamic Gaussian baselines makes the broader SOTA claim unverifiable.
+- *Ablation on temporal densification strategy is insufficient.* The paper already ablates this in Table 3 ("w/o densification in time") and describes the strategy in Section 3.3. A finer-grained analysis would be nice-to-have but the current ablation is adequate.
+- *Criticism about missing standard deviations in Table 1.* Standard deviations are not typically reported in this benchmark's evaluation protocol; requesting them goes beyond community norms.
+- *LPIPS backbone difference.* The paper explicitly notes the different backbones (AlexNet vs. VGG) at line 251; this is transparently documented rather than an error.
+- *"Unfair comparison" claim.* The paper's method is compared against published baselines using their reported numbers; there is no evidence of unfair comparison favoring the author's method.
 
 ## Novel Insights
-
-The reviews reveal a tension not fully addressed in the paper: the 4D Gaussian representation imposes a *constant-spatial-covariance* prior that is neither discussed nor analyzed. This is a genuinely novel observation about the paper's limitations that goes beyond what the authors reported. The missing baseline comparison, while important, is a standard experimental gap; the constant-covariance issue is a deeper methodological insight that could inform future work on 4D primitives for dynamic scenes.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Include direct quantitative comparisons against Luiten et al. (Dynamic 3D Gaussians), Yang et al. (Deformable 3DGS), Wu et al. (4D-GS), and Kratimenos et al. (DyMF) on both Plenoptic Video and D-NeRF datasets.** This is the single most important revision — without it, the paper's central claims cannot be properly evaluated.
-
-2. **Add a discussion of the constant-covariance limitation** (Eq. 184). Analyze what types of motion the 4D Gaussian can and cannot represent, and show empirically whether densification compensates (e.g., track the number of Gaussians on scenes with different motion complexity, or compare the method's performance on articulated vs. rigid-motion scenes).
-
-3. **Provide a quantitative evaluation of temporal consistency** — either standard metrics (inter-frame PSNR, LPIPS across time) or a simple comparison of the batch-sampling strategy vs. alternatives (e.g., random time sampling).
-
-4. **Soften the "first ever" claim** in the introduction and conclusion, or qualify it carefully with respect to the specific combination of properties (real-time + high-fidelity + end-to-end on complex real-world scenes) rather than claiming primacy broadly.
+- Add sine terms to the 4DSH basis (or replace cosine with complex exponentials) to complete the Fourier basis, or explicitly justify why cosine-only is empirically sufficient given the per-Gaussian temporal centering.
+- Document the rendering resolution, GPU model, and provide a per-frame runtime breakdown (conditional computation vs. rasterization) to substantiate the real-time claim.
+- Add a brief justification or experiment showing that the cosine-only 4DSH basis does not meaningfully constrain empirical performance.
 
 ## Score and Decision
 
-**Calibration anchors (all from the provided human-review corpus):**
+### Calibration Anchors
 
-| Path | Avg Human Score | Comparison |
-|------|----------------|------------|
-| SplineGS (tMG6btjBfd) | 6.00 | Accepted. Similar topic (dynamic GS), compared against dynamic Gaussian baselines but had novelty concerns. Current paper has cleaner novelty but weaker experimental validation. |
-| GaussianFlow (okD9dbifxa) | 5.83 | Rejected. Added flow supervision to 4DGS but missing comparisons. Current paper has more original core representation. |
-| GSLK (dkrEoT68by) | 6.00 | Accepted. Analytical formulation with relevant baselines. Stronger empirical validation than current paper. |
-| ReflectiveGS (xPxHQHDH2u) | 6.50 | Accepted. Well-evaluated on reflective scenes. Stronger experimental thoroughness. |
-| KG4D (wKOoWTBMZe) | 3.67 | Rejected. Poorly written with unclear contributions. Current paper is far stronger. |
-| HIWE (NLRo4qhg6t) | 3.00 | Rejected. Unrelated topic, weak contribution. |
-| NoPoSplat (P4o9akekdf) | 8.00 | Accepted. Exceptionally strong submission with clean evaluation. |
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| /home/.../P4o9akekdf.md (NoPoSplat) | 8.0 | Feed-forward GS from unposed images; different problem setting (static, generalizable), similar quality of contribution |
+| /home/.../rzF0R6GOd4.md (Neural SDF Flow) | 8.0 | Dynamic scene surface reconstruction with strong theory; different task (geometry vs. NVS), comparable rigor |
+| /home/.../y8uPsxR8PN.md (Sort-free GS) | 7.0 | Rendering optimization for GS; narrower scope, less impactful than 4DGS |
+| /home/.../QuVlUn4T2G.md (Pseudo-Generalized DVS) | 6.75 | Dynamic NVS from monocular video; lower quality results, more engineering-focused |
+| /home/.../c1RhJVTPwT.md (Swift4D) | 6.5 | Dynamic GS with static/dynamic decomposition; less principled formulation, our paper is stronger |
+| /home/.../okD9dbifxa.md (GaussianFlow) | 5.83 | Flow supervision for 4D GS; incremental improvement over base method |
+| /home/.../zFfZEQHUiv.md (SC-4DGS) | 4.0 | Pose-free dynamic GS, pipeline paper; our paper is clearly stronger |
+| /home/.../ylgg2RE7ub.md (IF-MoDGS) | 4.0 | Pose-free dynamic GS with limited novelty; our paper is much stronger |
+| /home/.../NLRo4qhg6t.md (HIWE) | 3.0 | Grid-based NeRF acceleration; low quality |
+| /home/.../2prShxdLkX.md (MoDGS) | 6.75 | Dynamic GS from casual monocular video; similar problem, comparable quality |
 
-The paper's core representation contribution is original and well-motivated. However, the omission of the most relevant dynamic Gaussian baselines from the experimental comparison is a significant gap that prevents verification of the central SOTA claims. This is the same class of issue that led to rejection of GaussianFlow (5.83). The paper is stronger than GaussianFlow in its core methodological novelty but weaker than SplineGS (6.00) in experimental thoroughness. With the required comparisons, it could be a solid contribution.
+The paper presents a mathematically sound and empirically strong contribution. Its clean 4D Gaussian formulation with full 4D rotation is more principled than deformation-field-based alternatives, and it is the only dynamic scene method achieving real-time rendering with SOTA quality. The weaknesses (cosine-only 4DSH, missing rendering documentation) are real but do not undermine the core claims — they are addressable in revision. Positioned relative to the anchors, the paper sits between the 8.0-level groundbreaking contributions (which require more novelty/conceptual leap) and the 6-7 level solid contributions. The contribution is substantial but not paradigm-shifting.
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

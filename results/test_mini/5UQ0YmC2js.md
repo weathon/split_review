@@ -1,85 +1,146 @@
-Now I have sufficient calibration data. Let me produce the final consolidated review.
+Now I have all the information I need. Let me construct the final review.
 
 ## Summary
-
-This paper proposes AdvI2I, a framework for adversarial image attacks on Image-to-Image (I2I) diffusion models. It trains a generator to craft adversarial perturbations on conditioning images that induce the model to produce NSFW content without modifying the text prompt. An adaptive variant (AdvI2I-Adaptive) further adds a safety-checker loss term and Gaussian noise injection to bypass post-hoc defenses. Experiments on InstructPix2Pix and SDv1.5-Inpainting demonstrate high ASR (81.5% for nudity) and resilience against defenses like SLD, negative prompting, Gaussian noising, and safety checkers.
+2-3 sentence summary of the paper's contribution.
 
 ## Strengths
-
-1. **Genuinely underexplored attack surface**: Prior work on adversarial NSFW generation focuses on text-prompt attacks for T2I models. This paper identifies that I2I models accept image conditioning, creating a new attack vector that has received little attention. This timely contribution broadens the community's understanding of safety vulnerabilities in diffusion models.
-
-2. **Clean, well-motivated method design**: The pipeline is conceptually coherent — extract an NSFW concept vector from contrastive prompt pairs, use it to shift the text embedding, then train a generator (using a pre-trained VAE) to match the resulting latent feature through only the image conditioning path. The adaptive variant's addition of a safety-checker cosine-similarity loss and Gaussian noise injection during training is a sensible, principled extension.
-
-3. **Strong empirical results on the core attack**: AdvI2I achieves 81.5% ASR on InstructPix2Pix and 82.5% on SDv1.5-Inpainting for nudity without defenses, substantially outperforming baselines Attack VAE (19.0%, 41.5%) and MMA (68.5%, 42.0%). The adaptive variant maintains 70.5–72.0% ASR even under Safety Checker defense, while plain AdvI2I drops to 10.5–18.0%, demonstrating a meaningful improvement.
-
-4. **Demonstrated generalization**: Table 5 shows ASR above 63.5% on unseen images and 68.5% on unseen prompts across both models and concepts, showing the adversarial generator transfers beyond its training set rather than overfitting.
-
-5. **Ablation on noise bounds**: Table 6 shows AdvI2I remains effective at the smallest bound (32/255) with 76.5% ASR, and the adaptive variant achieves 61.0% under SC at that bound — evidence that the attack does not rely on large perturbations.
+- strength 1 with evidence
+- strength 2 with evidence
 
 ## Weaknesses
 
 ### Fatal
-None.
 
 ### Major
 
-1. **No perceptual similarity metrics despite claiming visual similarity**: The paper's central framing emphasizes that adversarial images are "visually similar" to originals (Eq. 4 constraint), yet reports zero perceptual similarity metrics (SSIM, LPIPS, or human evaluation). The noise bounds tested (32/255, 64/255, 128/255 span a wide range; 128/255 ≈ 0.5 in [0,1] is large enough to be clearly visible. The case study figures have Gaussian blurs applied for ethical reasons, so they cannot substitute for quantitative perceptual evaluation. Without this evidence, the threat model is uncalibrated: the paper cannot support its claim that these attacks are stealthier than prompt-based alternatives, which is a core part of the motivation.
-
-2. **Missing ablation and unfulfilled experimental claims**: (a) The paper states "W/o Generator" is introduced as an ablation (removing the generator and directly optimizing pixel perturbations), but results for this baseline are absent from all tables. This is critical for understanding whether the generator architecture is essential or merely incidental. (b) The paper states "We also evaluate the transferability of AdvI2I from SDv1.5-Inpainting to other SD inpainting models" (line 197–198), but no such results appear anywhere in the paper. These are broken promises that weaken the experimental completeness.
-
-3. **Underspecified safety checker adaptation**: The adaptive loss (Eq. 5) minimizes cosine similarity between generated images and NSFW concept vectors \(C_i\), but the paper never specifies what \(C_i\) are (which safety checker model, how many vectors, what they represent) nor reports the cosine similarity values before vs. after adaptation. Without this analysis, it is unclear whether the safety checker is being genuinely confused or merely forced to score just below a threshold. This limits the depth of the robustness analysis.
-
 ### Minor
 
-1. **Coherence gap between motivation and evaluation**: The paper motivates image attacks by showing text filters easily catch adversarial prompts (Table 2), yet the defenses evaluated in main experiments (SLD, SD-NP, GN, SC) are generation-side or post-hoc defenses, not text filters. While it is trivially true that AdvI2I uses benign text and would bypass text filters, the paper would be strengthened by explicitly verifying this rather than leaving it implicit.
-
-2. **No statistical uncertainty reported**: ASR numbers are reported as point estimates without confidence intervals or error bars. Given the evaluation set is 200 samples, providing intervals would help assess the reliability of the reported differences between methods.
-
-3. **Dataset construction details are sparse**: The paper filters images from the "sexy" category of NSFW Data Scraper by removing NSFW-classified images, but does not report how many were removed or show examples of the 30 ChatGPT-generated prompts. While not fatal, this hurts reproducibility.
-
 ### Trivial
-None.
 
 ## Nice-to-Haves
-- Adding a standard PGD-style attack on images (optimizing the same loss directly on pixels) as an additional baseline, beyond the missing "W/o Generator" ablation.
-- Reporting inference time / computational cost of the adversarial generator compared to direct optimization approaches.
-- A histogram or distribution of safety checker cosine similarity scores before and after adaptation to deepen the analysis of how the adaptive loss works.
 
 ## Removed Points
 
-- **"The paper never tests whether its own adversarial images would be caught by text filters"** — This is trivially true because AdvI2I uses benign text prompts; text filters operate on prompts, not images. The paper's logic is that image-based attacks evade prompt filters by design. The criticism demands evidence for something that follows directly from the method's definition. Moved to Removed Points (scope creep / trivially satisfied).
-- **Several Strengths Finder items were removed** for being generic or superficial (e.g., "this paper addressed an important problem", "the paper is well-written") — these add no specific evidence about the paper's contribution.
-- **Criticism about missing confidence intervals as a major weakness** — This is standard practice in this line of work where single-run evaluation on 200 samples is the norm. Weakened to minor.
-- **Formatting/style nitpicks** from the harsh critic about presentation — removed per instructions (parser artifacts, not author errors).
-
 ## Novel Insights
-
-Beyond the paper's own contributions, the pattern that emerges from the reviews is instructive: the paper identifies a genuinely novel threat model (I2I adversarial images) and designs a clean attack pipeline, but it repeatedly makes claims — about visual similarity, about ablation studies, about transferability — that are simply not backed by presented evidence. This suggests that the main gap is not in the method's novelty or soundness, but in the thoroughness of the evaluation. The adaptive variant's success against safety checkers (70.5% vs. 18.0% ASR) is the paper's strongest empirical finding and deserves more detailed analysis than it currently receives.
 
 ## Suggestions
 
-1. **Add SSIM/LPIPS metrics** for adversarial images at each noise bound. This is the single most important addition — it directly supports the paper's claim that image attacks are stealthier than text attacks.
-2. **Report the "W/o Generator" baseline** or remove the claim. Also add a simple PGD-based image attack as a stronger baseline.
-3. **Either show the promised transferability results** to other SD inpainting models, or remove the statement from the paper.
-4. **Specify the safety checker concept vectors \(C_i\)** (which model, how many, what they represent) and report cosine similarity distributions before/after adaptation.
-5. **Add confidence intervals or error bars** for ASR numbers, especially since the evaluation set is only 200 samples.
+Let me now write the complete final review.
+
+---
+
+First, let me verify the specific claims from the harsh critic against the paper to properly handle the "Removed Points."
+
+**Critical Issue 1 (Generator Architecture)**: The paper says at line 130: "Unlike traditional generator training approaches that use U-Net or ResNet architectures, we leverage a pre-trained VAE as the adversarial image generator." The critic says this is undefined. The paper DOES specify the architecture (pre-trained VAE), though it doesn't detail which parts of the VAE are trainable. The critic's stronger claim that this "invalidates the method" is overblown — using a VAE as a perturbation-producing network is a common design pattern. However, the lack of specificity about what ψ parameterizes is a genuine clarity issue. I'll KEEP this as a Minor/Moderate weakness but downgrade it from the critic's framing.
+
+**Critical Issue 2 (Safety Checker Loss)**: Looking at Eq. (5): L_sc = Σ cos(D(f_θ^1(g_ψ(x)), τ_θ(p)), C_i). The VAE decoder D takes the latent f_θ^1 and decodes to an image. But D takes two arguments as written. The safety checker operates in some feature space, and C_i are "predefined NSFW concept vectors" — but their dimensionality relative to the decoded image output is unclear. This is a real notational/formulation issue. I'll KEEP but moderate slightly — it's a Major clarity problem, not necessarily fatal since the intent (minimize SC-detected NSFW content) is clear.
+
+**Critical Issue 3 (Missing W/o Generator baseline)**: Line 200-201 explicitly mentions "W/o Generator" as a variation. But it's absent from all result tables. This is a genuine experimental omission. I'll KEEP as Major.
+
+**Critical Issue 4 (Motivation-experiment disconnect)**: The critic claims the text-filter motivation (Table 2) doesn't connect to the image-attack evaluation. Actually, the paper's narrative is: (1) prompt attacks fail against text filters, (2) therefore we need image-based attacks, (3) we evaluate image attacks against image-specific defenses. This is coherent. The critic's point is a strawman. I'll REMOVE this.
+
+Let me also verify the Strengths Finder claims:
+
+1. "Novel attack vector on I2I diffusion models" — supported by data showing AdvI2I achieves 81.5% ASR on InstructPix2Pix for nudity. ✓ KEEP
+
+2. "Robustness against safety defenses" — AdvI2I-Adaptive maintains 70.5% ASR under SC vs vanilla 18.0%. ✓ KEEP
+
+3. "Preliminary analysis motivating the attack" — Table 2 shows text filters reduce ASR of prompt attacks. ✓ KEEP (critic's attempt to invalidate this was a strawman, removed)
+
+4. "Generalization to unseen inputs" — Table shows 68.5% on unseen images, 75.0% on unseen prompts. ✓ KEEP
+
+None of the Strength Finder's outputs are generic or conflict with verified weaknesses.
+
+Now let me produce the full review.## Summary
+
+This paper introduces AdvI2I, a framework that generates adversarial image perturbations to induce NSFW content generation in Image-to-Image (I2I) diffusion models while keeping the text prompt benign. The method trains a generator (parameterized using a pre-trained VAE) to produce adversarial images by matching latent features from NSFW-concept-shifted embeddings during the diffusion process. An adaptive variant (AdvI2I-Adaptive) adds a safety-checker evasion loss and Gaussian noise augmentation during training. Experiments on InstructPix2Pix and SDv1.5-Inpainting across nudity and violence concepts show high ASR (81–82% without defenses) and that the adaptive variant maintains ~70% ASR even under the Safety Checker defense — a practically concerning result.
+
+## Strengths
+
+- **Novel attack vector on I2I diffusion models**: The paper identifies and systematically demonstrates that adversarial *images* (not prompts) can induce NSFW generation in I2I models. AdvI2I achieves 81.5% ASR for nudity on InstructPix2Pix without defenses, substantially outperforming the MMA baseline (68.5%) and Attack VAE (19.0%) (Table ~p2p).
+
+- **Robustness against safety defenses is significant**: AdvI2I-Adaptive maintains 70.5% ASR under the Safety Checker defense for nudity on InstructPix2Pix, compared to vanilla AdvI2I's 18.0% and MMA's 64.5% (Table ~p2p, SC column). This demonstrates that existing post-hoc safety mechanisms can be circumvented by incorporating an adaptive loss during generator training.
+
+- **Clean motivation from empirical evaluation of text filters**: Table 2 systematically shows that four text-based filters (perplexity, keyword, LLM, embedding) reduce adversarial prompt attack ASR by an average of 58%, with the LLM filter reducing MMA to 4%. This evidence convincingly establishes the practical motivation for exploring image-based attack vectors.
+
+- **Generalization to unseen inputs**: Table ~unseen shows AdvI2I achieves 68.5% ASR on unseen images and 75.0% on unseen prompts for nudity on InstructPix2Pix, suggesting the generator learns transferable adversarial perturbations rather than overfitting to training data.
+
+## Weaknesses
+
+### Major
+
+- **Missing direct-optimization baseline ("W/o Generator")**: Line 200–201 explicitly states: *"Additionally, we introduce another variation, 'W/o Generator,' as an ablation study, where we remove the adversarial noise generator and directly optimize adversarial perturbations."* Yet no results for this ablation appear in any table. This is the simplest and most natural baseline for an adversarial image attack — a per-instance PGD-like optimization under the same `||x'−x||_p ≤ ε` constraint — and its absence makes it impossible to verify the paper's core claim that a trained generator provides any advantage over instance-specific optimization. Without this comparison, the "universal and transferable" contribution is unsupported.
+
+- **Safety checker loss formulation is unclear and dimensionally ambiguous (Eq. 5)**: The loss writes ℒ_sc = Σ cos(D(f_θ^1(g_ψ(x)), τ_θ(p)), C_i). The paper states D is the VAE decoder producing an output image, and C_i are "predefined NSFW concept vectors." If C_i exist in the safety checker's feature space (the natural interpretation, since the SC computes cosine similarity in latent space), then computing cosine similarity between a decoded pixel-space image and feature-space concept vectors is dimensionally undefined. If C_i are in pixel space, this is never stated. The paper also does not specify whether the decoded image passes through the safety checker's own feature extractor before the cosine comparison. This ambiguity makes the central loss function of the adaptive variant unverifiable as written.
+
+- **Generator architecture is underspecified**: Line 130 says *"we leverage a pre-trained VAE as the adversarial image generator."* It is never stated what parameters ψ actually control — are all VAE weights fine-tuned? Is only the decoder trained? Is the encoder used at all in generating g_ψ(x)? The paper contrasts with U-Net/ResNet generators but doesn't explain how a VAE is repurposed as a perturbation generator. While this is not a fatal omission (the high-level idea is understandable), it prevents reproducibility and leaves the core technical contribution partially unspecified.
+
+### Minor
+
+- **Missing ablation of adaptive components**: The AdvI2I-Adaptive variant combines Gaussian noise augmentation and the SC loss ℒ_sc with no ablation isolating each component's contribution. It is unclear whether the SC loss, the noise, or their combination drives the robustness improvement under different defenses.
+
+- **No image quality or distortion metrics**: The noise bound ε is reported in pixel values (32/255, 64/255, 128/255), but no LPIPS, PSNR, or SSIM values are reported between the adversarial and original images. Without perceptual distortion metrics, it is difficult to assess the visual detectability or practical stealthiness of the attack.
+
+- **Algorithm 1 contains a notation error**: Line 163 writes `ψ_θ(p^c_i)` where `τ_θ(p^c_i)` is intended, and the function τ_θ is inconsistently referred to as ψ_θ.
+
+### Trivial
+
+- The p-norm in the constraint `||g_ψ(x) − x||_p ≤ ε` (Eq. 4) is never specified (presumably L∞, but stated as Lp throughout).
+- Table 2 caption does not define acronyms for the defense methods.
+- Prompt pairs used for NSFW concept extraction (Eq. 2) are not listed or exemplified in the paper.
+
+## Nice-to-Haves
+
+- Testing transferability to more recent I2I models (e.g., SDXL-Instruct, ControlNet-based editing) would broaden the impact.
+- A feature-space analysis (e.g., t-SNE or cosine similarity distributions) comparing how AdvI2I vs. AdvI2I-Adaptive images are represented by the Safety Checker vs. NudeNet would mechanistically explain why the adaptive variant bypasses SC while remaining detectable by NudeNet.
+- Ablation of the timestep choice t (currently fixed to 1) would justify this design decision.
+
+## Removed Points
+
+These points are flagged to be removed; treat them with caution.
+
+- **Harsh Critic Issue 4 (Motivation-experiment disconnect)**: The critic claims the paper's Table 2 motivation (text filters on prompt attacks) does not connect to the experimental evaluation (SLD, SD-NP, GN, SC against image attacks). This is a misreading: the paper's narrative is that prompt-attacks are detectable by text filters, motivating the *need* for image attacks. The defenses evaluated against image attacks are standard diffusion-model safeguards (concept removal, pre-processing, post-hoc filtering), which are the appropriate defenses for this threat model. The text filters are not claimed to apply to images — they motivate why image attacks are a worthwhile alternative threat vector. This is a coherent framing, not a disconnect.
+
+- **Harsh Critic's claim that "VAE is not a conditional generator" invalidates the method**: The paper uses a VAE as a learned perturbation network (taking an image as input and outputting a perturbed version), not as a generative model for sampling. This is a standard design pattern in adversarial machine learning. The issue is underspecification of which VAE components are trainable, not that the approach is conceptually invalid.
+
+- **Harsh Critic's demand for ablation on different timestep t**: Requesting an ablation for all possible t values is reasonable but falls under "nice-to-have" methodological depth, not a core weakness.
+
+- **Strength Finder's generic framing**: No generic/superficial strengths were present in the Strength Finder output — all four claimed strengths were concrete and evidence-backed.
+
+## Novel Insights
+
+None beyond the paper's own contributions.
+
+## Suggestions
+
+1. **Report the "W/o Generator" baseline results.** This is the single most important missing experiment. Show the ASR of directly optimizing per-image perturbations under the same ε constraint, using the same objective (minimizing ||f_θ^t(x', τ(p)) − f_θ^t(x, τ̃)||²) across all defense settings. If the generator performs comparably or better, the paper's core claim is supported; if not, the contribution needs reframing.
+
+2. **Clarify the safety checker loss in Eq. (5).** Specify the exact computation: does D(f_θ^1(...)) produce a pixel image that is then fed through the safety checker's feature extractor before cosine comparison with C_i? If so, write the full chain explicitly. If C_i are in the safety checker's embedding space, state this and show the full forward pass.
+
+3. **Specify the generator architecture.** State whether ψ includes the VAE encoder, decoder, or both; which parameters are trainable vs. frozen; and how g_ψ(x) is computed from x.
+
+4. **Add an ablation table** showing AdvI2I-Adaptive with (a) only Gaussian noise (no ℒ_sc), (b) only ℒ_sc (no noise), and (c) both, across all four defenses, to isolate each component's role.
+
+5. **Report perceptual distortion metrics** (LPIPS or SSIM) alongside ASR to contextualize the perturbation budgets.
 
 ## Score and Decision
 
 ### Calibration Anchors
 
 | Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/WYsLU5TEEo.md` | 2.50 | Weaker paper — confused framework, unclear contributions. Current paper is substantially stronger in clarity and methodology. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6qeCyvlJUJ.md` | 3.67 | Weaker paper — missing baselines, questionable comparisons. Current paper has cleaner method and more complete evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/xETLME9sNq.md` | 4.00 | Comparable quality — both address NSFW content in diffusion models, but this paper has a more coherent attack framing and stronger quantitative results. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/QeX0YFt4iW.md` | 4.75 | Very similar topic (MMA-Diffusion). Current paper is somewhat stronger — clearer contribution (I2I vs. multi-modal) and actual ASR numbers rather than proxy metrics. Both share missing perceptual evaluation. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/XjSfcJUcaA.md` | 4.75 | Similar quality — both have clean methods but incomplete evaluations. Current paper has slightly stronger empirical evidence. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/nKSkM5h2VN.md` | 5.33 | Slightly stronger — better evaluation completeness. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/agHddsQhsL.md` | 7.50 | Stronger paper — thorough experiments, complete ablations, well-supported claims. Current paper falls short of this standard due to missing evidence. |
-| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/I5lcjmFmlc.md` | 8.00 | Much stronger paper — rigorous theoretical grounding, comprehensive evaluation, SOTA results. Current paper is far from this level of completeness. |
+|---|---|---|
+| I5lcjmFmlc (Robust Classification via Diffusion) | 8.00 | Substantially stronger — rigorous theory, thorough evaluation, strong adaptive attacks. This paper is much weaker in all dimensions. |
+| tiJzOop4u6 (Rethinking Adv. Attacks as Protection) | 6.25 | Stronger — more comprehensive experiments, clearer claims, better positioned within existing literature. This paper is somewhat weaker. |
+| NzxCMe88HX (Protection against Diffusion Mimicry) | 5.75 | Comparable — both have meaningful contributions with some clarity/specification issues. |
+| Gf4KZIqLHD (Backdoor Attacks on Security DMs) | 5.50 | Comparable — both have solid experimental evidence but incomplete ablations. |
+| sbiU3WZpTp (Robustness of LDMs) | 5.33 | Comparable — both address underexplored aspects of diffusion model safety with reasonable but imperfect evaluations. |
+| QeX0YFt4iW (Multi-modality Adv. Attacks on LDMs) | 4.75 | This paper is somewhat stronger — more complete evaluation metrics and a clearer threat model. |
+| XjSfcJUcaA (Adversarial Null-Text Embeddings) | 4.75 | This paper is slightly stronger — more systematic defense evaluation and clearer contributions. |
+| 6qeCyvlJUJ (EvoSeed / Breaking Free) | 3.67 | This paper is stronger — better experimental design and more grounded claims despite missing baselines. |
 
-The paper has a **novel and timely contribution** (I2I adversarial image attack) and a **cleanly designed method** with **impressive ASR numbers**, but it is held back by **significant evidential gaps**: no perceptual similarity metrics for the central "visual similarity" claim, a missing ablation that was promised, unfulfilled transferability experiments, and underspecified safety checker analysis. These are fixable in revision but make the current submission unable to fully support its claims.
+### Overall Assessment
+
+The paper tackles a timely and genuinely underexplored problem — adversarial image attacks on I2I diffusion models — and produces empirical results that are striking in magnitude (81–82% ASR dropping only to ~70% under the adaptive variant even with safety checkers). The core idea is novel and the two-model, two-concept evaluation provides reasonable breadth. However, the paper has three issues that prevent acceptance in its current form: (1) the **critical "W/o Generator" baseline is mentioned but never reported**, leaving the paper's central claim about generator-based attack untested against the simplest alternative; (2) the **safety checker loss (Eq. 5) is dimensionally ambiguous** as written, making the adaptive method's mechanism unverifiable; and (3) the **generator architecture is underspecified** to a degree that harms reproducibility. These are fixable in revision but are substantive enough that the paper does not meet the bar for acceptance as-is.
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

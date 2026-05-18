@@ -1,96 +1,88 @@
-Now I have sufficient context. Let me synthesize the final review.
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
-This paper proposes OptBatch, an online batch selection method for instruction tuning that combines (i) loss-based stratified sampling, (ii) distance-maximization between selected samples within/across strata using Hessian-gradient features, and (iii) a gradient normalizer inspired by Adam's second-moment estimate. Experiments on three datasets (NetLit, LLaMaQA, WikiMatrix) with two model families (LLaMa-3, ChatGLM-3) report lower loss than baselines at various pruning rates, with some downstream evaluation via GPT‑4 scoring, human evaluation, and reference-based metrics.
 
----
+This paper proposes OptBatch, an online data selection method for instruction tuning that combines loss-based stratified sampling with farthest-point diversity maximization in an adaptively normalized gradient space. The key idea is to partition each batch into strata by loss, sample proportionally to exp(loss), and then select a diverse subset by maximizing L2 distances between samples' gradient features. The method is evaluated on three datasets (NetLit, WikiMatrix, LLaMaQA) using LLaMa3-8B and ChatGLM3-6B, with GPT-4 scoring, human evaluation, and reference-based metrics.
 
 ## Strengths
 
-- **Novel combination of stratified sampling and distance-maximization for online batch selection.** OptBatch is the first method to simultaneously sample from multiple loss strata (balancing easy vs. hard data) and then enforce diversity via farthest-point selection on gradient-based features within/across strata. This directly addresses limitations of prior work: Hong et al. (2024) ignores learnability, and InfoBatch (Qin et al., 2023) collapses at high pruning rates. The core idea — that batch diversity and loss-informed sampling can be jointly optimized — is a reasonable and practically motivated direction.
+- **Novel combination of stratified sampling and diversity maximization**: OptBatch is a genuinely synthetic approach — it partitions batches by loss (coverage), weights by exp(loss) (learnability), and uses farthest-point selection on gradient features (diversity). This three-part design goes beyond methods that only select by difficulty or only by diversity. The idea is intuitive and worth exploring.
 
-- **Evaluation across multiple tasks, models, and metric types.** The experiments cover dialogue (NetLit), QA (LLaMaQA), and translation (WikiMatrix) using both LLaMa-3-8B and ChatGLM-3-6B, with loss curves, GPT‑4 scoring (Figure 7a), human evaluation (Figure 7b), and BLEU/ROUGE (Tables 1–2). Human evaluation corrects GPT‑4 annotation errors and shows OptBatch achieving 61.8 % high-score examples vs. ~47 % for CCS and InfoBatch. This breadth of evaluation is a genuine strength relative to many prior data-selection papers that evaluate on only one task or metric.
+- **Consistent rank-1 results across multiple datasets, models, and metrics**: OptBatch outperforms baselines (Random, Online Hard, CCS, InfoBatch) on Bleu-4, Rouge-1/2/L for both LLaMa3 and ChatGLM3 on LLaMaQA and WikiMatrix (Tables 1-2), achieves the best GPT-4 score distribution (60.5% high-score vs. 52.6% for CCS) and the best human evaluation (61.8% vs. 47.5% for CCS). This breadth across 2 model families, 3 tasks, and 5 evaluation signals provides reasonable evidence that the method works in practice.
 
-- **Demonstrated ability to achieve lower loss with fewer data points.** Figure 6 shows that OptBatch's loss *decreases* from 20 % to 50 % pruning rate, then remains below the full-data loss even at 90 % pruning. While loss as a metric has limitations (see Weaknesses), this pattern suggests the method consistently identifies more learnable subsets.
-
----
+- **Computational savings quantified with explicit FLOPs analysis**: Section 4.4 provides concrete formulas for full-batch and OptBatch FLOPs, showing that at 70% pruning the backward pass is scaled by (1-α). Figure 8 reports at least 30% computational savings while maintaining loss. This direct efficiency measurement is more actionable than qualitative speed claims.
 
 ## Weaknesses
 
 ### Major
 
-1. **The core algorithm is critically underspecified.** The paper does not specify: the number of strata \(K\), how stratum boundaries are determined from loss values, the exact sampling procedure "according to the probability of \(\exp(\mathrm{loss})\)" (Figure 1 caption), the distance metric used in farthest-point selection, or the stopping criterion for within-stratum selection. No pseudocode is provided. A reader cannot reproduce the method from the text. This is the most serious weakness — without specification, the paper's central contribution is not established as a reproducible algorithm.
+- **The "Hessian gradient" is a misrepresentation that undermines the claimed innovation.** 
+  The paper repeatedly calls \(H_t = \left\| \frac{\mathbf{g}_t}{\sqrt{\hat{\mathbf{v}}_t}} \right\|_{2,\text{axis}=1}\) a "Hessian gradient" (abstract, Sections 2.2, 3.2, conclusion) and claims it "accounts for variations in gradient curvature across batches" (Section 3.2). This is not a Hessian approximation — it is the gradient norm divided element-wise by the square root of Adam's second-moment estimate. No connection to curvature, second derivatives, or the Hessian matrix is established or possible from this formula. The paper's claimed theoretical innovation rests on this concept. The underlying adaptive normalization may still be useful, but describing it as "Hessian" is a factual error that damages credibility. (Verified: Equation 8 and surrounding text.)
 
-2. **The theoretical justification is decorative and does not connect to the algorithm.** The Lipschitz-continuity bound (Eq. 7) is stated without derivation or proof; its form (a generic generalization bound) does not reference distances, gradient norms, or any quantity the algorithm actually maximizes. The paper claims that "maximizing gradient distances between samples" follows from this bound (Section 3.1), but never shows *how*. The "Hessian-approximated gradient" (Eq. 9) is simply the gradient normalized by Adam's \(\sqrt{\hat{\mathbf{v}}_t}\) — this is not a Hessian approximation, and the paper provides no justification for calling it one or for why this normalization improves diversity. The theory section adds no rigor to the method.
+- **The primary quantitative evidence (loss curves in Figures 3–6) does not specify whether the loss is computed on training, validation, or test data.** 
+  Figure captions say "Evaluation on different datasets" and the text discusses "loss" without ever stating the data split. Section 4.2, which contains these figures, does not mention a held-out set. If these are training losses, the curves convey nothing about generalization and the paper's core claim (that OptBatch "surpasses previous state-of-the-art methods") is unsupported by its main figures. If they are test losses, the omission makes the central experimental section uninterpretable. The paper later uses GPT-4, human eval, and BLEU/Rouge on test data, so reporting test loss should have been straightforward. This is a serious reporting gap. (Verified: Sections 4.1-4.2 make no mention of train/test splits for any dataset.)
 
-3. **No ablation study isolating the three claimed components.** The method has three distinct design choices: (a) loss-based stratified sampling, (b) farthest-point distance maximization, (c) Hessian-gradient normalization. Figure 9 compares only feature types (embedding vs. gradient norm vs. Hessian gradient) but does *not* vary the sampling strategy (e.g., stratified vs. uniform) or the selection strategy (e.g., farthest-point vs. random within stratum). Without ablations, it is impossible to know which component drives improvements or whether the gains come from the combination versus any single part. This makes the contribution largely uninterpretable.
+- **The Lipschitz continuity argument (Section 3.1) is presented as theoretical grounding but is incomplete and disconnected from the method.**
+  The inequality \(\|\nabla l(x,y;h_S')\| \leq r L_s + \sqrt{\frac{L^2 \log(1/\gamma)}{2n}}\) is given without defining \(r, L_s, L, \gamma, n\), without derivation or proof, and without any connection to the selection algorithm. The paper does not use this bound anywhere — not in algorithm design, analysis, or experiments. It reads as a placeholder rather than a contribution. (Verified: Section 3.1, no definitions or follow-up use.)
+
+- **Missing ablations for two of three claimed components.** OptBatch has three claimed components: (a) loss-based stratified sampling, (b) farthest-point diversity maximization, (c) Hessian gradient features. Figure 9 only ablates (c). There are no experiments removing (a) or (b) to demonstrate their individual contributions. The paper cannot attribute its performance to specific design choices without these ablations. (Verified: Figure 9 compares embedding vs. gradient norm vs. Hessian gradient only.)
 
 ### Minor
 
-4. **Primary evaluation metric (loss) is partially circular.** The selection strategy uses loss to stratify and weight samples, so reporting that OptBatch achieves lower loss than baselines is partly self-referential. The paper acknowledges this limitation in Section 6 ("Loss as the primary metric… loss is not the only metric") but nevertheless relies on loss for all main comparisons (Figures 3–6). Downstream metrics (GPT‑4, human eval, BLEU/ROUGE) are provided but only for specific settings — GPT‑4 and human evaluation cover only the NetLit dialogue task; reference-based metrics are reported at a single pruning rate (70 %) without error bars, significance tests, or multiple seeds.
+- **The algorithm is underspecified for replication.** The number of strata \(K\) is never stated. "Select \(|S|\) data according to the probability of \(\exp(\text{loss})\) and calculate the number of data in each stratum" is ambiguous — is this proportional allocation or something else? The farthest-point sampling procedure is described qualitatively but no pseudocode is given. A reader cannot reproduce the method without guessing these details. (Verified: Section 3, Figure 1 caption, and surrounding text.)
 
-5. **Computational cost analysis is incomplete.** The FLOPs formula (Section 4.4) only models backward-pass reduction. It ignores: (i) the forward-pass cost for computing loss on *all* samples in each batch (forward pass is not pruned), and (ii) the overhead of the selection algorithm itself (computing gradients for all samples, Hessian normalization, farthest-point distance calculations). No wall-clock time measurements are provided. The claimed 20–40 % cost reduction is therefore not reliably grounded.
+- **Computational cost analysis ignores overhead of selection.** The FLOPs comparison (Section 4.4) accounts only for forward/backward pass savings. It does not include the cost of computing Hessian gradients for all samples in a batch, farthest-point sampling, or stratification — all of which add non-trivial overhead, especially for large batches. (Verified: Section 4.4.)
 
-6. **InfoBatch baseline is modified without justification.** The paper reports increasing InfoBatch's threshold at high pruning rates to prevent collapse (Section 4.1). This is a modification of the original method and risks an unfair comparison. The authors should either justify why the original method is inapplicable or compare against the unmodified version.
+- **Baseline adaptation for InfoBatch is vague.** The paper says "we increase the threshold appropriately" for high pruning rates but does not specify how the threshold was chosen or whether it was tuned per dataset. Without a tuning protocol, the baselines may be operating at a disadvantage. (Verified: Section 4.1, baselines paragraph.)
 
 ### Trivial
 
-7. Figure 1 caption and several inline explanations are text-heavy and would benefit from a formal pseudocode block. The notation for strata (\(|S_i|\), \(K\)) is used without being explicitly defined in the method section.
-
----
+None.
 
 ## Nice-to-Haves
 
-- A wall-clock time comparison would make the efficiency claims concrete and address the FLOPs accounting gap.
-- Reporting results with standard deviations over multiple seeds (even 2–3) would enable readers to assess statistical significance, which is standard in empirical ML papers.
-- An ablation varying \(K\) (number of strata) would help understand sensitivity to this hyperparameter.
-
----
+- **Full ablation of stratified sampling and farthest-point selection** (separately and combined) would strongly strengthen the evaluation. As is, the paper cannot distinguish which component drives performance.
+- **Labeling the loss curves explicitly** as test/validation loss with train/test split descriptions would resolve the main experimental ambiguity.
+- **Wall-clock runtime comparison** including selection overhead would make the efficiency claim more complete.
 
 ## Removed Points
 
-- **Criticism about missing related work (LESS, RHO):** Per instructions, I cannot verify the existence or appropriateness of unlisted related works, so this is removed.
-- **Criticism about "not yet released" / reproducibility based on unreleased resources:** Removed per instructions; cited artifacts are assumed to exist.
-- **Strength Finder's generic claims** (e.g., "this paper addressed an important problem"): Removed as superficial unless tied to specific evidence. 
-- **Strength about Hessian gradient as a "novel adaptation"**: Kept but the review already notes the naming is misleading (not a true Hessian), so this strength is presented as a claimed contribution rather than a verified one.
+These points are flagged to be removed; treat them with caution:
 
----
+- **Harsh critic's "GPT-4 and human evaluation sample size not given"**: The paper states "each test data" and does report percentages. While the exact N is unclear, this is a minor presentation issue that doesn't threaten the human eval result.
+- **Strength Finder's "Hessian-approximated gradient optimization" listed as a core strength**: This uses the paper's own (misleading) terminology. The adaptive normalization itself may still be useful, so the strength is rephrased in the Strengths section as "adaptive gradient normalization."
+- **Strength Finder's claim that FLOPs analysis is "the single most important piece of evidence"**: This overstates the case — the most important evidence is the actual performance comparison, not the theoretical FLOPs derivation.
+- **Harsh critic's "sample size not given" for GPT-4 eval**: While exact N is missing, the percentages and the fact that it's corroborated by human evaluation make this non-critical.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core observation — that combining loss-stratified sampling with gradient-based diversity selection is promising but severely undersupported — emerges from the cross-review synthesis, but this is a critique, not a novel insight.
-
----
+None beyond the paper's own contributions. The core observation — that combining loss-stratified sampling with farthest-point diversity in an adaptively normalized gradient space can improve instruction tuning efficiency — is the paper's own novel angle. The reviews do not contribute independent analytical insights beyond identifying issues with the current presentation.
 
 ## Suggestions
 
-1. Provide a full pseudocode description of OptBatch (Algorithm 1) specifying \(K\), strata boundary determination, the exact sampling probability formula, the distance metric, and the stopping criterion for farthest-point selection.
-2. Add an ablation study that independently varies: (a) stratified vs. uniform sampling, (b) farthest-point vs. random within-stratum selection, (c) Hessian gradient vs. raw gradient norm vs. embedding features.
-3. Report wall-clock training time and account for the overhead of computing losses, gradients, and selections in each batch.
-4. Replace or supplement loss curves with task-specific downstream metrics at multiple pruning rates, with error bars over multiple seeds.
-5. Either justify the InfoBatch threshold modification or compare against the unmodified version.
-
----
+1. **Drop the "Hessian" terminology entirely.** Call the feature an "adaptive gradient norm" or "Adam-normalized gradient magnitude." The method does not lose interest; it becomes honest. Then explain why normalizing by \(\sqrt{\hat{\mathbf{v}}_t}\) helps (e.g., variance reduction across batches) rather than claiming curvature information.
+2. **State explicitly that the loss curves are test loss** (or validation loss). Describe the train/test split for each dataset. If they are training loss, restructure the paper to use generalization metrics as primary evidence.
+3. **Provide pseudocode** specifying \(K\), stratum allocation, and the exact farthest-point selection procedure.
+4. **Run ablations** removing stratified sampling (uniform random from full batch) and removing farthest-point diversity (random from each stratum) to isolate each component's contribution.
+5. **Report wall-clock time** including selection overhead to substantiate the efficiency claims.
+6. **Remove or properly ground the Lipschitz continuity section.** Either provide a complete derivation connected to the algorithm, or delete it if it does not inform the design.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration anchors** (all from deepreview_13k_calibration):
 
-| Paper | Path | Avg Score | Comparison |
-|-------|------|-----------|------------|
-| Self-Alignment with Instruction Backtranslation | `1oijHJBRsT.md` | 8.00 | Far more polished, well-specified, with rigorous evaluation. OptBatch is much weaker in every dimension. |
-| InfoBatch | `C61sk5LsK6.md` | 7.00 | Clearly described method with ablations, wall-clock time, and extensive experiments. OptBatch lacks all of these. |
-| GIO | `3NnfJnbJT2.md` | 7.00 | Well-specified algorithm with clear theoretical grounding and systematic experiments. OptBatch's theory is decorative by contrast. |
-| DELIFT | `Fty0wTcemV.md` | 6.00 | Well-specified method with clear evaluation. OptBatch has a less well-specified method and no ablations. |
-| GTP (Influential Language Data Selection) | `che9LCwPQM.md` | 4.75 | Had issues with method connection to claims but was better specified than OptBatch. |
-| Priority on High-Quality | `7qMrDf9zFU.md` | 4.75 | Similar domain. Had evaluation weaknesses but a clearly described method. OptBatch has a vaguer method spec. |
-| Disentangling Roles in Data Pruning | `EOPLy80bBm.md` | 3.00 | Had serious methodological flaws. OptBatch is somewhat better in having an actual proposed method, but the spec is poor. |
+| Anchor | Avg Score | Comparison to OptBatch |
+|--------|-----------|----------------------|
+| f4gF6AIHRy.md (DiSF, pre-training data selection) | 8.00 | Much stronger — clear methodology, thorough ablations, no misrepresentations |
+| bAFVlpFQvT.md (CoLM, memory-efficient training) | 6.75 | Stronger — well-motivated, systematic ablations, clear writing |
+| FAfxvdv1Dy.md (STAFF, coreset selection) | 6.50 | Stronger — comprehensive experiments, efficient overhead analysis |
+| Fty0wTcemV.md (DELIFT, instruction tuning data selection) | 6.00 | Stronger — clear methodology, honest framing, three-stage evaluation |
+| 7qMrDf9zFU.md (noise injection data selection) | 4.75 | Roughly comparable — both have methodology concerns, but OptBatch has more fundamental issues (Hessian misrepresentation) |
+| dCTGFl3lN2.md (BIDS, influence-based selection) | 4.25 | Slightly weaker than BIDS — OptBatch has misrepresentation issues BIDS does not |
+| EOPLy80bBm.md (pruning study) | 3.00 | OptBatch is somewhat better — more genuine contribution, despite reporting issues |
+| cHy00K3Och.md (GRADSIMCORE) | 2.50 | OptBatch is clearly better — more substantial evaluation |
 
-**Reasoning:** OptBatch proposes a reasonable-sounding approach but the method is critically underspecified (no pseudocode, missing hyperparameters), the theoretical motivation does not connect to the algorithm, there is no ablation study, and the main evaluation metric is partially circular. The FLOPs analysis is incomplete and no wall-clock measurements are provided. These issues are more severe than those in the 4.75-anchors (which at least had clear method descriptions). The paper is above the 3.00-anchor because it does have some genuine strengths (multiple datasets, human evaluation, a plausible core idea). However, the method underspecification alone makes the paper unpublishable in its current form.
-
-**Score:** 3.5
-
-**Decision:** Reject
+The paper introduces a reasonable idea (stratified sampling + diversity maximization) and provides breadth of evaluation. However, two verified issues are serious: (1) the "Hessian gradient" is a factual misrepresentation that the paper's claimed innovation rests on, and (2) the main experimental evidence (loss curves) never specifies whether it is training or test loss, making the central quantitative claims uninterpretable. The Lipschitz section is a placeholder. These are not terminal flaws — the core method may be sound — but they are too significant for acceptance in the current form. The paper needs major revision before it can support its conclusions.
 
 MY FINAL SCORE: <score>3.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

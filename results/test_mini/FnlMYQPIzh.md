@@ -1,87 +1,94 @@
-Now I have sufficient calibration. Let me produce the final consolidated review.
+Now I have all the context I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes ConvINT, a semi-structured intention framework that organizes user intentions into four aspects (situation, emotion, action, knowledge), grounded in psychological theories of semantic pointers. To scale annotation, the paper introduces WeRG (Weakly-supervised Reinforced Generation), which combines coarse (structured ontology mapping), mid (LLM-generated), and fine (human) annotations with tiered quadruple rewards in a KL-regularized RL objective. Experiments on DuRecDial and ESConv show that WeRG-generated ConvINT data improves downstream response generation, and ablation studies demonstrate contributions from each supervision source and each aspect.
+This paper introduces ConvINT, a semi-structured intention framework that decomposes user intent into four aspects (situation, emotion, action, knowledge), grounded in psychological and cognitive science theories. To generate ConvINT annotations at scale, the paper proposes WeRG (Weakly-supervised Reinforced Generation), which combines coarse-to-fine data sources (existing ontologies, LLM-annotated, and human-annotated) with tiered quadruple rewards in an RL fine-tuning objective. Experiments on DuRecDial and ESConv evaluate the quality of generated ConvINT annotations against prompting baselines and demonstrate downstream benefits for response generation.
 
 ## Strengths
 
-- **Principled, theory-grounded representation**: ConvINT draws explicitly on semantic pointers and cognitive intention theories (Schröder et al., 2014) to define four aspects (situation, emotion, action, knowledge) that are more structured than free-text summaries yet more flexible than rigid slot-value ontologies (Section 3.2). This synthesis of cognitive science with conversational AI is novel.
+- **Interdisciplinary theoretical grounding for the four-aspect framework**: The ConvINT formulation is explicitly grounded in psychological intention theories (Schröder et al., 2014) and the concept of semantic pointers (Eliasmith, 2013; Blouw et al., 2016). Section 3.2 provides a clear formal definition, distinguishing this work from purely engineering approaches that use rigid slot-value structures or unstructured free-text.
 
-- **Aspect-level tiered reward design**: WeRG assigns a quadruple reward $\langle r_s, r_e, r_a, r_k\rangle$ per annotation aspect with hierarchy $r_{\text{coarse}} < r_{\text{mid}} < r_{\text{fine}}$, going beyond prior RLFT work (e.g., Wang et al. 2024) that treats entire ground-truth sequences uniformly (Section 3.3, Eq. 2). This is a technically meaningful contribution to weakly-supervised annotation generation.
+- **Tiered quadruple reward design with causal ablation evidence**: Equation (2) introduces per-aspect quadruple rewards with a clear hierarchy (r_coarse < r_mid < r_fine). The ablation study (Table 3) shows that removing either the quadruple reward structure or any individual data source (D_coarse, D_mid, D_fine) leads to measurable degradation across all automatic metrics on DuRecDial, providing causal evidence that each component contributes.
 
-- **Consistent and substantial downstream gains**: Incorporating ConvINT annotations into response generation improves Success Rate from 0.452 to 0.783 and reduces Avg. Turns from 8.6 to 5.9 on DuRecDial with ChatGPT (Table 4). The gains are large and consistent across metrics and datasets.
+- **Consistent gains over prompting baselines across two datasets**: Tables 1 and 2 report that WeRG outperforms Direct Prompt and CoT Prompt (both zero-shot and few-shot) on F1, BLEU-1/2, BERTScore, BARTScore, and three human-evaluation axes on both DuRecDial and ESConv, with Fleiss' Kappa in the fair-to-moderate range.
 
-- **Informative ablation studies**: Ablations show that removing mid-level supervision ($\mathcal{D}_{\text{mid}}$) causes the largest performance drop (Table 3), confirming that LLM-annotated examples bridge coarse mappings and scarce human labels. Removing individual aspects (especially [EMOTION] on ESConv) degrades downstream performance (Table 5), validating each aspect's distinct contribution.
+- **Systematic ablation on weak supervision composition**: Section 4.5.1 isolates the contribution of each data source. The largest performance drop occurs when removing D_mid (LLM-annotated data), a non-obvious finding suggesting that mid-quality annotations play a foundational role — this insight is practically useful.
+
+- **Downstream validation with aspect-level ablation**: Tables 4 and 5 show integrating ConvINT improves response generation Success Rate and Avg. Turns, and removing any single aspect (especially [EMOTION] on ESConv) reduces performance, demonstrating the framework's multidimensional design is functionally useful.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **No comparison against standard supervised fine-tuning (SFT) for WeRG (Table 1).** The method's core claim is that the RL-based reward hierarchy improves annotation quality, but Table 1 compares WeRG only against zero-shot and few-shot prompting baselines. An SFT baseline trained on the same $\mathcal{D}_{\text{coarse}} \cup \mathcal{D}_{\text{mid}} \cup \mathcal{D}_{\text{fine}}$ data — without the quadruple reward — is essential to attribute gains to the reward mechanism rather than simply to fine-tuning with more data. The ablation "w/o quadruple reward" (Table 3) partially addresses this but still uses the WeRG training framework without rewards, not a standard MLE-based SFT. Without this comparison, it is impossible to tell whether the 10+ point improvements over prompting come from fine-tuning itself or from the reward hierarchy.
+- **Missing SFT baselines prevent isolating the RL contribution**: The baselines in Table 1 and Table 2 are entirely prompting-based (Direct Prompt, CoT Prompt). The paper's main methodological contribution is the WeRG RL fine-tuning procedure, but there is no comparison against simpler supervised fine-tuning (SFT) baselines — e.g., SFT on D_fine (human annotations only) or SFT on the full D_WeRG dataset. Without these, it is impossible to determine whether the improvements come from (a) the RL objective with tiered rewards, or (b) simply from having any fine-tuning at all versus prompting. The paper itself acknowledges (Section 3.3) that "a straightforward method involves directly annotating high-quality ConvINT data using human annotators and performing SFT to optimize LLMs for generation," yet does not include this natural baseline in the experiments. This gap substantially weakens the claim that "Our method consistently surpasses all baselines."
 
-- **ConvINT's downstream benefit is not compared against alternative intention representations (Tables 4–5).** The paper compares response generation *with ConvINT* vs. *without any intention representation at all*. Showing that extra information helps is necessary but insufficient to validate ConvINT's specific semi-structured design. The paper's own framing criticizes both rigid structured ontologies *and* unstructured free-text summaries, yet neither is compared. A comparison against e.g., (a) free-text intent summaries generated by an LLM, or (b) standard intent+slot outputs integrated into the same backbone, would be needed to support the claim that ConvINT's particular structure is superior.
-
-- **WeRG method is under-specified on implementation details.** The base LLM used for WeRG policy $\pi_\theta$ is never named — only ChatGPT is mentioned as the downstream response generator (Table 4). The actual scalar reward values $r_{\text{coarse}}, r_{\text{mid}}, r_{\text{fine}}$ are not reported (only the ordering $<$ is stated). The exact sizes of $\mathcal{D}_{\text{coarse}}$, $\mathcal{D}_{\text{mid}}$, and $\mathcal{D}_{\text{fine}}$ per dataset are not given — only that fine-annotated data is 10% of total, which for ESConv (1,300 cases) means roughly 130 human examples. These omissions hurt reproducibility and make it difficult to assess whether the method's complexity is justified.
+- **Insufficient operational details for reproducibility**: (1) No concrete example of a ConvINT annotation is shown anywhere in the paper for either dataset — readers cannot see what the output format looks like. (2) The "hard mapping" used to transform existing structured interpretations into D_coarse labels is entirely unspecified. (3) The initial policy π_w is described only as "augmented by the weak supervision signals in D_WeRG" without specifying whether this means SFT on D_WeRG or some other procedure. (4) Reward values are given only as relative ordering (r_coarse < r_mid < r_fine) with no actual numbers reported. These omissions collectively prevent reproduction and independent verification of the method.
 
 ### Minor
 
-- **Inter-annotator agreement is reported only on overall quality ratings, not on the ConvINT aspect assignments themselves.** The paper reports Fleiss' $\kappa$ (0.21–0.42) for overall quality (Informativeness, Understanding, Conciseness), which is standard. However, there is no evidence that human annotators can reliably distinguish Situation from Action from Knowledge as separate categories. If annotators cannot agree on aspect boundaries, then automatic metrics against gold labels measure something different from what the paper claims. Annotation guidelines and examples are not provided.
+- **Downstream evaluation lacks the most informative control**: Table 4 shows that incorporating ConvINT annotations improves response generation over a vanilla ChatGPT or CoT prompt. However, the appropriate control is to add *other* forms of context of comparable length (e.g., an unstructured free-text summary of the user's state generated by the same LLM). Without this, it is unclear whether the benefit comes from the semi-structured organization of ConvINT or simply from providing more information to the response generator.
 
-- **No variance/error bars reported for automatic metrics.** All results in Tables 1–5 are point estimates without standard deviations or confidence intervals. Given the stochastic nature of LLM generation, this omission makes it hard to assess the reliability of reported improvements, especially for smaller differences.
-
-- **Backbone model for downstream experiments on ESConv (Table 5) is not stated.** Table 4 specifies ChatGPT, but Table 5 does not identify the response generation model used for ESConv. This makes the results partially uninterpretable.
-
-- **Human evaluation sample size is small.** 50 conversations per dataset with 3 annotators is acceptable but modest. Confidence intervals on human scores would strengthen the conclusions.
+- **Human evaluation on only 50 samples with moderate agreement**: The human evaluation uses three annotators on 50 randomly sampled conversations per dataset. Fleiss' Kappa ranges 0.2–0.6, which is fair to moderate. The paper does not discuss this as a limitation. While 50 samples is acceptable for a pilot study, the small sample size combined with moderate agreement warrants caution in interpreting the human evaluation results.
 
 ### Trivial
-
-None that are not parser artifacts.
+None.
 
 ## Nice-to-Haves
 
-- A comparison against a "free-text summary" variant of intention representation in the downstream experiment would broaden the paper's scope and strengthen the ConvINT claim.
-- Reporting the actual reward values used (even if simple, e.g., coarse=0.3, mid=0.6, fine=1.0) and the base LLM for WeRG would improve reproducibility.
+- A comparison against providing unstructured context of comparable length in the downstream task (to isolate the benefit of the semi-structured format).
+- Sensitivity analysis of the exact reward values (the paper only specifies a relative ordering).
+- An error/qualitative analysis showing what kinds of mistakes WeRG makes compared to human annotations.
+- A cost-quality analysis quantifying how much human annotation budget is saved by using WeRG versus fully human-annotated data.
 
 ## Removed Points
 
-- *Criticism that WeRG method is "critically underspecified" / "black box" / RL algorithm unknown*: The paper provides the full KL-regularized RL objective (Eq. 3) and derives the optimal solution to a closed-form KL minimization (Eq. 4), following a standard formulation from prior work (Wang et al. 2024, Korbak et al. 2022). The mathematical framework is clearly specified. The missing details (base model, reward values) are genuine but are implementation details, not a missing algorithm. (Moved from "structural flaw" to "implementation detail gap" — now covered in Major point 3 above.)
+These points are flagged to be removed, treat them with caution:
 
-- *Claim that ConvINT framework definitions are "vague and overlapping"*: The definitions (Section 3.2, lines 70–76) are concise but not overlapping: situation = physical/situational features, emotion = emotional states, action = intended actions, knowledge = entities and relevant knowledge. These are standard distinctions in intention theory. The lack of inter-annotator agreement on aspects is a real concern (kept as Minor), but the claim that definitions themselves are not distinguishable is not supported.
-
-- *Criticism that downstream model details are completely missing*: Actually partially addressed — Table 4 specifies ChatGPT; only Table 5 is ambiguous. Already covered in Minor weaknesses.
-
-- *Strength Finder's generic strengths removed*: Some strengths were generic ("addresses an important problem," "interesting in principle") — these were dropped as they conflict with verified weaknesses or lack specific evidence. The remaining strengths are concrete and grounded.
+- The Harsh Critic's claim that "this is not an apples-to-oranges comparison; it is an apples-to-nothing comparison" — this is hyperbolic. The comparison against prompting baselines is imperfect but not worthless; the paper does show that WeRG outperforms these baselines.
+- The Harsh Critic's demand for "the exact output format (e.g., must the model output [SITUATION] ... [EMOTION] ...?)" — While examples would help, the paper's description of the four aspects and the definition "⟨s_i, e_i, a_i, k_i⟩" is sufficiently clear for a research paper, and the specific delimiters are a trivial implementation detail.
+- The Strength Finder's claimed strength about "the paper is generally well-written" — generic and superficial; removed per instructions.
+- The Strength Finder's claimed "significant gains in downstream tasks" — overstated given the baseline limitations; the actual results are gains over prompting baselines but this conflicts with the verified weakness about incomplete comparisons.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key tension is between a genuinely well-motivated framework and experimental design that does not cleanly isolate the method's specific contribution from simpler alternatives (fine-tuning quantity vs. reward mechanism, representation presence vs. ConvINT-specific structure).
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add an SFT baseline** for Table 1: train the same base LLM via standard supervised fine-tuning on the combined $\mathcal{D}_{\text{coarse}} \cup \mathcal{D}_{\text{mid}} \cup \mathcal{D}_{\text{fine}}$ data. Compare to WeRG (with rewards) to isolate the effect of the reward hierarchy.
-2. **Add an alternative representation baseline** for the downstream experiment (Table 4): compare ConvINT against, e.g., LLM-generated free-text summaries of intent, to show ConvINT's specific advantage.
-3. **Report the base LLM** used for WeRG training, the exact reward scalar values, and dataset sizes ($|\mathcal{D}_{\text{coarse}}|$, $|\mathcal{D}_{\text{mid}}|$, $|\mathcal{D}_{\text{fine}}|$) for each dataset.
-4. **Report inter-annotator agreement per ConvINT aspect** to validate that the four categories are reliably distinguishable, and provide annotation guidelines.
+1. **Add SFT baselines**: The most critical addition is comparing WeRG against (a) SFT on D_fine only, (b) SFT on the full D_WeRG dataset without RL. This would directly test whether the RL objective and tiered rewards add value beyond standard supervised learning.
+
+2. **Provide concrete annotation examples**: Show one conversation turn from each dataset (DuRecDial and ESConv) with the human-written ConvINT annotation, the WeRG-generated annotation, and annotations from baseline methods. This would make the framework concrete and allow qualitative comparison.
+
+3. **Specify implementation details**: Report the exact reward values used (e.g., r_coarse=0.3, r_mid=0.6, r_fine=1.0 or whatever the actual numbers are), clarify how π_w is initialized (presumably SFT on D_WeRG), and describe the mapping procedure from existing ontologies to ConvINT aspects.
+
+4. **Add downstream control**: In Table 4, add a condition where the response generator receives an unstructured free-text summary of the user's state (generated by the same LLM) of comparable length to the ConvINT annotation, to isolate the benefit of the semi-structured format.
+
+5. **Discuss human eval limitations**: Acknowledge the small sample size and moderate inter-annotator agreement as limitations.
 
 ## Score and Decision
 
-**Calibration anchors** (all from the human-review corpus):
+**Calibration anchors used:**
 
-| Path | Avg Score | How It Compares |
-|------|-----------|-----------------|
-| `/home/.../nY9nITZQjc.md` (MIntRec2.0) | 6.50 | Stronger: well-validated benchmark with clear, self-contained contribution; fewer experimental gaps |
-| `/home/.../2kvDzdC5rh.md` (IntentGPT) | 4.40 | Comparable: interesting LLM-based framework but missing key baselines that would validate claimed contributions |
-| `/home/.../Rp3DjldbSc.md` (ICConv) | 4.00 | Comparable: decent contribution but experimental gaps in evaluation design |
-| `/home/.../WEQS3oUPs3.md` (Zero-Shot GD) | 5.33 | Stronger: more complete experimental validation of the core idea despite similar ambition level |
-| `/home/.../oBmaLuEJda.md` (BMLM) | 3.00 | Weaker: more severe novelty and reproducibility issues |
-| `/home/.../RuY1r1PDdQ.md` (FAITHQA) | 3.00 | Weaker: significant clarity and detail problems throughout |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/ICConv (Rp3DjldbSc.md) | 4.00 | Similar baseline/methodology concerns but weaker contribution overall; ConvINT has better theoretical grounding and cleaner ablations |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/Bayesian WeakS-to-Strong (pHe4P1IVnb.md) | 5.50 | Similar concerns about baseline completeness but was accepted; ConvINT has a larger gap in its experimental validation |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/MIntRec2.0 (nY9nITZQjc.md) | 6.50 | Stronger empirical validation and clearer contribution as a resource paper; ConvINT has more novel methodology but weaker experiments |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/Tokenwise Reward-Guided (KMWGzQi7Qy.md) | 5.50 | Had novelty concerns but stronger theoretical analysis; ConvINT is comparable in ambition but has larger empirical gaps |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/Your Weak LLM (sGqd1tF8P8.md) | 6.80 | Significantly stronger experimental validation and comprehensiveness; ConvINT has more methodological novelty but substantially weaker evidence |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/USDC (Eaw1ZrsNUN.md) | 6.25 | Stronger empirical backbone despite being rejected; ConvINT has more innovative framework design but less rigorous evaluation |
 
-The ConvINT paper presents a well-motivated framework and interesting technical ideas, but the experimental evaluation has two structurally important gaps: (1) WeRG is not compared against standard SFT, making it impossible to attribute gains to the reward mechanism vs. simply fine-tuning with more data, and (2) ConvINT's downstream benefit is compared against "no representation" rather than against alternative representations, overclaiming. These issues place it in the 4.0–4.4 range — comparable to IntentGPT/ICConv — as a paper with promising ideas but incomplete validation relative to its stated claims.
+The paper proposes a genuinely novel framework (ConvINT) and a clever method (WeRG) for scaling annotation. However, the experimental validation has a critical gap: the absence of SFT baselines means the paper cannot substantiate its central claim about WeRG's superiority, and the missing operational details (no examples, unspecified reward values, unclear π_w initialization) hurt reproducibility. The core ideas have merit, but the evidence is not yet convincing enough at the level of a top-tier conference paper. The paper would be strengthened by adding the missing baselines and implementation details.
 
-MY FINAL SCORE: <score>4.0</score>
+**Originality**: Good — the ConvINT framework is a novel synthesis of cognitive science theories with conversational AI.  
+**Importance**: Good — scalable intention understanding is a real bottleneck.  
+**Claims support**: Weak — the main claim of superiority is not adequately supported by the baseline set.  
+**Soundness**: Fair — the experiments are well-structured but missing critical control conditions.  
+**Clarity**: Good — the paper is well-organized and the method is explained clearly at a conceptual level, though missing concrete examples.  
+**Value**: Moderate — the framework has potential but needs stronger validation.
+
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,91 +1,89 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have enough information to write the final consolidated review.
 
 ## Summary
 
-This paper proposes Predictive Differential Training (PDT), a framework that uses Koopman operator theory (via Dynamic Mode Decomposition) to selectively predict future neural network weights during training. The key innovation is a masking strategy (quantity + direction criteria) that identifies which individual parameters are amenable to accurate prediction, combined with an acceleration scheduler that falls back to standard SGD when predictions are unreliable. The method is designed as a plug-in compatible with SGD, momentum SGD, and Adam.
+This paper proposes Predictive Differential Training (PDT), which applies Koopman operator theory (via DMD) to predict network weights several epochs ahead but selectively applies these predictions only to a subset of parameters deemed to have "good" prediction quality, based on a mask combining magnitude and directional consistency criteria. PDT includes an acceleration scheduler that reverts to standard SGD when prediction quality is poor. Experiments on FCN, AlexNet, ResNet-50, and ViT-Base across SGD, momentum, and Adam show consistent epoch reduction to reach baseline's best loss.
 
 ## Strengths
 
-- **Novel and well-motivated selective prediction strategy**: The paper clearly identifies and demonstrates (Fig. 2) that applying Koopman predictions to *all* weights fails on larger models, and proposes a principled masking strategy (Eqs. 8–9) to address this. The observation that random mask prediction leads to gradient explosion (Fig. 7) while random acceleration of weight subsets causes instability (Fig. 6) provides direct evidence that the mask selection matters.
+- **Novel selective masking for Koopman-based prediction**: Prior Koopman training methods apply predictions globally and fail on large models (Fig. 2). PDT's parameter-level mask (Eqs. 8–9) that jointly checks magnitude and directional consistency directly addresses this limitation. The ablation experiments (Figs. 6–7) confirm that random prediction application causes gradient explosion (NaN values) while PDT remains stable — demonstrating that the mask is the critical component.
 
-- **Meaningful empirical observations about training dynamics**: The masking ratio curves in Fig. 5 are genuinely interesting — the finding that masked ratio drops sharply for complex models (ResNet-50, ViT-Base) and the dynamics of its evolution over training offer nontrivial insights about the predictability of weight trajectories in deep networks. The paper surfaces this as a finding worth further investigation.
+- **Consistent validation across diverse architectures and optimizers**: The paper evaluates PDT on FCN, AlexNet, ResNet-50, and ViT-Base using three optimizers (SGD, momentum, Adam) on CIFAR-10 and ImageNet. This breadth of evaluation, with 5 random seeds, is commendable and demonstrates generality beyond small-scale settings.
 
-- **Runtime savings demonstrated across diverse architectures**: Table 1 reports runtime reductions of 17.8%–29.2% across FCN, AlexNet, ResNet-50, and ViT-Base on CIFAR-10 and ImageNet. These savings are measured under a consistent experimental protocol with five seeds.
+- **Negative result on validation-loss-based scheduling is informative**: Fig. 8 shows that switching between prediction and SGD based on validation loss (following Tano et al., 2020) causes unrecoverable divergence. This honest negative result motivates why parameter-level masking is necessary and distinguishes PDT from prior work.
 
-- **Plug-in compatibility with multiple optimizers**: PDT is implemented on top of SGD, momentum SGD, and Adam (Sec. 4.1), and shows convergence improvements over each respective baseline. This supports the claim that the framework can work as an add-on to existing optimizers rather than requiring a full retooling.
+- **Hyperparameter analysis provides practical guidance**: Fig. 9 systematically studies prediction steps, interval, starting epoch, and snapshot counts, revealing trade-offs (e.g., prediction beyond 9 steps causes gradient explosion). This is more thorough than typical for this line of work.
 
-- **Honest complexity analysis**: Section 3.3 provides a clear breakdown showing that the SVD overhead (O(N×h²)) is small relative to per-epoch gradient computation (O(S×N)) since predictions happen at epoch level and h (past snapshot count) is small (5–10).
+- **Computational complexity analysis**: Section 3.3 provides a clear 𝒪(Nh²) analysis for SVD with small h (5–10), explaining why the per-epoch overhead is bounded. The analysis is standard but appropriate for the method.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No test set evaluation anywhere in the experiments**: The abstract claims "lower training/testing loss" and the contribution promises "no performance sacrifice," yet **every single loss curve in Figures 5–9 shows only training loss**. Table 1 reports runtime but no test accuracy or test loss. The sole exception is Figure 8, which shows validation loss for a failed baseline, not for PDT. Without test set results, the paper's central claim — that PDT accelerates training *without harming generalization* — cannot be evaluated. Faster convergence to lower training loss is trivially achievable via overfitting, and the reader has no way to rule this out. The paper itself acknowledges in its future work (Sec. 5) that generalization properties like loss surface sharpness need investigation, confirming this gap is recognized. This is the single most important weakness and must be addressed before the claims can be taken at face value.
+1. **No wall-clock time comparison to support the central acceleration claim**: The paper's core value proposition is "accelerated learning," yet the evidence rests entirely on epoch reduction. Table 1 (Runtime comparison) reportedly shows that PDT increases per-epoch runtime in every configuration (e.g., ResNet-50: 185s → 207s, ViT: 338s → 383s). The paper never reports total training time to reach a target loss — the only metric that matters for "acceleration." If PDT reduces epochs by 10% but each epoch takes 15% longer, the net effect is *slower* training. This omission undermines the paper's primary claim. The authors should report training loss vs. wall-clock time and the time required to reach the baseline's best loss.
+
+2. **Abstract claims "lower training/testing loss" but test loss is not reported in the main experiments**: The abstract states PDT achieves "lower training/testing loss," yet Fig. 5 (the main generalization study) shows only training loss curves. Validation loss appears only in Fig. 8, which is a separate negative-result experiment. The paper's claim of generalization benefit is unsupported. Test/validation loss curves for the main PDT comparisons are essential.
 
 ### Minor
 
-- **Mask criteria are validated only against degenerate baselines**: The masking strategy is compared only against (a) random subsets with accelerated learning rates and (b) random subsets of predicted weights. While these comparisons show that the masking *matters*, they do little to validate that the *specific* quantity and direction criteria are well-designed — almost any non-random heuristic would beat random. The paper never ablates the two criteria individually to demonstrate that both are necessary, nor evaluates the mask against direct metrics like prediction error on held-out epochs.
+3. **Ablation baselines are too weak to isolate the contribution of the Koopman predictor**: Figs. 6–7 compare PDT only against *random* selection of weights to accelerate or to apply predictions. Unsurprisingly, random selection performs poorly. The paper does not compare against equally cheap heuristics, such as selecting parameters with the largest absolute gradient, parameters with largest recent variance (prediction uncertainty), or using the same mask criteria but with a simpler predictor (e.g., linear extrapolation of recent weights). Without such comparisons, it is impossible to tell whether the Koopman-based prediction is responsible for the improvement or whether *any* non-random selection heuristic applied to the same subset would work. The ablation establishes that the mask matters, but not that the Koopman predictor within the mask matters.
 
-- **Missing comparison to simpler acceleration techniques**: The paper compares PDT to unadorned baselines (SGD, momentum SGD, Adam with CosineAnnealingLR) and random masking. It does not compare against simpler alternatives that could achieve similar speedups — for example, applying the Koopman prediction to *all* weights with a global damped step size, or using a learning-rate multiplier for parameters with consistent gradient direction. These comparisons would help isolate whether the benefit comes from selective prediction or simply from differential learning rates.
-
-- **Abstract overclaims relative to what is shown**: The abstract states the method achieves "lower training/testing loss" but no test results are reported. The paper should either report test results or retract the claim.
+4. **Mask criteria are heuristic and the temporal ordering needs clarification**: The two criteria (Eqs. 8–9) compare the predicted τ-step change to the one-step SGD change. While the intuition (avoid gradient explosion) is reasonable, no principled justification is given for why this specific comparison signals "good" prediction. The notation w_{i+1}^{opt} appears to refer to a just-completed SGD step, making the mask computable without future information — but the paper never states the precise sequence of operations (e.g., "at epoch i, take an SGD step to obtain w_{i+1}^{opt}, then compute the mask, then apply predictions"). A clear timing diagram or pseudocode would resolve this ambiguity and is necessary for reproducibility.
 
 ### Trivial
 
-- The toy example in Sec. 3.2 (six-variable synthetic function) is weakly connected to the main contribution — it illustrates differential learning rates but does not involve Koopman prediction or the dynamics that make the method novel. It would be more effective replaced with a synthetic training-dynamics experiment where prediction error vs. mask quality can be directly measured.
+5. **The toy example (Section 3.2) does not motivate the PDT framework**: The six-variable minimization example only shows that increasing a subset's learning rate can help — a trivial observation that applies to virtually any adaptive learning rate method. It does not involve prediction, Koopman operators, or the masking strategy. This example could be misleading if readers interpret it as validation of the PDT approach.
 
-- The notation in Eq. 8 compares $\|w_{i+\tau}^{\text{pred}} - w_i^{\text{pred}}\|$ (both from prediction) with $\|w_{i+1}^{\text{opt}} - w_i^{\text{opt}}\|$ (both from optimization). A clearer formulation would contrast the *predicted change* over τ steps against the *SGD change* over one step, using consistent reference points.
+6. **No test loss reported for main experiments** (see Major issue 2 — also noted here for completeness).
 
 ## Nice-to-Haves
 
-- **Add test performance (accuracy/loss) for all models in Sec. 4.1.** This is the single highest-leverage addition for strengthening the paper's claims.
-- **Report error bars or confidence intervals** for all metrics (training loss, test accuracy, runtime). The paper mentions five seeds but shows no variation in any figure.
-- **Ablate the mask criteria individually**: run PDT with only the quantity criterion, only the direction criterion, and both, showing the effect on training stability and final loss.
-- **Compare to a simple acceleration baseline** like a learning-rate multiplier for parameters with consistent gradient direction — this would isolate the benefit of prediction from the benefit of differential learning rates.
-- **Clarify why the one-step SGD update (epoch i→i+1) is a good proxy** for evaluating τ-step prediction quality (epoch i→i+τ). The mask relies on this alignment, but the justification is missing.
+- A streaming DMD variant (Hemati et al., 2014) could reduce the per-epoch memory and computational overhead, making the method more practical for large models.
+- Investigating the masked ratio as an early-stopping indicator (mentioned in §5) is interesting but speculative — evaluating this would strengthen the paper.
+- Analyzing prediction error for masked vs. unmasked weights (actual MSE vs. true future weight) would directly verify that the mask identifies "good" predictions.
 
 ## Removed Points
 
-These points were raised in reviewer comments but are removed or weakened per the meta-review rules:
+- **"Masking requires future information"**: Removed as a misunderstanding. The notation w_{i+1}^{opt} naturally refers to a just-completed SGD step, which is available before the mask is computed. The issue is a presentation ambiguity (noted in Minor point 4), not a structural impossibility. The reviewer's claim that this is "potentially fatal" is incorrect.
 
-- *Criticism about unreleased/not-available baselines*: The paper's references are assumed to exist; this was a reviewer knowledge gap.
-- *Criticism about missing related works*: Not verifiable without external sources.
-- *Criticism about formatting, typos, or garbled text*: Parser artifacts, not author errors.
-- *Criticism that PDT is not compared to Nesterov momentum or one-cycle schedulers*: The paper uses CosineAnnealingLR (itself an acceleration schedule) and momentum SGD (which subsumes Nesterov's core idea). Requesting every possible acceleration baseline is scope creep and is moved to Nice-to-Haves.
-- *Strength Finder's generic praise* ("this paper addressed an important problem") — removed as superficial. The concrete strengths are listed above.
-- *Claim that the masking criteria "add no algorithmic grounding" because they cite neuroscience*: The neuroscience citation provides intuition; the criteria themselves are mathematically defined and algorithmically operationalized. The criticism is a strawman.
-- *Claim that the direction criterion is "extremely restrictive" without justification*: The paper provides a rationale (ensuring monotonic movement in the SGD direction) and shows empirically that it works. This is a design choice, not a weakness per se.
+- **Critique about missing appendix content**: Removed per instructions — the parser strips these sections; they exist in the original submission.
+
+- **"No evidence that PDT achieves actual wall-clock speedup" — the specific claim about Table 1 showing per-epoch runtime**: While the underlying concern (missing wall-clock comparison) is valid and kept as Major point 1, the reviewer's framing that the paper provides *no* runtime data is slightly overstated since Table 1 is titled "Runtime comparison." The paper does provide *some* runtime data, just not the right comparison (total time to target loss).
+
+- **Complaints about formatting, typos, or missing symbols**: Removed as parser artifacts.
+
+- **Complaint about unrelatedness of the neuroscience reference**: The reference is brief context, not central to the method. This is a nitpick.
+
+- **Strength Finder claims that conflict with verified weaknesses**: None directly conflict. All kept strengths are concrete and specific.
 
 ## Novel Insights
 
-None beyond the paper's own contributions — the reviews do not surface a novel perspective that the paper itself does not already articulate.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add test accuracy/loss for every experiment in Sec. 4.1.** This is the single most impactful change. Show that the faster training loss reduction translates to faster test loss reduction (or at minimum, that final test accuracy is not degraded).
-2. **Ablate the two mask criteria individually** to demonstrate that both the quantity and direction constraints are necessary; show the effect of each criterion in isolation.
-3. **Replace or supplement the toy example** (Sec. 3.2) with a small-scale training-dynamics experiment where prediction error vs. mask quality can be directly measured, connecting the intuition to the actual Koopman prediction framework.
-4. **Add a baseline that applies Koopman predictions to all weights but with a globally damped step size**, to test whether selectivity per parameter is what matters, not just damping.
-5. **Clarify the notation in Eq. 8** so that the two quantities being compared share a consistent starting reference point.
+1. Add a wall-clock time comparison: plot training loss vs. real time for baseline and PDT, and report the time (in seconds) required to reach the baseline's best loss for each configuration in Table 1.
+2. Add test/validation loss curves alongside training loss in Fig. 5 to support the claimed generalization benefits.
+3. Compare the mask criteria against non-random selection heuristics (e.g., gradient-norm-based selection, linear extrapolation predictor with the same mask) to isolate the value of the Koopman predictor.
+4. Provide pseudocode or a step-by-step timing diagram showing the exact sequence of SGD steps, DMD computation, mask evaluation, and prediction application.
+5. Remove or replace the toy example with a small neural network experiment where prediction is actually used.
 
 ## Score and Decision
 
-**Calibration anchors (retrieved from human-review corpus):**
+### Calibration Anchors
 
-| Path | Avg Score | Comparison to this paper |
-|------|-----------|------------------------|
-| `xpmDc76RN2.md` (PDE operator networks) | 2.33 | Lower quality — incomplete proofs and unclear methodology. This paper has a clearer, more novel idea and more experimental evidence, though both share incomplete validation. |
-| `1MHgMGoqsH.md` (MPC-BP-FF unification) | 3.00 | Similar tier. Both papers propose novel training frameworks with incomplete experimental support. This paper has stronger empirical observations (masking ratio curves) but the MPC paper has theoretical analysis this paper lacks. |
-| `LwAG269lIq.md` (PDE discovery adjoint) | 3.00 | Similar quality. Both have interesting ideas with incomplete validation. This paper's idea is arguably more novel in its domain, but the missing test evaluation is a comparable gap. |
-| `BI1N3lTWtn.md` (Multi-level training acceleration) | 5.75 | Higher quality. Stronger experimental validation with clear performance numbers and baselines. This paper has a more novel idea but weaker experimental support. |
-| `fkrYDQaHOJ.md` (Koopman RL dynamics) | 5.50 | Higher quality. More comprehensive experiments and clearer contribution articulation, though the Koopman connection is looser. |
-| `vcJiPLeC48.md` (Gradient-free RNN training) | 6.00 | Higher quality. Stronger experimental validation across multiple domains, though some concerns about novelty of the Koopman connection. This paper's masking insight is more novel. |
-| `hNjCVVm0EQ.md` (MamKO Koopman control) | 7.50 | Substantially higher quality. Comprehensive experiments, clear writing, and well-supported claims. This paper does not reach this level. |
+| Path | Avg Score | Comparison |
+|------|-----------|-----------|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/7AB077M4TY.md` | 3.50 (Reject) | Similar topic (Koopman training dynamics) but weaker experiments. This paper is better. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/CtM5xjRSfm.md` | 7.00 (Accept) | Much stronger — rigorous benchmarking competition analysis with wall-clock comparisons. This paper is not at this level. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vcJiPLeC48.md` | 6.00 (Reject) | Koopman-based RNN training with more complete evaluation. This paper is slightly weaker. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/BjaHYhr7VS.md` | 4.75 (Reject) | Differential learning rate paper with similar evidential gaps (no wall-clock time). Comparable quality. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/c9xsaASm9L.md` | 4.25 (Accept) | Training dynamics modeling paper. Similar breadth but the current paper has stronger architecture coverage. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/BUpdp5gETF.md` | 2.50 (Reject) | Much weaker paper. This paper is significantly better. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/IZbthMfqad.md` | 5.75 (Reject) | Koopman-layered model paper. More theoretical but less experimental validation. Comparable. |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/fkrYDQaHOJ.md` | 5.50 (Accept) | Koopman for RL dynamics. Different domain, similar quality. |
 
-**Score and Decision Rationale:** The paper presents a genuinely novel and well-motivated idea — selective Koopman prediction guided by training dynamics. The masking strategy is principled, the observations about masking ratio dynamics are interesting, and the runtime savings are demonstrated across diverse architectures. However, the experimental validation has a critical gap: the paper claims "lower testing loss" in the abstract but never evaluates on held-out data. Without test set results, the core claim about maintaining generalization while accelerating training is unsubstantiated. The baseline comparisons are adequate but not comprehensive, and the mask criteria are not individually ablated. The paper sits between the low-score (~3) and medium-score (~5–6) anchors: the idea is stronger than the 3-range papers, but the experimental validation is weaker than the 5–6 range papers. A score of 4.0 reflects a paper with a promising idea that needs substantial strengthening of its experimental case.
+The paper proposes a genuinely novel idea — selective Koopman-based weight prediction — and validates it across a good range of architectures. However, the core claim of "accelerated learning" is not supported by wall-clock evidence (the per-epoch overhead is substantial and could negate epoch gains), and the claim of "lower testing loss" is unsubstantiated by the reported experiments. The ablation baselines are too weak to isolate what makes the method work. These gaps are addressable but currently undermine the paper's main conclusions.
 
-MY FINAL SCORE: <score>4.0</score>
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>
